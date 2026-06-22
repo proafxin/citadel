@@ -1,0 +1,34 @@
+
+services:
+  vllm-server:
+    image: vllm/vllm-openai:latest
+    container_name: citadel-inference-engine
+    restart: always
+    ipc: host # Important: Enables optimized shared memory for GPU tensor processes
+    ports:
+      - "${CITADEL_VLLM_PORT:-8099}:${CITADEL_VLLM_PORT:-8099}"
+    environment:
+      # 2. Interpolate your secure access token
+      - HF_TOKEN=${HF_TOKEN}
+    volumes:
+      # Mounts your host cache path so model files persist between runs
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      --model Qwen/Qwen3.5-9B
+      --quantization fp8
+      --kv-cache-dtype fp8
+      --max-model-len 8192
+      --gpu-memory-utilization 0.90
+      --max-num-seqs 16
+      --max-num-batched-tokens 16384
+      --enable-prefix-caching
+      --limit-mm-per-prompt '{"image": 1}'
+      --host 0.0.0.0
+      --port ${CITADEL_VLLM_PORT:-8099}
