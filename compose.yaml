@@ -10,6 +10,8 @@ services:
     environment:
       # 2. Interpolate your secure access token
       - HF_TOKEN=${HF_TOKEN}
+      # Reclaim fragmented (reserved-but-unallocated) VRAM; helps avoid compile-time OOM
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     volumes:
       # Mounts your host cache path so model files persist between runs
       - ~/.cache/huggingface:/root/.cache/huggingface
@@ -21,14 +23,15 @@ services:
               count: all
               capabilities: [gpu]
     command: >
-      --model Qwen/Qwen3.5-9B
+      Qwen/Qwen3.5-9B
       --quantization fp8
       --kv-cache-dtype fp8
-      --max-model-len 8192
-      --gpu-memory-utilization 0.90
-      --max-num-seqs 16
+      --max-model-len 16384
+      --gpu-memory-utilization 0.92
+      --max-num-seqs 20
       --max-num-batched-tokens 16384
       --enable-prefix-caching
       --limit-mm-per-prompt '{"image": 1}'
+      --mm-processor-kwargs '{"size": {"shortest_edge": 65536, "longest_edge": 12582912}}'
       --host 0.0.0.0
       --port ${CITADEL_VLLM_PORT:-8099}
