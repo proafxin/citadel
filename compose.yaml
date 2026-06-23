@@ -1,22 +1,35 @@
 
 services:
-  vllm-server:
-    image: vllm/vllm-openai:latest
-    container_name: citadel-inference-engine
+  # MinerU2.5-Pro document-parsing API (replaces the Qwen3.5 vLLM server).
+  # mineru-api = full pipeline behind REST: POST a file, get markdown + JSON-with-bboxes.
+  # The `mineru:latest` image is built once from MinerU's Dockerfile (docker/ in their repo);
+  # the build bundles the correct vLLM version, mineru-vl-utils, and the MinerU2.5-Pro model
+  # (MINERU_MODEL_SOURCE=local). It is NOT a public registry tag — see the build note.
+  mineru:
+    image: mineru:latest
+    container_name: citadel-mineru
     restart: always
-    ipc: host # Important: Enables optimized shared memory for GPU tensor processes
-    ports:
-      - "${CITADEL_VLLM_PORT:-8099}:${CITADEL_VLLM_PORT:-8099}"
+    ipc: host
     environment:
-      # 2. Interpolate your secure access token
-      - HF_TOKEN=${HF_TOKEN}
-      # Reclaim fragmented (reserved-but-unallocated) VRAM; helps avoid compile-time OOM
-      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      MINERU_MODEL_SOURCE: local
+    entrypoint: mineru-api
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "${CITADEL_MINERU_PORT:-8099}"
+      # add `--gpu-memory-utilization 0.5` here if VRAM-constrained (the 1.2B model leaves plenty on 24GB)
+    ports:
+      - "${CITADEL_MINERU_PORT:-8099}:${CITADEL_MINERU_PORT:-8099}"
+    ulimits:
+      memlock: -1
+      stack: 67108864
     volumes:
-      # Mounts your host cache path so model files persist between runs
+      # Persist model + compile caches across container recreation
       - ~/.cache/huggingface:/root/.cache/huggingface
-      # Persist vLLM's torch.compile / CUDA graph cache so cold starts skip recompilation
       - ~/.cache/vllm:/root/.cache/vllm
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:${CITADEL_MINERU_PORT:-8099}/health || exit 1"]
     deploy:
       resources:
         reservations:
@@ -24,19 +37,6 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: >
-      Qwen/Qwen3.5-9B
-      --quantization fp8
-      --kv-cache-dtype fp8
-      --max-model-len 16384
-      --gpu-memory-utilization 0.92
-      --max-num-seqs 20
-      --max-num-batched-tokens 16384
-      --enable-prefix-caching
-      --limit-mm-per-prompt '{"image": 1}'
-      --mm-processor-kwargs '{"size": {"shortest_edge": 65536, "longest_edge": 12582912}}'
-      --host 0.0.0.0
-      --port ${CITADEL_VLLM_PORT:-8099}
 
   redis:
     image: redis:7-alpine
