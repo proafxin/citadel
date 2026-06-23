@@ -1,6 +1,6 @@
 [project]
 name = "citadel"
-version = "0.1.0"
+version = "0.1.1"
 description = "Citadel: personal search engine"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -11,7 +11,9 @@ dependencies = [
     "datasets>=5.0.0",
     "fastapi[standard]>=0.138.0",
     "huggingface-hub>=1.20.1",
+    "openai>=2.43.0",
     "protobuf>=7.35.0",
+    "pymupdf>=1.27.2.3",
     "sentence-transformers>=5.5.1",
     "sentencepiece>=0.2.1",
     "spacy>=3.8.14",

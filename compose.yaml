@@ -15,6 +15,8 @@ services:
     volumes:
       # Mounts your host cache path so model files persist between runs
       - ~/.cache/huggingface:/root/.cache/huggingface
+      # Persist vLLM's torch.compile / CUDA graph cache so cold starts skip recompilation
+      - ~/.cache/vllm:/root/.cache/vllm
     deploy:
       resources:
         reservations:
@@ -35,3 +37,17 @@ services:
       --mm-processor-kwargs '{"size": {"shortest_edge": 65536, "longest_edge": 12582912}}'
       --host 0.0.0.0
       --port ${CITADEL_VLLM_PORT:-8099}
+
+  redis:
+    image: redis:7-alpine
+    container_name: citadel-redis
+    restart: always
+    ports:
+      - "${CITADEL_REDIS_PORT:-6379}:6379"
+    # Append-only persistence so Redis Streams (worker queues / pub-sub) survive restarts
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:
