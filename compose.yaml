@@ -18,7 +18,17 @@ services:
       - 0.0.0.0
       - --port
       - "${CITADEL_MINERU_PORT:-8099}"
-      # add `--gpu-memory-utilization 0.5` here if VRAM-constrained (the 1.2B model leaves plenty on 24GB)
+      # vLLM KV-cache budget (passthrough to the engine). 0.9 maximizes KV cache → concurrency
+      # headroom on the 24GB card; the 1.2B weights are only ~2.4GB.
+      - --gpu-memory-utilization
+      - "0.9"
+      # forwarded to vLLM: let continuous batching admit many windowed pages at once
+      # (KV cache at 0.9 has ample room on the 1.2B model; vLLM only admits what fits)
+      - --max-num-seqs
+      - "128"
+      # preload the VLM at startup so the first request doesn't eat the cold-start
+      - --enable-vlm-preload
+      - "True"
     ports:
       - "${CITADEL_MINERU_PORT:-8099}:${CITADEL_MINERU_PORT:-8099}"
     ulimits:
