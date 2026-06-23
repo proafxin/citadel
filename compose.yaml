@@ -25,8 +25,8 @@ services:
       memlock: -1
       stack: 67108864
     volumes:
-      # Persist model + compile caches across container recreation
-      - ~/.cache/huggingface:/root/.cache/huggingface
+      # Models are baked into the image at build time (mineru-models-download). Do NOT mount the
+      # host HF cache here — it shadows the baked-in model. Persist only the torch.compile cache.
       - ~/.cache/vllm:/root/.cache/vllm
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:${CITADEL_MINERU_PORT:-8099}/health || exit 1"]
