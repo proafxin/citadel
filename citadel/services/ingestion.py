@@ -73,7 +73,7 @@ async def submit_document(data: bytes, filename: str) -> str:
         mapping={"state": "queued", "filename": filename, "done_count": 0, "t0": time.time()},
     )
     await redis.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": filename})
-    logger.info("ingest doc=%s file=%s", doc_id, filename)
+    logger.info("ingest file=%s", filename)
     return doc_id
 
 
@@ -134,8 +134,8 @@ async def handle_normalize(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     await get_redis().hset(f"doc:{doc_id}", "state", "normalizing")
     kind = await asyncio.to_thread(normalize_file, str(_raw_dir() / doc_id), doc_id, fields["filename"])
-    await get_redis().xadd(STREAM_NORMALIZED, {"doc_id": doc_id, "kind": kind})
-    logger.info("normalize doc=%s kind=%s", doc_id, kind)
+    await get_redis().xadd(STREAM_NORMALIZED, {"doc_id": doc_id, "kind": kind, "filename": fields["filename"]})
+    logger.info("normalize file=%s kind=%s", fields["filename"], kind)
 
 
 # ---- paginate stage (CPU / process pool) ----------------------------------------------
@@ -162,19 +162,19 @@ async def handle_paginate(fields: dict[str, str]) -> None:
         md = (_norm_dir() / f"{doc_id}.md").read_text()
         await redis.hset(f"doc:{doc_id}", "page_count", 1)
         await record_page(doc_id, 0, [Block(type="text", page_idx=0, text=md)])
-        logger.info("paginate doc=%s text", doc_id)
+        logger.info("paginate file=%s text", fields["filename"])
         return
     if kind.startswith("image:"):
         image_bytes = (_norm_dir() / f"{doc_id}.{kind.split(':', 1)[1]}").read_bytes()
         await redis.hset(f"doc:{doc_id}", "page_count", 1)
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0, "image": image_bytes})
-        logger.info("paginate doc=%s image", doc_id)
+        logger.info("paginate file=%s image", fields["filename"])
         return
     pages = await asyncio.to_thread(render_pdf_pages, str(_norm_dir() / f"{doc_id}.pdf"), get_settings().render_dpi)
     await redis.hset(f"doc:{doc_id}", "page_count", len(pages))
     for idx, image_bytes in enumerate(pages):
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": idx, "image": image_bytes})
-    logger.info("paginate doc=%s pages=%d", doc_id, len(pages))
+    logger.info("paginate file=%s pages=%d", fields["filename"], len(pages))
 
 
 # ---- ocr stage (async I/O → vLLM via mineru-vl-utils) ----------------------------------
@@ -254,7 +254,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
     state = "partial" if any(b.type == "error" for b in blocks) else "done"
     await redis.hset(f"doc:{doc_id}", "state", state)
     t0 = float(await redis.hget(f"doc:{doc_id}", "t0") or 0)
-    logger.info("merge doc=%s state=%s blocks=%d dur=%.1fs", doc_id, state, len(blocks), time.time() - t0)
+    logger.info("merge file=%s state=%s blocks=%d dur=%.1fs", source, state, len(blocks), time.time() - t0)
     await cleanup(doc_id)
 
 
