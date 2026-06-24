@@ -1,22 +1,22 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(slots=True)
-class PageText:
-    page_number: int
-    text: str
-    truncated: bool = False
+class Block:
+    type: str  # text | title | table | image | equation | list | footer | header | page_number | ...
+    page_idx: int
+    bbox: list[int] = field(default_factory=list)
+    text: str = ""
+    text_level: int | None = None
+    list_items: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
-class DocumentText:
+class ParsedDocument:
     source: str
-    pages: list[PageText]
+    markdown: str
+    blocks: list[Block]
 
     @property
-    def full_text(self) -> str:
-        return "\n\n".join(page.text for page in self.pages)
-
-    @property
-    def truncated(self) -> bool:
-        return any(page.truncated for page in self.pages)
+    def page_count(self) -> int:
+        return max((b.page_idx for b in self.blocks), default=-1) + 1

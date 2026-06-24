@@ -1,10 +1,10 @@
 
 services:
-  # MinerU2.5-Pro document-parsing API (replaces the Qwen3.5 vLLM server).
-  # mineru-api = full pipeline behind REST: POST a file, get markdown + JSON-with-bboxes.
-  # The `mineru:latest` image is built once from MinerU's Dockerfile (docker/ in their repo);
-  # the build bundles the correct vLLM version, mineru-vl-utils, and the MinerU2.5-Pro model
-  # (MINERU_MODEL_SOURCE=local). It is NOT a public registry tag — see the build note.
+  # MinerU2.5-Pro raw VLM server (OpenAI-compatible). Driven per-page by our workers via
+  # mineru-vl-utils http-client (two_step_extract) — NOT the capped-at-3 mineru-api REST path.
+  # Only `--engine` is mineru-openai-server's own flag; --host/--port/--gpu-memory-utilization/
+  # --max-num-seqs are forwarded to vLLM. gpu-mem 0.6 leaves ~9.5GB for co-located embedders.
+  # `mineru:latest` is built from MinerU's Dockerfile (model baked in, MINERU_MODEL_SOURCE=local).
   mineru:
     image: mineru:latest
     container_name: citadel-mineru
@@ -12,23 +12,18 @@ services:
     ipc: host
     environment:
       MINERU_MODEL_SOURCE: local
-    entrypoint: mineru-api
+    entrypoint: mineru-openai-server
     command:
+      - --engine
+      - vllm
       - --host
       - 0.0.0.0
       - --port
       - "${CITADEL_MINERU_PORT:-8099}"
-      # vLLM KV-cache budget (passthrough to the engine). 0.9 maximizes KV cache → concurrency
-      # headroom on the 24GB card; the 1.2B weights are only ~2.4GB.
       - --gpu-memory-utilization
-      - "0.9"
-      # forwarded to vLLM: let continuous batching admit many windowed pages at once
-      # (KV cache at 0.9 has ample room on the 1.2B model; vLLM only admits what fits)
+      - "0.6"
       - --max-num-seqs
       - "128"
-      # preload the VLM at startup so the first request doesn't eat the cold-start
-      - --enable-vlm-preload
-      - "True"
     ports:
       - "${CITADEL_MINERU_PORT:-8099}:${CITADEL_MINERU_PORT:-8099}"
     ulimits:

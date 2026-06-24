@@ -1,14 +1,27 @@
-from typing import Annotated
+from fastapi import APIRouter, HTTPException, UploadFile
 
-from fastapi import APIRouter, File, UploadFile
-
-from citadel.schemas.document import DocumentText
-from citadel.services.ingestion import transcribe_pdf_bytes
+from citadel.services import ingestion
 
 router = APIRouter()
 
 
 @router.post("/ingest")
-async def ingest(file: Annotated[UploadFile, File()]) -> DocumentText:
-    data = await file.read()
-    return await transcribe_pdf_bytes(data, source=file.filename)
+async def ingest(files: list[UploadFile]) -> dict[str, list[str]]:
+    doc_ids = [await ingestion.submit_document(await f.read(), f.filename or "upload") for f in files]
+    return {"doc_ids": doc_ids}
+
+
+@router.get("/status/{doc_id}")
+async def status(doc_id: str) -> dict[str, str]:
+    state = await ingestion.get_status(doc_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="unknown doc_id")
+    return state
+
+
+@router.get("/result/{doc_id}")
+async def result(doc_id: str) -> dict:
+    payload = await ingestion.get_result(doc_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="result not ready")
+    return payload
