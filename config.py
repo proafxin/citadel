@@ -6,7 +6,7 @@ from pathlib import Path
 from loguru import logger as loguru_logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-CPU_HALF = max((os.cpu_count() or 2) // 2, 1)  # per-worker CPU stages: half the cores, at least 1
+CPU_THIRD = max((os.cpu_count() or 3) // 3, 1)  # per-worker CPU stages: a third of the cores, at least 1
 
 
 def configure_logging() -> None:
@@ -27,8 +27,8 @@ class Settings(BaseSettings):
 
     render_dpi: int = 200  # scanned / unknown-origin PDFs
     digital_render_dpi: int = 150  # office→pdf is born-digital (crisp vector text) → render smaller, cheaper prefill
-    normalize_concurrency: int = CPU_HALF  # one isolated libreoffice profile per worker (per-job soffice)
-    paginate_concurrency: int = CPU_HALF  # pdfium process-pool workers, one dedicated pdfium per process
+    normalize_concurrency: int = CPU_THIRD  # one isolated libreoffice profile per worker (per-job soffice)
+    paginate_concurrency: int = CPU_THIRD  # pdfium process-pool workers, one dedicated pdfium per process
     ocr_concurrency: int = 128  # client-side semaphore; matches vLLM max-num-seqs (128)
     merge_concurrency: int = 4  # light assembly
 
