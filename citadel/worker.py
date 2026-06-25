@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 import traceback
 import uuid
 from collections.abc import Coroutine
@@ -13,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 BLOCK_MS = 5000
 IDLE_MS = 60000
-CPU = os.cpu_count() or 4
 
 _tasks: set[asyncio.Task[None]] = set()
 
@@ -38,18 +36,21 @@ def _spawn(coro: Coroutine[Any, Any, None]) -> None:
     task.add_done_callback(_done)
 
 
-# ---- per-job work: bounded by the stage semaphore, settle on success, stay unacked on failure ----------
-async def _normalize_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes]) -> None:
+# ---- per-job work: bounded by the stage limiter, settle on success, stay unacked on failure ------------
+async def _normalize_job(profiles: asyncio.Queue[str], msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = ingestion.STREAM_INGEST
-    async with sem:
+    profile = await profiles.get()  # blocks until a libreoffice profile frees up → bounds concurrency
+    try:
         redis = ingestion.get_redis()
         fields = {k.decode(): v.decode() for k, v in raw.items()}
         if await redis.hincrby(f"attempts:{stream}", msg_id, 1) > ingestion.MAX_ATTEMPTS:
             await ingestion.fail_document(fields.get("doc_id", ""), "normalize")
             await _settle(stream, msg_id)
             return
-        await ingestion.handle_normalize(fields)
+        await ingestion.handle_normalize(fields, profile)
         await _settle(stream, msg_id)
+    finally:
+        profiles.put_nowait(profile)
 
 
 async def _paginate_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes]) -> None:
@@ -91,41 +92,43 @@ async def _merge_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes
         await _settle(stream, msg_id)
 
 
-# ---- normalize: read `ingest`, convert, write `normalized`. non-blocking, bounded concurrency ----------
+# ---- normalize: read `ingest`, convert, write `normalized`. one dedicated libreoffice profile per worker
 async def normalize() -> None:
     stream = ingestion.STREAM_INGEST
     redis = ingestion.get_redis()
     await ingestion.ensure_group(stream)
     consumer = uuid.uuid4().hex
-    sem = asyncio.Semaphore(CPU)
-    logger.info("consuming %s concurrency=%d", stream, CPU)
+    limit = get_settings().normalize_concurrency
+    profiles = ingestion.make_profile_pool(limit)
+    logger.info("consuming %s concurrency=%d", stream, limit)
     while True:
         _cursor, stale, _deleted = await redis.xautoclaim(
-            stream, ingestion.GROUP, consumer, min_idle_time=IDLE_MS, count=CPU
+            stream, ingestion.GROUP, consumer, min_idle_time=IDLE_MS, count=limit
         )
-        fresh = await redis.xreadgroup(ingestion.GROUP, consumer, {stream: ">"}, count=CPU, block=BLOCK_MS)
+        fresh = await redis.xreadgroup(ingestion.GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
         for msg_id, raw in stale + (fresh[0][1] if fresh else []):
-            _spawn(_normalize_job(sem, msg_id.decode(), raw))
+            _spawn(_normalize_job(profiles, msg_id.decode(), raw))
 
 
-# ---- paginate: read `normalized`, render pages, write `pages`. non-blocking, bounded concurrency -------
+# ---- paginate: read `normalized`, render pages, write `pages`. dedicated pdfium per process-pool worker
 async def paginate() -> None:
     stream = ingestion.STREAM_NORMALIZED
     redis = ingestion.get_redis()
     await ingestion.ensure_group(stream)
     consumer = uuid.uuid4().hex
-    sem = asyncio.Semaphore(CPU)
-    logger.info("consuming %s concurrency=%d", stream, CPU)
+    limit = get_settings().paginate_concurrency
+    sem = asyncio.Semaphore(limit)
+    logger.info("consuming %s concurrency=%d", stream, limit)
     while True:
         _cursor, stale, _deleted = await redis.xautoclaim(
-            stream, ingestion.GROUP, consumer, min_idle_time=IDLE_MS, count=CPU
+            stream, ingestion.GROUP, consumer, min_idle_time=IDLE_MS, count=limit
         )
-        fresh = await redis.xreadgroup(ingestion.GROUP, consumer, {stream: ">"}, count=CPU, block=BLOCK_MS)
+        fresh = await redis.xreadgroup(ingestion.GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
         for msg_id, raw in stale + (fresh[0][1] if fresh else []):
             _spawn(_paginate_job(sem, msg_id.decode(), raw))
 
 
-# ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. globally bounded concurrency ----------
+# ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. one global concurrency bound ----------
 async def ocr() -> None:
     stream = ingestion.STREAM_PAGES
     redis = ingestion.get_redis()
@@ -143,19 +146,20 @@ async def ocr() -> None:
             _spawn(_ocr_job(sem, msg_id.decode(), raw))
 
 
-# ---- merge: read `merge`, assemble result.json, clean up. non-blocking, bounded concurrency ------------
+# ---- merge: read `merge`, assemble result.json, clean up. light concurrency ----------------------------
 async def merge() -> None:
     stream = ingestion.STREAM_MERGE
     redis = ingestion.get_redis()
     await ingestion.ensure_group(stream)
     consumer = uuid.uuid4().hex
-    sem = asyncio.Semaphore(CPU)
-    logger.info("consuming %s concurrency=%d", stream, CPU)
+    limit = get_settings().merge_concurrency
+    sem = asyncio.Semaphore(limit)
+    logger.info("consuming %s concurrency=%d", stream, limit)
     while True:
         _cursor, stale, _deleted = await redis.xautoclaim(
-            stream, ingestion.GROUP, consumer, min_idle_time=IDLE_MS, count=CPU
+            stream, ingestion.GROUP, consumer, min_idle_time=IDLE_MS, count=limit
         )
-        fresh = await redis.xreadgroup(ingestion.GROUP, consumer, {stream: ">"}, count=CPU, block=BLOCK_MS)
+        fresh = await redis.xreadgroup(ingestion.GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
         for msg_id, raw in stale + (fresh[0][1] if fresh else []):
             _spawn(_merge_job(sem, msg_id.decode(), raw))
 

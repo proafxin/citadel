@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
@@ -46,6 +47,24 @@ def get_redis() -> aioredis.Redis:
 @lru_cache
 def get_mineru_client() -> MinerUClient:
     return MinerUClient(backend="http-client", server_url=get_settings().mineru_base_url)
+
+
+@lru_cache
+def get_paginate_pool() -> ProcessPoolExecutor:
+    # one process per worker → each gets its own pdfium (pdfium is not thread-safe; isolate by process)
+    return ProcessPoolExecutor(max_workers=get_settings().paginate_concurrency)
+
+
+def make_profile_pool(n: int) -> asyncio.Queue[str]:
+    # n dedicated LibreOffice profile dirs; a worker holds one per job so concurrent soffice don't collide
+    base = get_settings().data_dir / "lo_profiles"
+    base.mkdir(parents=True, exist_ok=True)
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    for i in range(n):
+        profile = base / str(i)
+        profile.mkdir(exist_ok=True)
+        queue.put_nowait(str(profile.resolve()))
+    return queue
 
 
 def _raw_dir() -> Path:
@@ -99,7 +118,7 @@ def _detect_ext(path: Path, filename: str) -> str:
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
 
-def normalize_file(raw_path_str: str, doc_id: str, filename: str) -> str:
+def normalize_file(raw_path_str: str, doc_id: str, filename: str, profile_dir: str) -> str:
     raw_path = Path(raw_path_str)
     ext = _detect_ext(raw_path, filename)
     _norm_dir().mkdir(parents=True, exist_ok=True)
@@ -108,7 +127,16 @@ def normalize_file(raw_path_str: str, doc_id: str, filename: str) -> str:
         if soffice is None:
             raise RuntimeError("libreoffice 'soffice' not found on PATH")
         subprocess.run(
-            [soffice, "--headless", "--convert-to", "pdf", "--outdir", str(_norm_dir()), str(raw_path)],
+            [
+                soffice,
+                f"-env:UserInstallation=file://{profile_dir}",
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(_norm_dir()),
+                str(raw_path),
+            ],
             check=True,
             capture_output=True,
         )
@@ -130,10 +158,10 @@ def normalize_file(raw_path_str: str, doc_id: str, filename: str) -> str:
     return "text"
 
 
-async def handle_normalize(fields: dict[str, str]) -> None:
+async def handle_normalize(fields: dict[str, str], profile_dir: str) -> None:
     doc_id = fields["doc_id"]
     await get_redis().hset(f"doc:{doc_id}", "state", "normalizing")
-    kind = await asyncio.to_thread(normalize_file, str(_raw_dir() / doc_id), doc_id, fields["filename"])
+    kind = await asyncio.to_thread(normalize_file, str(_raw_dir() / doc_id), doc_id, fields["filename"], profile_dir)
     await get_redis().xadd(STREAM_NORMALIZED, {"doc_id": doc_id, "kind": kind, "filename": fields["filename"]})
     logger.info("normalize file=%s kind=%s", fields["filename"], kind)
 
@@ -170,7 +198,10 @@ async def handle_paginate(fields: dict[str, str]) -> None:
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0, "image": image_bytes})
         logger.info("paginate file=%s image", fields["filename"])
         return
-    pages = await asyncio.to_thread(render_pdf_pages, str(_norm_dir() / f"{doc_id}.pdf"), get_settings().render_dpi)
+    loop = asyncio.get_running_loop()
+    pages = await loop.run_in_executor(
+        get_paginate_pool(), render_pdf_pages, str(_norm_dir() / f"{doc_id}.pdf"), get_settings().render_dpi
+    )
     await redis.hset(f"doc:{doc_id}", "page_count", len(pages))
     for idx, image_bytes in enumerate(pages):
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": idx, "image": image_bytes})

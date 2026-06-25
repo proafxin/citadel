@@ -1,9 +1,12 @@
 import logging
+import os
 from functools import lru_cache
 from pathlib import Path
 
 from loguru import logger as loguru_logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+CPU_HALF = max((os.cpu_count() or 2) // 2, 1)  # per-worker CPU stages: half the cores, at least 1
 
 
 def configure_logging() -> None:
@@ -23,7 +26,10 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")  # raw/<doc_id>, normalized/<doc_id>, results/<doc_id>.json
 
     render_dpi: int = 200
+    normalize_concurrency: int = CPU_HALF  # one isolated libreoffice profile per worker (per-job soffice)
+    paginate_concurrency: int = CPU_HALF  # pdfium process-pool workers, one dedicated pdfium per process
     ocr_concurrency: int = 64  # client-side semaphore; keeps vLLM max-num-seqs (128) fed
+    merge_concurrency: int = 4  # light assembly
 
     @property
     def mineru_base_url(self) -> str:
