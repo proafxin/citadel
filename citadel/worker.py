@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import traceback
-import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
@@ -132,7 +131,7 @@ async def normalize() -> None:
     stream = ingestion.STREAM_INGEST
     redis = ingestion.get_redis()
     await ingestion.ensure_group(stream)
-    consumer = uuid.uuid4().hex
+    consumer = f"{stream}-{get_settings().worker_id}"
     limit = get_settings().normalize_concurrency
     profiles = ingestion.make_profile_pool(limit)
     logger.info("consuming %s concurrency=%d", stream, limit)
@@ -148,7 +147,7 @@ async def paginate() -> None:
     stream = ingestion.STREAM_NORMALIZED
     redis = ingestion.get_redis()
     await ingestion.ensure_group(stream)
-    consumer = uuid.uuid4().hex
+    consumer = f"{stream}-{get_settings().worker_id}"
     limit = get_settings().paginate_concurrency
     sem = asyncio.Semaphore(limit)
     logger.info("consuming %s concurrency=%d", stream, limit)
@@ -165,7 +164,8 @@ async def ocr() -> None:
     redis = ingestion.get_redis()
     await ingestion.ensure_group(stream)
     await asyncio.to_thread(ingestion.get_mineru_client)  # build the http client once now, not lazily mid-OCR
-    consumer = uuid.uuid4().hex
+    await asyncio.to_thread(ingestion.get_rapidocr)  # load the CPU OCR models now, not on the first scanned page
+    consumer = f"{stream}-{get_settings().worker_id}"
     limit = get_settings().ocr_concurrency
     sem = asyncio.Semaphore(limit)
     logger.info("consuming %s concurrency=%d", stream, limit)
@@ -181,7 +181,7 @@ async def merge() -> None:
     stream = ingestion.STREAM_MERGE
     redis = ingestion.get_redis()
     await ingestion.ensure_group(stream)
-    consumer = uuid.uuid4().hex
+    consumer = f"{stream}-{get_settings().worker_id}"
     limit = get_settings().merge_concurrency
     sem = asyncio.Semaphore(limit)
     logger.info("consuming %s concurrency=%d", stream, limit)

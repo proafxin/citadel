@@ -26,6 +26,11 @@ services:
       - "256"
       - --quantization
       - fp8
+      # BENCHMARK ONLY: size the multimodal prefill cache to 0 → re-runs never warm-hit the same page
+      # images → every run is cold-cache, making our-pipeline vs stock-mineru a fair cold-vs-cold compare.
+      # REMOVE for production: the MM cache is a real win for repeated/templated pages (forms, letterheads).
+      - --mm-processor-cache-gb
+      - "0"
       - --uvicorn-log-level
       - warning
     ports:
