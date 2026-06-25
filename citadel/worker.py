@@ -164,7 +164,6 @@ async def ocr() -> None:
     redis = ingestion.get_redis()
     await ingestion.ensure_group(stream)
     await asyncio.to_thread(ingestion.get_mineru_client)  # build the http client once now, not lazily mid-OCR
-    await asyncio.to_thread(ingestion.get_rapidocr)  # load the CPU OCR models now, not on the first scanned page
     consumer = f"{stream}-{get_settings().worker_id}"
     limit = get_settings().ocr_concurrency
     sem = asyncio.Semaphore(limit)
