@@ -23,7 +23,7 @@ services:
       - --gpu-memory-utilization
       - "0.6"
       - --max-num-seqs
-      - "128"
+      - "256"
       - --uvicorn-log-level
       - warning
     ports:

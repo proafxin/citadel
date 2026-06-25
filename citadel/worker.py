@@ -139,7 +139,7 @@ async def normalize() -> None:
     await _recover(stream, consumer, lambda mid, raw: _spawn(_normalize_job(profiles, mid, raw)))
     while True:
         fresh = await redis.xreadgroup(ingestion.GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
-        for msg_id, raw in (fresh[0][1] if fresh else []):
+        for msg_id, raw in fresh[0][1] if fresh else []:
             _spawn(_normalize_job(profiles, msg_id.decode(), raw))
 
 
@@ -155,7 +155,7 @@ async def paginate() -> None:
     await _recover(stream, consumer, lambda mid, raw: _spawn(_paginate_job(sem, mid, raw)))
     while True:
         fresh = await redis.xreadgroup(ingestion.GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
-        for msg_id, raw in (fresh[0][1] if fresh else []):
+        for msg_id, raw in fresh[0][1] if fresh else []:
             _spawn(_paginate_job(sem, msg_id.decode(), raw))
 
 
@@ -171,7 +171,7 @@ async def ocr() -> None:
     await _recover(stream, consumer, lambda mid, raw: _spawn(_ocr_job(sem, mid, raw)))
     while True:
         fresh = await redis.xreadgroup(ingestion.GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
-        for msg_id, raw in (fresh[0][1] if fresh else []):
+        for msg_id, raw in fresh[0][1] if fresh else []:
             _spawn(_ocr_job(sem, msg_id.decode(), raw))
 
 
@@ -187,7 +187,7 @@ async def merge() -> None:
     await _recover(stream, consumer, lambda mid, raw: _spawn(_merge_job(sem, mid, raw)))
     while True:
         fresh = await redis.xreadgroup(ingestion.GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
-        for msg_id, raw in (fresh[0][1] if fresh else []):
+        for msg_id, raw in fresh[0][1] if fresh else []:
             _spawn(_merge_job(sem, msg_id.decode(), raw))
 
 

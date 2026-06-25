@@ -15,9 +15,9 @@ import filetype
 import pypdfium2 as pdfium
 import redis.asyncio as aioredis
 from markdownify import markdownify
-from redis.exceptions import ResponseError
 from mineru_vl_utils import MinerUClient
 from PIL import Image
+from redis.exceptions import ResponseError
 
 from citadel.schemas.document import Block, ParsedDocument
 from config import get_settings
@@ -37,6 +37,7 @@ TEXT_EXTS = {"txt", "md", "markdown"}
 HTML_EXTS = {"html", "htm"}
 
 MAX_ATTEMPTS = 3
+
 
 @lru_cache
 def get_redis() -> aioredis.Redis:
@@ -151,10 +152,10 @@ def normalize_file(raw_path_str: str, doc_id: str, filename: str, profile_dir: s
         shutil.copyfile(raw_path, _norm_dir() / f"{doc_id}.{ext}")
         return f"image:{ext}"
     if ext in HTML_EXTS:
-        (_norm_dir() / f"{doc_id}.md").write_text(markdownify(raw_path.read_text()))
+        (_norm_dir() / f"{doc_id}.md").write_text(markdownify(raw_path.read_text(encoding="utf-8")))
         return "text"
     # txt / md / unknown → treat as text
-    (_norm_dir() / f"{doc_id}.md").write_text(raw_path.read_text(errors="replace"))
+    (_norm_dir() / f"{doc_id}.md").write_text(raw_path.read_text(encoding="utf-8", errors="replace"))
     return "text"
 
 
@@ -201,9 +202,7 @@ async def handle_paginate(fields: dict[str, str]) -> None:
     settings = get_settings()
     dpi = settings.digital_render_dpi if kind == "office-pdf" else settings.render_dpi
     loop = asyncio.get_running_loop()
-    pages = await loop.run_in_executor(
-        get_paginate_pool(), render_pdf_pages, str(_norm_dir() / f"{doc_id}.pdf"), dpi
-    )
+    pages = await loop.run_in_executor(get_paginate_pool(), render_pdf_pages, str(_norm_dir() / f"{doc_id}.pdf"), dpi)
     await redis.hset(f"doc:{doc_id}", "page_count", len(pages))
     for idx, image_bytes in enumerate(pages):
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": idx, "image": image_bytes})
@@ -278,8 +277,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
     per_page = await redis.hgetall(f"blocks:{doc_id}")
     blocks: list[Block] = []
     for page_idx in sorted(int(k) for k in per_page):
-        for raw in json.loads(per_page[str(page_idx).encode()]):
-            blocks.append(Block(**raw))
+        blocks.extend(Block(**raw) for raw in json.loads(per_page[str(page_idx).encode()]))
     source = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
     document = ParsedDocument(source=source, markdown=blocks_to_markdown(blocks), blocks=blocks)
     _result_dir().mkdir(parents=True, exist_ok=True)
