@@ -25,10 +25,11 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("data")  # raw/<doc_id>, normalized/<doc_id>, results/<doc_id>.json
 
-    render_dpi: int = 200
+    render_dpi: int = 200  # scanned / unknown-origin PDFs
+    digital_render_dpi: int = 150  # office→pdf is born-digital (crisp vector text) → render smaller, cheaper prefill
     normalize_concurrency: int = CPU_HALF  # one isolated libreoffice profile per worker (per-job soffice)
     paginate_concurrency: int = CPU_HALF  # pdfium process-pool workers, one dedicated pdfium per process
-    ocr_concurrency: int = 64  # client-side semaphore; keeps vLLM max-num-seqs (128) fed
+    ocr_concurrency: int = 128  # client-side semaphore; matches vLLM max-num-seqs (128)
     merge_concurrency: int = 4  # light assembly
 
     @property

@@ -143,7 +143,7 @@ def normalize_file(raw_path_str: str, doc_id: str, filename: str, profile_dir: s
         produced = _norm_dir() / f"{raw_path.stem}.pdf"
         target = _norm_dir() / f"{doc_id}.pdf"
         produced.rename(target)
-        return "pdf"
+        return "office-pdf"  # born-digital (libreoffice produced it) → paginate renders at the lower dpi
     if ext == "pdf":
         shutil.copyfile(raw_path, _norm_dir() / f"{doc_id}.pdf")
         return "pdf"
@@ -198,9 +198,11 @@ async def handle_paginate(fields: dict[str, str]) -> None:
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0, "image": image_bytes})
         logger.info("paginate file=%s image", fields["filename"])
         return
+    settings = get_settings()
+    dpi = settings.digital_render_dpi if kind == "office-pdf" else settings.render_dpi
     loop = asyncio.get_running_loop()
     pages = await loop.run_in_executor(
-        get_paginate_pool(), render_pdf_pages, str(_norm_dir() / f"{doc_id}.pdf"), get_settings().render_dpi
+        get_paginate_pool(), render_pdf_pages, str(_norm_dir() / f"{doc_id}.pdf"), dpi
     )
     await redis.hset(f"doc:{doc_id}", "page_count", len(pages))
     for idx, image_bytes in enumerate(pages):
