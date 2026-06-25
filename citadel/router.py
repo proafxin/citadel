@@ -1,10 +1,16 @@
+import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from citadel.services import ingestion
+from citadel.services import ingestion, retrieval
 
 router = APIRouter()
+
+
+@router.get("/search")
+async def search(q: str) -> list[dict]:
+    return await asyncio.to_thread(retrieval.search, q)
 
 
 @router.post("/ingest")
