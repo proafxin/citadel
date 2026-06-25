@@ -24,6 +24,8 @@ services:
       - "0.6"
       - --max-num-seqs
       - "256"
+      - --quantization
+      - fp8
       - --uvicorn-log-level
       - warning
     ports:

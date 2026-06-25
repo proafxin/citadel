@@ -37,6 +37,7 @@ TEXT_EXTS = {"txt", "md", "markdown"}
 HTML_EXTS = {"html", "htm"}
 
 MAX_ATTEMPTS = 3
+LAYER_TYPES = ("text", "title")  # filled from the PDF text layer on born-digital pages (skip VLM recognition)
 
 
 @lru_cache
@@ -170,16 +171,34 @@ async def handle_normalize(fields: dict[str, str], profile_dir: str) -> None:
 # ---- paginate stage (CPU / process pool) ----------------------------------------------
 
 
-def render_pdf_pages(pdf_path_str: str, dpi: int) -> list[bytes]:
-    images: list[bytes] = []
+def render_pdf_pages(pdf_path_str: str, dpi: int) -> list[tuple[bytes, bool]]:
+    # (png, is_digital) per page; is_digital = has a real text layer and isn't rotated → safe to read by bbox
+    pages: list[tuple[bytes, bool]] = []
     pdf = pdfium.PdfDocument(pdf_path_str)
     scale = dpi / 72
     for page in pdf:
-        pil = page.render(scale=scale).to_pil()
         bio = io.BytesIO()
-        pil.save(bio, format="PNG")
-        images.append(bio.getvalue())
-    return images
+        page.render(scale=scale).to_pil().save(bio, format="PNG")
+        digital = page.get_rotation() == 0 and page.get_textpage().count_chars() > 16
+        pages.append((bio.getvalue(), digital))
+    pdf.close()
+    return pages
+
+
+def extract_text_by_bbox(pdf_path_str: str, page_idx: int, bboxes: list[list[float]]) -> list[str]:
+    # exact text from the PDF text layer inside each normalized (0-1, top-left) bbox; pdfium origin is bottom-left
+    pdf = pdfium.PdfDocument(pdf_path_str)
+    page = pdf[page_idx]
+    width, height = page.get_size()
+    textpage = page.get_textpage()
+    texts = [
+        textpage.get_text_bounded(
+            left=x0 * width, bottom=(1 - y1) * height, right=x1 * width, top=(1 - y0) * height
+        ).strip()
+        for x0, y0, x1, y1 in bboxes
+    ]
+    pdf.close()
+    return texts
 
 
 async def handle_paginate(fields: dict[str, str]) -> None:
@@ -204,8 +223,11 @@ async def handle_paginate(fields: dict[str, str]) -> None:
     loop = asyncio.get_running_loop()
     pages = await loop.run_in_executor(get_paginate_pool(), render_pdf_pages, str(_norm_dir() / f"{doc_id}.pdf"), dpi)
     await redis.hset(f"doc:{doc_id}", "page_count", len(pages))
-    for idx, image_bytes in enumerate(pages):
-        await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": idx, "image": image_bytes})
+    for idx, (image_bytes, digital) in enumerate(pages):
+        await redis.xadd(
+            STREAM_PAGES,
+            {"doc_id": doc_id, "page_idx": idx, "image": image_bytes, "digital": "1" if digital else "0"},
+        )
     logger.info("paginate file=%s pages=%d", fields["filename"], len(pages))
 
 
@@ -248,7 +270,26 @@ async def fail_document(doc_id: str, stage: str) -> None:
 async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     doc_id = fields["doc_id"]
     page_idx = int(fields["page_idx"])
-    content_blocks = await get_mineru_client().aio_two_step_extract(Image.open(io.BytesIO(image)))
+    img = Image.open(io.BytesIO(image))
+    client = get_mineru_client()
+    if fields.get("digital") == "1":
+        # born-digital page: VLM does layout + recognizes only non-text; text/title come from the exact text layer
+        content_blocks = await client.aio_two_step_extract(img, not_extract_list=list(LAYER_TYPES))
+        text_blocks = [cb for cb in content_blocks if cb.type in LAYER_TYPES]
+        if text_blocks:
+            loop = asyncio.get_running_loop()
+            texts = await loop.run_in_executor(
+                get_paginate_pool(),
+                extract_text_by_bbox,
+                str(_norm_dir() / f"{doc_id}.pdf"),
+                page_idx,
+                [list(cb.bbox) for cb in text_blocks],
+            )
+            for cb, text in zip(text_blocks, texts):
+                if text:
+                    cb.content = text
+    else:
+        content_blocks = await client.aio_two_step_extract(img)
     blocks = [map_content_block(cb, page_idx) for cb in content_blocks]
     for block in blocks:
         if block.type == "table":
