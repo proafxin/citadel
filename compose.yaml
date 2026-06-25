@@ -24,6 +24,8 @@ services:
       - "0.6"
       - --max-num-seqs
       - "128"
+      - --uvicorn-log-level
+      - warning
     ports:
       - "${CITADEL_MINERU_PORT:-8099}:${CITADEL_MINERU_PORT:-8099}"
     ulimits:
@@ -33,8 +35,6 @@ services:
       # Models are baked into the image at build time (mineru-models-download). Do NOT mount the
       # host HF cache here — it shadows the baked-in model. Persist only the torch.compile cache.
       - ~/.cache/vllm:/root/.cache/vllm
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:${CITADEL_MINERU_PORT:-8099}/health || exit 1"]
     deploy:
       resources:
         reservations:

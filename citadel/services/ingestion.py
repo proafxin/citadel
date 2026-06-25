@@ -226,10 +226,12 @@ def map_content_block(block: object, page_idx: int) -> Block:
 
 async def record_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
     redis = get_redis()
-    await redis.hset(f"blocks:{doc_id}", str(page_idx), json.dumps([asdict(b) for b in blocks]))
+    # hsetnx: a reclaimed/duplicate delivery of the same page is a no-op (first write wins, no double-count)
+    if not await redis.hsetnx(f"blocks:{doc_id}", str(page_idx), json.dumps([asdict(b) for b in blocks])):
+        return
     done = await redis.hincrby(f"doc:{doc_id}", "done_count", 1)
     expected = int(await redis.hget(f"doc:{doc_id}", "page_count") or 0)
-    if expected and done >= expected:
+    if expected and done == expected:  # exactly the page that completes the doc fires merge — once
         await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
 
 
@@ -286,7 +288,6 @@ async def handle_merge(fields: dict[str, str]) -> None:
     await redis.hset(f"doc:{doc_id}", "state", state)
     t0 = float(await redis.hget(f"doc:{doc_id}", "t0") or 0)
     logger.info("merge file=%s state=%s blocks=%d dur=%.1fs", source, state, len(blocks), time.time() - t0)
-    await cleanup(doc_id)
 
 
 async def cleanup(doc_id: str) -> None:
