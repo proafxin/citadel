@@ -1,11 +1,11 @@
 import asyncio
+import hashlib
 import io
 import json
 import logging
 import shutil
 import subprocess
 import time
-import uuid
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from functools import lru_cache
@@ -85,10 +85,12 @@ def _result_dir() -> Path:
 
 
 async def submit_document(data: bytes, filename: str) -> str:
-    doc_id = uuid.uuid4().hex
+    doc_id = hashlib.sha256(data).hexdigest()  # deterministic per content → same file reuses its key, no flood
+    redis = get_redis()
+    await redis.delete(f"doc:{doc_id}", f"blocks:{doc_id}")  # clean slate so a re-ingest reprocesses from scratch
+    (_result_dir() / f"{doc_id}.json").unlink(missing_ok=True)
     _raw_dir().mkdir(parents=True, exist_ok=True)
     (_raw_dir() / doc_id).write_bytes(data)
-    redis = get_redis()
     await redis.hset(
         f"doc:{doc_id}",
         mapping={"state": "queued", "filename": filename, "done_count": 0, "t0": time.time()},

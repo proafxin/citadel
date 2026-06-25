@@ -1,16 +1,17 @@
-import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from citadel.services import ingestion, retrieval
+from citadel.services import ingestion
 
 router = APIRouter()
 
 
-@router.get("/search")
-async def search(q: str) -> list[dict]:
-    return await asyncio.to_thread(retrieval.search, q)
+# /search disabled for now — retrieval is off until the HF cache perms are fixed:
+#   import asyncio; from citadel.services import retrieval
+#   @router.get("/search")
+#   async def search(q: str) -> list[dict]:
+#       return await asyncio.to_thread(retrieval.search, q)
 
 
 @router.post("/ingest")
