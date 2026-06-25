@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
@@ -57,7 +57,14 @@ def get_mineru_client() -> MinerUClient:
 
 @lru_cache
 def get_rapidocr() -> RapidOCR:
-    return RapidOCR()  # CPU PP-OCR det+rec — only scanned-page text recognition; born-digital pages never touch it
+    # CPU PP-OCR; 1 intra-op thread per call so a bounded pool controls total cores (no oversubscription)
+    return RapidOCR(intra_op_num_threads=1)
+
+
+@lru_cache
+def get_rapidocr_pool() -> ThreadPoolExecutor:
+    # bound how many scanned pages run RapidOCR at once so it can't starve the born-digital CPU stages
+    return ThreadPoolExecutor(max_workers=get_settings().rapidocr_concurrency)
 
 
 @lru_cache
@@ -314,49 +321,55 @@ async def recover_fillin_blocks(client: MinerUClient, img: Image.Image, content_
     await _vlm_recover(client, img, flagged)
 
 
-def _line_boxes(page: np.ndarray) -> list[tuple[float, float, float, float]]:
-    # RapidOCR detection → normalized line bboxes for every visual text line on the page
+RAPIDOCR_MIN_SCORE = 0.85  # drop low-confidence recognitions — usually garbled re-reads of decorative/stamp text
+
+
+def _trigrams(text: str) -> set[str]:
+    s = re.sub(r"\s+", "", text).lower()
+    return {s[i : i + 3] for i in range(len(s) - 2)}
+
+
+def _scanned_gap_lines(
+    page: np.ndarray, covered: list[list[float]], text_blocks: list[tuple[list[float], str]]
+) -> list[tuple[list[float], str]]:
+    # det every visual line, rec it, and keep ONLY confident lines that the VLM didn't already produce:
+    # not inside a table/image block, and their text not already in the VLM text block overlapping the line
+    engine = get_rapidocr()
     height, width = page.shape[:2]
-    boxes, _ = get_rapidocr()(page, use_det=True, use_cls=False, use_rec=False)
-    out: list[tuple[float, float, float, float]] = []
+    boxes, _ = engine(page, use_det=True, use_cls=False, use_rec=False)
+    out: list[tuple[list[float], str]] = []
     for box in boxes or []:
         x0, x1 = min(p[0] for p in box) / width, max(p[0] for p in box) / width
         y0, y1 = min(p[1] for p in box) / height, max(p[1] for p in box) / height
-        if x1 > x0 and y1 > y0:
-            out.append((x0, y0, x1, y1))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        if any(b[0] <= cx <= b[2] and b[1] <= cy <= b[3] for b in covered):
+            continue
+        result, _ = engine(page[int(y0 * height) : int(y1 * height), int(x0 * width) : int(x1 * width)], use_det=False)
+        if not result or float(result[0][1]) < RAPIDOCR_MIN_SCORE:
+            continue
+        tris = _trigrams(result[0][0])
+        dup = any(
+            len(tris & _trigrams(content)) >= 0.4 * len(tris)
+            for bbox, content in text_blocks
+            if bbox[0] <= cx <= bbox[2] and bbox[1] <= cy <= bbox[3]
+        )
+        if not tris or dup:
+            continue
+        out.append(([x0, y0, x1, y1], result[0][0]))
     return out
 
 
-def _rec_boxes(page: np.ndarray, boxes: list[tuple[float, float, float, float]]) -> list[str]:
-    height, width = page.shape[:2]
-    engine = get_rapidocr()
-    texts: list[str] = []
-    for x0, y0, x1, y1 in boxes:
-        crop = page[int(y0 * height) : int(y1 * height), int(x0 * width) : int(x1 * width)]
-        result, _ = engine(crop, use_det=False, use_cls=False, use_rec=True)
-        texts.append(result[0][0] if result else "")
-    return texts
-
-
-def _inside(line: tuple[float, float, float, float], blocks: list[ContentBlock]) -> bool:
-    cx, cy = (line[0] + line[2]) / 2, (line[1] + line[3]) / 2
-    return any(b.bbox[0] <= cx <= b.bbox[2] and b.bbox[1] <= cy <= b.bbox[3] for b in blocks)
-
-
-async def recover_scanned_text(img: Image.Image, content_blocks: ExtractResult) -> None:
-    # scanned page (no text layer): the VLM did layout + tables/figures only; RapidOCR (CPU) reads the text lines.
-    # det every line, skip those inside table/image blocks (the VLM covers those), rec the rest, and replace the
-    # empty VLM text/title blocks with the recognized lines — RapidOCR is the sole text source here, so no dedup
+async def recover_scanned_gaps(img: Image.Image, content_blocks: ExtractResult) -> None:
+    # scanned page: the VLM already produced the (good) text; RapidOCR (CPU, bounded) adds only the lines it dropped
     page = np.asarray(img.convert("RGB"))
-    covered = [cb for cb in content_blocks if cb.type in {"table", "image"}]
-    targets = [ln for ln in await asyncio.to_thread(_line_boxes, page) if not _inside(ln, covered)]
-    if not targets:
-        return
-    texts = await asyncio.to_thread(_rec_boxes, page, targets)
-    content_blocks[:] = [cb for cb in content_blocks if cb.type not in LAYER_TYPES]
-    for line, text in zip(targets, texts, strict=True):
-        if text.strip():
-            content_blocks.append(ContentBlock("text", list(line), content=text))
+    covered = [list(cb.bbox) for cb in content_blocks if cb.type in {"table", "image"}]
+    text_blocks = [(list(cb.bbox), cb.content or "") for cb in content_blocks if cb.type in LAYER_TYPES]
+    loop = asyncio.get_running_loop()
+    gaps = await loop.run_in_executor(get_rapidocr_pool(), _scanned_gap_lines, page, covered, text_blocks)
+    for bbox, text in gaps:
+        content_blocks.append(ContentBlock("text", bbox, content=text))
 
 
 async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
@@ -385,9 +398,8 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         # re-crop only risks re-introducing the same drop and slightly degrading the text — skip it there.
         await recover_fillin_blocks(client, img, content_blocks)
     else:
-        # scanned page: VLM does layout + tables/figures only; RapidOCR (CPU) reads the text lines
-        content_blocks = await client.aio_two_step_extract(img, not_extract_list=list(LAYER_TYPES))
-        await recover_scanned_text(img, content_blocks)
+        content_blocks = await client.aio_two_step_extract(img)  # VLM reads the scanned text (primary, good quality)
+        await recover_scanned_gaps(img, content_blocks)  # RapidOCR adds only the lines the VLM dropped
     await ocr_empty_blocks(client, img, content_blocks)  # image blocks (seals/stamps/figures) → VLM-crop, both branches
     blocks = [map_content_block(cb, page_idx) for cb in content_blocks]
     for block in blocks:

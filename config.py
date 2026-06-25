@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     ocr_concurrency: int = 128  # client pages in flight; each fans out to many vLLM requests (already saturates)
     merge_concurrency: int = 4  # light assembly
     worker_id: str = "0"  # stable per-replica id → deterministic Redis consumer names; set distinctly per replica
+    rapidocr_concurrency: int = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
 
     @property
     def mineru_base_url(self) -> str:
