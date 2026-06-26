@@ -46,9 +46,24 @@ image bakes the Pro model**.
 Sources: MinerU2.5-Pro arXiv:2604.04771 (Table 2) + OmniDocBench v1.6_full repo board · base MinerU2.5 same board.
 (Pro paper vs live repo differ slightly: Overall 95.69/95.75, CDM 97.29/97.45 — used the repo numbers.)
 
-## Speed — mixed real-doc set (cold-vs-cold, warmed)
+## Speed — 19 mixed real docs, same box / GPU / model (2026-06-27)
 
-*Pending: citadel vs stock MinerU on the same mixed (born-digital + scanned) set, on the same box.
-Report steady-state pages/s (both warmed) as headline + cold-start-inclusive wall-clock as deployment number.*
+Both run the **same baked model `MinerU2.5-Pro-2605-1.2B`**, full GPU, same box. Stock =
+`mineru -b hybrid-engine --effort high` (VLM + PP-OCR, same shape as citadel's VLM + gap-fill).
 
-Prior rough datapoint (16 real docs, stock standalone vs citadel, cold): citadel ~60s vs stock ~3m40s ≈ **~3.5× cold**.
+| | Citadel | Stock MinerU (hybrid, high) |
+|---|---|---|
+| Cold (fresh start, first batch) | ~113s | **236s** (3m56s) |
+| **Warm / steady** (model loaded) | **60.5s** | ~132s |
+| Pages | 153 | 145 |
+| **Pages/s (warm)** | **2.53** | ~1.1 |
+
+- **Steady-state (warm-vs-warm): ~2.2× faster** — 60.5s vs ~132s (2.53 vs ~1.1 pages/s).
+- **Cold first run: ~2.1× faster** — ~113s vs 236s.
+- **Deployment (citadel stays warm vs stock CLI cold *every* run): ~3.9×** — 60.5s vs 236s.
+
+Why: stock's API **caps at 3 concurrent** ("Request concurrency limited to 3"); citadel streams 128-wide
+(peaked at **137 in-flight reqs, GPU KV ~12%** — not GPU-bound). Same model, same GPU → the gap is the
+**pipeline**. Citadel's warm run is **gated entirely by `defence`** (73 scanned pages, gap-fill ~60s); every
+born-digital doc finished in **3–8s**, while stock's 3-wide cap makes even those queue. Stock also **dropped
+`hearing_iconix.pdf`** ("No valid PDF"), so citadel did *more* pages (153 vs 145) in *less* time.
