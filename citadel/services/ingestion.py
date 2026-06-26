@@ -35,6 +35,7 @@ STREAM_NORMALIZED = "normalized"
 STREAM_PAGES = "pages"
 STREAM_MERGE = "merge"
 STREAM_TABLES = "tables"
+STREAM_GAPFILL = "gapfill"  # decoupled CPU stage: scanned pages do RapidOCR gap-fill here, off the GPU OCR slot
 
 OFFICE_EXTS = {"doc", "docx", "ppt", "pptx", "odt", "odp", "rtf"}
 IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"}
@@ -395,23 +396,25 @@ def _scanned_gap_lines(
     return out
 
 
-async def recover_scanned_gaps(img: Image.Image, content_blocks: ExtractResult) -> None:
-    # scanned page: the VLM already produced the (good) text; RapidOCR (CPU, bounded) adds only the lines it dropped
+async def recover_scanned_gaps(img: Image.Image, blocks: list[Block], page_idx: int) -> None:
+    # scanned page: the VLM already produced the (good) text; RapidOCR (CPU, bounded) adds only the lines it dropped.
+    # runs in the decoupled gapfill stage, so it never holds the GPU OCR slot or pins a decoded page array under it
     page = np.asarray(img.convert("RGB"))
-    covered = [list(cb.bbox) for cb in content_blocks if cb.type in {"table", "image"}]
-    text_blocks = [(list(cb.bbox), cb.content or "") for cb in content_blocks if cb.type in LAYER_TYPES]
+    covered = [list(b.bbox) for b in blocks if b.type in {"table", "image"}]
+    text_blocks = [(list(b.bbox), b.text or "") for b in blocks if b.type in LAYER_TYPES]
     loop = asyncio.get_running_loop()
     gaps = await loop.run_in_executor(get_rapidocr_pool(), _scanned_gap_lines, page, covered, text_blocks)
     for bbox, text in gaps:
-        content_blocks.append(ContentBlock("text", bbox, content=text))
+        blocks.append(Block(type="text", page_idx=page_idx, bbox=bbox, text=text))
 
 
 async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     doc_id = fields["doc_id"]
     page_idx = int(fields["page_idx"])
+    digital = fields.get("digital") == "1"
     img = Image.open(io.BytesIO(image))
     client = get_mineru_client()
-    if fields.get("digital") == "1":
+    if digital:
         # born-digital page: VLM does layout + recognizes only non-text; text/title come from the exact text layer
         content_blocks = await client.aio_two_step_extract(img, not_extract_list=list(LAYER_TYPES))
         text_blocks = [cb for cb in content_blocks if cb.type in LAYER_TYPES]
@@ -433,13 +436,44 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         await recover_fillin_blocks(client, img, content_blocks)
     else:
         content_blocks = await client.aio_two_step_extract(img)  # VLM reads the scanned text (primary, good quality)
-        await recover_scanned_gaps(img, content_blocks)  # RapidOCR adds only the lines the VLM dropped
     await ocr_empty_blocks(client, img, content_blocks)  # image blocks (seals/stamps/figures) → VLM-crop, both branches
     blocks = [map_content_block(cb, page_idx) for cb in content_blocks]
+    if not digital and get_settings().gap_fill:
+        # hand the page to the bounded CPU gapfill stage and free the GPU OCR slot now, instead of blocking on RapidOCR
+        await get_redis().xadd(
+            STREAM_GAPFILL, {"doc_id": doc_id, "page_idx": page_idx, "image": image, "blocks": _dump_blocks(blocks)}
+        )
+        return
+    await _emit_page(doc_id, page_idx, blocks)
+
+
+def _dump_blocks(blocks: list[Block]) -> str:
+    return json.dumps([asdict(b) for b in blocks])
+
+
+def _load_blocks(blob: str) -> list[Block]:
+    return [Block(**raw) for raw in json.loads(blob)]
+
+
+async def _emit_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
+    # finalize a page: forward any tables and record it (records exactly once → drives the merge barrier)
     for block in blocks:
         if block.type == "table":
             await get_redis().xadd(STREAM_TABLES, {"doc_id": doc_id, "page_idx": page_idx, "html": block.text})
     await record_page(doc_id, page_idx, blocks)
+
+
+async def handle_gapfill(fields: dict[str, str], image: bytes) -> None:
+    # decoupled CPU stage: RapidOCR adds the lines the VLM dropped on a scanned page, then the page is finalized
+    page_idx = int(fields["page_idx"])
+    blocks = _load_blocks(fields["blocks"])
+    await recover_scanned_gaps(Image.open(io.BytesIO(image)), blocks, page_idx)
+    await _emit_page(fields["doc_id"], page_idx, blocks)
+
+
+async def emit_vlm_only(fields: dict[str, str]) -> None:
+    # gapfill exhausted its retries → finalize with the VLM blocks alone; a RapidOCR error must never drop the page
+    await _emit_page(fields["doc_id"], int(fields["page_idx"]), _load_blocks(fields["blocks"]))
 
 
 # ---- merge stage ----------------------------------------------------------------------

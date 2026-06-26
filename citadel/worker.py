@@ -110,6 +110,20 @@ async def _ocr_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes])
         )
 
 
+async def _gapfill_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes]) -> None:
+    stream = ingestion.STREAM_GAPFILL
+    async with sem:
+        fields = {k.decode(): v.decode() for k, v in raw.items() if k != b"image"}
+        work = asyncio.create_task(ingestion.handle_gapfill(fields, raw.get(b"image", b"")))
+        await asyncio.wait({work})
+        if work.exception() is None:
+            await _settle(stream, msg_id)
+            return
+        logger.error("gapfill failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
+        # retries exhausted → finalize with the VLM blocks alone so a RapidOCR error never loses the page
+        await _retry_or_fail(stream, msg_id, raw, lambda: ingestion.emit_vlm_only(fields))
+
+
 async def _merge_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = ingestion.STREAM_MERGE
     async with sem:
@@ -175,6 +189,22 @@ async def ocr() -> None:
             _spawn(_ocr_job(sem, msg_id.decode(), raw))
 
 
+# ---- gapfill: read `gapfill`, RapidOCR the lines the VLM dropped, finalize the page. CPU-bound, bounded low ----
+async def gapfill() -> None:
+    stream = ingestion.STREAM_GAPFILL
+    redis = ingestion.get_redis()
+    await ingestion.ensure_group(stream)
+    consumer = f"{stream}-{get_settings().worker_id}"
+    limit = get_settings().rapidocr_concurrency  # match the RapidOCR thread pool → ≤limit decoded page arrays resident
+    sem = asyncio.Semaphore(limit)
+    logger.info("consuming %s concurrency=%d", stream, limit)
+    await _recover(stream, consumer, lambda mid, raw: _spawn(_gapfill_job(sem, mid, raw)))
+    while True:
+        fresh = await redis.xreadgroup(ingestion.GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
+        for msg_id, raw in fresh[0][1] if fresh else []:
+            _spawn(_gapfill_job(sem, msg_id.decode(), raw))
+
+
 # ---- merge: read `merge`, assemble result.json, clean up. light concurrency ----------------------------
 async def merge() -> None:
     stream = ingestion.STREAM_MERGE
@@ -192,7 +222,7 @@ async def merge() -> None:
 
 
 async def _main() -> None:
-    await asyncio.gather(normalize(), paginate(), ocr(), merge())
+    await asyncio.gather(normalize(), paginate(), ocr(), gapfill(), merge())
 
 
 def main() -> None:

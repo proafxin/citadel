@@ -26,11 +26,10 @@ services:
       - "256"
       - --quantization
       - fp8
-      # BENCHMARK ONLY: size the multimodal prefill cache to 0 → re-runs never warm-hit the same page
-      # images → every run is cold-cache, making our-pipeline vs stock-mineru a fair cold-vs-cold compare.
-      # REMOVE for production: the MM cache is a real win for repeated/templated pages (forms, letterheads).
-      - --mm-processor-cache-gb
-      - "0"
+      # MM processor cache left at vLLM's default (enabled): a real win on repeated/templated pages
+      # (forms, letterheads) and within-page re-encodes. It was only zeroed back when we ran stock MinerU
+      # ourselves and needed a cold-vs-cold compare; quality is now scored against MinerU's published numbers,
+      # so there's no fairness reason to disable it (the cache changes speed, never the output).
       - --uvicorn-log-level
       - warning
     ports:
