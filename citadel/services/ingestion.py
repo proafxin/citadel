@@ -12,6 +12,7 @@ from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
 
+import cv2
 import filetype
 import numpy as np
 import pypdfium2 as pdfium
@@ -288,6 +289,20 @@ async def fail_document(doc_id: str, stage: str) -> None:
 FILLIN = re.compile(r"\.{4,}|_{4,}|…")  # form fill-in markers → the line may carry handwriting the layer can't see
 
 
+def _is_vlm_refusal(text: str) -> bool:
+    # the VLM narrates no-text crops (QR/blank graphics) instead of staying silent ("The image provided is a QR
+    # code... no textual content can be extracted"). a refusal both refers to the image AND denies content; real
+    # seal/stamp/figure text does neither, so requiring both signals keeps genuine recoveries
+    t = text.lower()
+    refers = any(k in t for k in ("the image", "this image", "the picture", "image provided", "qr code", "barcode"))
+    denies = any(
+        k in t
+        for k in ("no text", "no visible", "no textual", "human-readable", "does not contain", "cannot be",
+                  "can't be", "unable to", "be extracted", "be converted", "be processed")
+    )
+    return refers and denies
+
+
 async def _vlm_recover(client: MinerUClient, img: Image.Image, blocks: list[ContentBlock]) -> None:
     # crop each block's region and OCR it as text via the VLM; per page, concurrent across pages → vLLM batches it
     if not blocks:
@@ -299,14 +314,33 @@ async def _vlm_recover(client: MinerUClient, img: Image.Image, blocks: list[Cont
     ]
     recovered = await client.aio_batch_content_extract(crops, types="text")
     for block, text in zip(blocks, recovered, strict=True):
-        if text and str(text).strip():
-            block.content = str(text)
+        clean = str(text or "").strip()
+        if clean and not _is_vlm_refusal(clean):
+            block.content = clean
+
+
+def _qr_payload(crop: Image.Image) -> str | None:
+    # a QR/barcode has no prose; the VLM would narrate it ("...no textual content can be extracted"). detect it
+    # deterministically: None = not a QR (let the VLM read seal/stamp text), else the decoded payload ("" if unreadable)
+    text, points, _ = cv2.QRCodeDetector().detectAndDecode(np.asarray(crop.convert("RGB")))
+    return text if points is not None else None
 
 
 async def ocr_empty_blocks(client: MinerUClient, img: Image.Image, content_blocks: ExtractResult) -> None:
     # image blocks the VLM localized but left empty (seals, stamps, figures, logos) → OCR the crop as text.
     # the VLM never read these (it only localizes images), so this is a fresh request, not a failed retry
-    await _vlm_recover(client, img, [cb for cb in content_blocks if cb.type == "image" and not (cb.content or "").strip()])
+    width, height = img.size
+    to_ocr: list[ContentBlock] = []
+    for cb in content_blocks:
+        if cb.type != "image" or (cb.content or "").strip():
+            continue
+        b = cb.bbox
+        payload = _qr_payload(img.crop((int(b[0] * width), int(b[1] * height), int(b[2] * width), int(b[3] * height))))
+        if payload is None:
+            to_ocr.append(cb)  # not a QR → VLM-crop reads the seal/stamp/figure text
+        elif payload:
+            cb.content = payload  # decoded QR → store the real encoded data instead of a hallucinated description
+    await _vlm_recover(client, img, to_ocr)
 
 
 async def recover_fillin_blocks(client: MinerUClient, img: Image.Image, content_blocks: ExtractResult) -> None:
