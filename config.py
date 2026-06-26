@@ -27,10 +27,10 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")  # raw/<doc_id>, normalized/<doc_id>, results/<doc_id>.json
 
     render_dpi: int = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
-    digital_render_dpi: int = 150  # office→pdf is born-digital (crisp vector text) → render smaller, cheaper prefill
+    digital_render_dpi: int = 110  # office→pdf ONLY (provably born-digital): image is layout-only, text from the PDF layer → render small. validate layout still holds; regular pdf stays at render_dpi
     normalize_concurrency: int = CPU_THIRD  # one isolated libreoffice profile per worker (per-job soffice)
     paginate_concurrency: int = CPU_THIRD  # pdfium process-pool workers, one dedicated pdfium per process
-    ocr_concurrency: int = 64  # pages in flight; each fans out to many vLLM requests, so this × fan-out ≫ server slots
+    ocr_concurrency: int = 128  # pages in flight; sockets are capped by mineru_max_connections, so keep this high to feed the server (born-digital makes few requests/page → needs many concurrent pages)
     merge_concurrency: int = 4  # light assembly
     worker_id: str = "0"  # stable per-replica id → deterministic Redis consumer names; set distinctly per replica
     rapidocr_concurrency: int = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve

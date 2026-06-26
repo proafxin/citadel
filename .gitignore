@@ -530,3 +530,4 @@ book_result.json
 bake_mineru/*
 data/*
 benchmarks/*
+!benchmarks/RESULTS.md

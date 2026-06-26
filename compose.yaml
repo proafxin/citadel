@@ -3,7 +3,8 @@ services:
   # MinerU2.5-Pro raw VLM server (OpenAI-compatible). Driven per-page by our workers via
   # mineru-vl-utils http-client (two_step_extract) — NOT the capped-at-3 mineru-api REST path.
   # Only `--engine` is mineru-openai-server's own flag; --host/--port/--gpu-memory-utilization/
-  # --max-num-seqs are forwarded to vLLM. gpu-mem 0.6 leaves ~9.5GB for co-located embedders.
+  # --max-num-seqs are forwarded to vLLM. gpu-mem 0.9 = full GPU for the VLM (no co-located query LLM
+  # running yet; dial back to ~0.6 once the retrieval/query LLM shares this GPU).
   # `mineru:latest` is built from MinerU's Dockerfile (model baked in, MINERU_MODEL_SOURCE=local).
   mineru:
     image: mineru:latest
@@ -21,15 +22,16 @@ services:
       - --port
       - "${CITADEL_MINERU_PORT:-8099}"
       - --gpu-memory-utilization
-      - "0.6"
+      - "0.9"
       - --max-num-seqs
       - "256"
       - --quantization
       - fp8
-      # MM processor cache left at vLLM's default (enabled): a real win on repeated/templated pages
-      # (forms, letterheads) and within-page re-encodes. It was only zeroed back when we ran stock MinerU
-      # ourselves and needed a cold-vs-cold compare; quality is now scored against MinerU's published numbers,
-      # so there's no fairness reason to disable it (the cache changes speed, never the output).
+      # MM processor cache: enabled but capped (it lives in HOST RAM). a real win on repeated/templated pages
+      # (forms, letterheads) + within-page re-encodes; bounded to 2GB so it can't balloon the host footprint.
+      # cache only affects speed, never the output — so it doesn't touch the OmniDocBench quality numbers.
+      - --mm-processor-cache-gb
+      - "2"
       - --uvicorn-log-level
       - warning
     ports:

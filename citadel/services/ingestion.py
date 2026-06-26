@@ -198,6 +198,27 @@ async def handle_normalize(fields: dict[str, str], profile_dir: str) -> None:
 # ---- paginate stage (CPU / process pool) ----------------------------------------------
 
 
+# cap a page image's long side → bounds the worker's resident RAM (it holds full-res decoded pages to crop them).
+# the VLM resizes internally so the full-page pass is unaffected; kept generous so seal/stamp crops stay legible
+MAX_IMAGE_SIDE = 2500
+
+
+def _downscale(img: Image.Image) -> Image.Image:
+    if max(img.size) <= MAX_IMAGE_SIDE:
+        return img
+    scale = MAX_IMAGE_SIDE / max(img.size)
+    return img.resize((round(img.width * scale), round(img.height * scale)))
+
+
+def _cap_image_bytes(image_bytes: bytes) -> bytes:
+    img = Image.open(io.BytesIO(image_bytes))
+    if max(img.size) <= MAX_IMAGE_SIDE:
+        return image_bytes
+    out = io.BytesIO()
+    _downscale(img).save(out, format="PNG")
+    return out.getvalue()
+
+
 def render_pdf_pages(pdf_path_str: str, dpi: int) -> list[tuple[bytes, bool]]:
     # (png, is_digital) per page; is_digital = has a real text layer and isn't rotated → safe to read by bbox
     pages: list[tuple[bytes, bool]] = []
@@ -205,7 +226,7 @@ def render_pdf_pages(pdf_path_str: str, dpi: int) -> list[tuple[bytes, bool]]:
     scale = dpi / 72
     for page in pdf:
         bio = io.BytesIO()
-        page.render(scale=scale).to_pil().save(bio, format="PNG")
+        _downscale(page.render(scale=scale).to_pil()).save(bio, format="PNG")
         digital = page.get_rotation() == 0 and page.get_textpage().count_chars() > 16
         pages.append((bio.getvalue(), digital))
     pdf.close()
@@ -240,7 +261,8 @@ async def handle_paginate(fields: dict[str, str]) -> None:
         logger.info("paginate file=%s text", fields["filename"])
         return
     if kind.startswith("image:"):
-        image_bytes = (_norm_dir() / f"{doc_id}.{kind.split(':', 1)[1]}").read_bytes()
+        raw = (_norm_dir() / f"{doc_id}.{kind.split(':', 1)[1]}").read_bytes()
+        image_bytes = await asyncio.to_thread(_cap_image_bytes, raw)  # cap huge scans → keep the worker's RAM bounded
         await redis.hset(f"doc:{doc_id}", "page_count", 1)
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0, "image": image_bytes})
         logger.info("paginate file=%s image", fields["filename"])
