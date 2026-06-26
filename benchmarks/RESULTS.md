@@ -1,6 +1,34 @@
 # Benchmark Results
 
-## OmniDocBench v1.5 — Quality (2026-06-27)
+## Positioning — what the numbers support (read first)
+
+**Defensible headline:**
+> Top-3 document-parsing quality on OmniDocBench v1.6 — above every cloud OCR/LLM that reports (incl. the
+> frontier models) — at 2–4× the efficiency of the same model's reference, fully local. No system, cloud or
+> open, has been shown to match that quality at that efficiency.
+
+- **Quality:** #3 / OmniDocBench v1.6 (95.04), above every reporting cloud (Qianfan 93.9, Gemini 3 Pro 92.9,
+  GPT-5.2 ~86.6, Mistral 85.7). Only 3 self-hostable open models sit at its tier; no cloud API does.
+- **Efficiency:** 2–4× vs the same model's reference (stock MinerU), same GPU. Self-hosted is the only fair
+  speed axis — cloud APIs can't run on-box.
+- **Delivery:** fully local, private, zero per-page cost, single commodity GPU (VRAM to spare for a query LLM).
+
+**Not a "self-hosted niche"** — it leads on the merits, not just price/locality. There is no known system that
+is *both* ≥ its quality *and* architecturally faster: everything at its quality tier is a same-class open VLM,
+everything faster is lower quality, every cloud API is below on quality.
+
+**Say the provable thing (survives a skeptic):**
+- ✅ "Higher quality than every cloud system that *reports* on OmniDocBench" — NOT "every cloud system"
+  (Textract / Azure Document Intelligence / Google Document AI don't report → unmeasured, not beaten).
+- ✅ "Most efficient fully-local way to run frontier-grade parsing" — NOT "we built the best parser" (the
+  quality is the open MinerU2.5-Pro model run without degradation; the moat is efficiency + local delivery).
+- ✅ "In hands-on use, cloud doc-AI services frequently parse poorly" — back with **side-by-side receipts on
+  real docs**, not a claimed benchmark number. This is the only honest way to cover the non-reporting clouds.
+
+**Open items to make it unqualified:** (1) a multilingual slice — OmniDocBench is EN/ZH only; (2) same-tier
+self-hosted speed vs GLM-OCR (95.22) and PaddleOCR-VL-1.5 (94.93), to lock "fastest at SOTA quality."
+
+## OmniDocBench v1.6 — Quality (2026-06-27)
 
 Citadel, **pure-VLM** path (MinerU2.5-Pro core, `CITADEL_GAP_FILL=0`), scored with OmniDocBench's
 **official** end2end scorer (`quick_match`, CDM enabled). Full set: **1651 pages, 0 timeouts/errors**.
@@ -45,6 +73,29 @@ image bakes the Pro model**.
 
 Sources: MinerU2.5-Pro arXiv:2604.04771 (Table 2) + OmniDocBench v1.6_full repo board · base MinerU2.5 same board.
 (Pro paper vs live repo differ slightly: Overall 95.69/95.75, CDM 97.29/97.45 — used the repo numbers.)
+
+### Full leaderboard placement (OmniDocBench v1.6_full)
+
+**95.04 ranks #3 on the entire board** — behind only two self-hostable open models, above *every* cloud API.
+
+| Rank | Model | Overall | Type |
+|---|---|---|---|
+| 1 | MinerU2.5-Pro | 95.75 | open (= citadel's model) |
+| 2 | GLM-OCR | 95.22 | open |
+| **→** | **citadel** | **95.04** | open (ours) |
+| 4 | PaddleOCR-VL-1.5 | 94.93 | open |
+| 5 | PaddleOCR-VL | 94.18 | open |
+| — | Qianfan-OCR | 93.90 | API (best cloud) |
+| — | Gemini 3 Pro / Flash | 92.91 / 92.62 | API |
+| — | dots.ocr | 90.77 | open |
+| — | Qwen3-VL-235B | 89.78 | open |
+| — | GPT-5.2 / GPT-4o | ~86.6 | API |
+| — | Mistral OCR | 85.66 | API |
+
+- **No cloud API outranks 95.04** — best is Qianfan 93.9 (~1 pt below); Gemini 3 Pro 92.9; GPT/Mistral 8–9 below.
+- **Quality peers** (the only legit speed-comparison set, all self-hostable): MinerU2.5-Pro (same model, beaten 2–4×), GLM-OCR (95.22), PaddleOCR-VL-1.5 (94.93). No cloud system is in this tier.
+- **Absent from the board** (unmeasured, *not* disproven): AWS Textract, Azure Document Intelligence, Google Document AI, Mathpix, Textin.
+- Source: OmniDocBench v1.6_full leaderboard — github.com/opendatalab/OmniDocBench (main).
 
 ## Speed — 19 mixed real docs, same box / GPU / model (2026-06-27)
 
