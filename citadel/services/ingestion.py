@@ -54,7 +54,14 @@ def get_redis() -> aioredis.Redis:
 
 @lru_cache
 def get_mineru_client() -> MinerUClient:
-    return MinerUClient(backend="http-client", server_url=get_settings().mineru_base_url, use_tqdm=False)
+    # max_connections caps the shared httpx pool so concurrent VLM requests queue for a connection instead of
+    # opening unbounded sockets (the per-block fan-out × page concurrency otherwise exhausts the fd table)
+    return MinerUClient(
+        backend="http-client",
+        server_url=get_settings().mineru_base_url,
+        use_tqdm=False,
+        max_connections=get_settings().mineru_max_connections,
+    )
 
 
 @lru_cache
@@ -298,8 +305,19 @@ def _is_vlm_refusal(text: str) -> bool:
     refers = any(k in t for k in ("the image", "this image", "the picture", "image provided", "qr code", "barcode"))
     denies = any(
         k in t
-        for k in ("no text", "no visible", "no textual", "human-readable", "does not contain", "cannot be",
-                  "can't be", "unable to", "be extracted", "be converted", "be processed")
+        for k in (
+            "no text",
+            "no visible",
+            "no textual",
+            "human-readable",
+            "does not contain",
+            "cannot be",
+            "can't be",
+            "unable to",
+            "be extracted",
+            "be converted",
+            "be processed",
+        )
     )
     return refers and denies
 
@@ -427,7 +445,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
                 page_idx,
                 [list(cb.bbox) for cb in text_blocks],
             )
-            for cb, text in zip(text_blocks, texts):
+            for cb, text in zip(text_blocks, texts, strict=False):
                 if text:
                     cb.content = text
         # digital only: the VLM never read these text blocks (we used the layer), so a focused crop is a fresh

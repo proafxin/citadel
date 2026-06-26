@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     mineru_host: str = "localhost"
     mineru_port: int = 8099
+    mineru_max_connections: int = 256  # hard cap on the shared httpx pool → bounds VLM sockets (match server max-num-seqs)
 
     redis_url: str = "redis://localhost:6379/0"
 
@@ -29,7 +30,7 @@ class Settings(BaseSettings):
     digital_render_dpi: int = 150  # office→pdf is born-digital (crisp vector text) → render smaller, cheaper prefill
     normalize_concurrency: int = CPU_THIRD  # one isolated libreoffice profile per worker (per-job soffice)
     paginate_concurrency: int = CPU_THIRD  # pdfium process-pool workers, one dedicated pdfium per process
-    ocr_concurrency: int = 128  # client pages in flight; each fans out to many vLLM requests (already saturates)
+    ocr_concurrency: int = 64  # pages in flight; each fans out to many vLLM requests, so this × fan-out ≫ server slots
     merge_concurrency: int = 4  # light assembly
     worker_id: str = "0"  # stable per-replica id → deterministic Redis consumer names; set distinctly per replica
     rapidocr_concurrency: int = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve

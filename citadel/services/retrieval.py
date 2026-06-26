@@ -1,9 +1,10 @@
 import json
+import operator
 import re
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -11,6 +12,9 @@ from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from config import get_settings
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 NOISE_TYPES = {"footer", "page_number"}  # boilerplate that just adds noise to retrieval
 RRF_K = 60  # reciprocal-rank-fusion damping constant
@@ -81,7 +85,7 @@ def search(query: str, per_channel: int = 100, fuse_top: int = 50, top: int = 10
     sparse = [int(i) for i in np.argsort(bm25.get_scores(_tokenize(query)))[::-1][:per_channel]]
     fused = _rrf([dense, sparse])[:fuse_top]
     rerank = get_reranker().predict([(query, chunks[i].text) for i in fused])
-    ranked = sorted(zip(fused, rerank, strict=True), key=lambda pair: pair[1], reverse=True)[:top]
+    ranked = sorted(zip(fused, rerank, strict=True), key=operator.itemgetter(1), reverse=True)[:top]
     return [
         {
             "score": float(score),
