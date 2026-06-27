@@ -29,6 +29,7 @@ dependencies = [
     "tensorboard>=2.20.0",
     "torch>=2.12.1",
     "transformers>=5.12.1",
+    "zstandard>=0.25.0",
 ]
 
 [dependency-groups]

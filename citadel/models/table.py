@@ -8,11 +8,9 @@ from citadel.models.base import Base
 class Table(Base):
     __tablename__ = "tables"
 
+    content_id: Mapped[str] = mapped_column(ForeignKey("content.content_id"), unique=True)
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
-    key: Mapped[str] = mapped_column(unique=True)
-    sheet_no: Mapped[int | None] = mapped_column(default=None)
-    page_no: Mapped[int | None] = mapped_column(default=None)
-    ordinal: Mapped[int]
+    origin: Mapped[str | None] = mapped_column(default=None)
     page_range: Mapped[list[int] | None] = mapped_column(JSONB, default=None)
     columns: Mapped[list[dict]] = mapped_column(JSONB)
     table_metadata: Mapped[dict] = mapped_column(JSONB)

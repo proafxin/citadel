@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import AsyncIterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
@@ -15,6 +16,7 @@ import filetype
 import numpy as np
 import pypdfium2 as pdfium
 import redis.asyncio as aioredis
+import zstandard
 from markdownify import markdownify
 from mineru_vl_utils import MinerUClient
 from mineru_vl_utils.structs import ContentBlock, ExtractResult
@@ -23,7 +25,7 @@ from rapidocr_onnxruntime import RapidOCR
 from redis.exceptions import ResponseError
 
 from citadel.schemas.content import Block
-from citadel.services import persistence
+from citadel.services import persistence, tree
 from config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -124,7 +126,28 @@ async def get_status(doc_id: str) -> dict[str, str]:
 
 
 async def get_result(doc_id: str) -> dict | None:
-    return await persistence.get_document_blocks(int(doc_id))
+    result = await persistence.get_document_tree(int(doc_id))
+    return result.model_dump() if result is not None else None
+
+
+async def get_markdown(doc_id: str) -> str | None:
+    result = await persistence.get_document_tree(int(doc_id))
+    return tree.render_markdown(result) if result is not None else None
+
+
+async def library_exists(library_id: int) -> bool:
+    return await persistence.library_exists(library_id)
+
+
+async def stream_library_zstd(library_id: int) -> AsyncIterator[bytes]:
+    compressor = zstandard.ZstdCompressor().compressobj()
+    async for document_tree in persistence.iter_library(library_id):
+        chunk = compressor.compress((document_tree.model_dump_json() + "\n").encode())
+        if chunk:
+            yield chunk
+    tail = compressor.flush()
+    if tail:
+        yield tail
 
 
 # ---- normalize stage (CPU / process pool) ---------------------------------------------
@@ -518,7 +541,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
         blocks.extend(Block(**raw) for raw in json.loads(per_page[str(page_idx).encode()]))
     source = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
     state = "partial" if any(b.type == "error" for b in blocks) else "done"
-    await persistence.save_document_result(int(doc_id), blocks, state)
+    await persistence.save_document_tree(int(doc_id), blocks, state)
     await redis.hset(f"doc:{doc_id}", "state", state)
     t0 = float(await redis.hget(f"doc:{doc_id}", "t0") or 0)
     logger.info("merge file=%s state=%s blocks=%d dur=%.1fs", source, state, len(blocks), time.time() - t0)
