@@ -62,5 +62,19 @@ services:
     volumes:
       - redis-data:/data
 
+  postgres:
+    image: postgres:17-alpine
+    container_name: citadel-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${CITADEL_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${CITADEL_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${CITADEL_POSTGRES_DB:-citadel}
+    ports:
+      - "${CITADEL_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
 volumes:
   redis-data:
+  postgres-data:

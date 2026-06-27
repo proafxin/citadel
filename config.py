@@ -24,6 +24,12 @@ class Settings(BaseSettings):
 
     redis_url: str = "redis://localhost:6379/0"
 
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_user: str = "postgres"
+    postgres_password: str
+    postgres_db: str = "citadel"
+
     data_dir: Path = Path("data")  # raw/<doc_id>, normalized/<doc_id>, results/<doc_id>.json
 
     render_dpi: int = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
@@ -39,6 +45,13 @@ class Settings(BaseSettings):
     @property
     def mineru_base_url(self) -> str:
         return f"http://{self.mineru_host}:{self.mineru_port}"
+
+    @property
+    def database_url(self) -> str:
+        return (
+            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
 
 
 @lru_cache

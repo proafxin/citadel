@@ -8,6 +8,7 @@ authors = [{ name = "Masum Billal", email = "billalmasum93@gmail.com" }]
 
 dependencies = [
     "alembic>=1.18.5",
+    "asyncpg>=0.31.0",
     "datasets>=5.0.0",
     "fastapi[standard]>=0.138.1",
     "filetype>=1.2.0",
