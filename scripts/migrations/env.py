@@ -7,7 +7,11 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
-from citadel.models import Base
+from citadel.models.base import Base
+from citadel.models.block import Block
+from citadel.models.document import Document
+from citadel.models.library import Library
+from citadel.models.table import Table, TableRow
 from config import get_settings
 
 config = context.config

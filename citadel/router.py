@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from citadel.services import ingestion
 
@@ -17,8 +17,9 @@ router = APIRouter()
 @router.post("/ingest")
 async def ingest(
     files: Annotated[list[UploadFile], File(description="Select multiple files to upload")],
+    library: Annotated[str, Form()] = "default",
 ) -> dict[str, list[str]]:
-    doc_ids = [await ingestion.submit_document(await f.read(), f.filename or "upload") for f in files]
+    doc_ids = [await ingestion.submit_document(await f.read(), f.filename or "upload", library) for f in files]
     return {"doc_ids": doc_ids}
 
 

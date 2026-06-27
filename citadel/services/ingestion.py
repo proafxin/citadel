@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import io
 import json
 import logging
@@ -8,7 +7,6 @@ import shutil
 import subprocess
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
 
@@ -24,7 +22,8 @@ from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
 from redis.exceptions import ResponseError
 
-from citadel.schemas.document import Block, ParsedDocument
+from citadel.schemas.content import Block
+from citadel.services import persistence
 from config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -102,18 +101,12 @@ def _norm_dir() -> Path:
     return get_settings().data_dir / "normalized"
 
 
-def _result_dir() -> Path:
-    return get_settings().data_dir / "results"
-
-
 # ---- orchestrator side ----------------------------------------------------------------
 
 
-async def submit_document(data: bytes, filename: str) -> str:
-    doc_id = hashlib.sha256(data).hexdigest()  # deterministic per content → same file reuses its key, no flood
+async def submit_document(data: bytes, filename: str, library: str) -> str:
+    doc_id = str(await persistence.create_document(library, filename))
     redis = get_redis()
-    await redis.delete(f"doc:{doc_id}", f"blocks:{doc_id}")  # clean slate so a re-ingest reprocesses from scratch
-    (_result_dir() / f"{doc_id}.json").unlink(missing_ok=True)
     _raw_dir().mkdir(parents=True, exist_ok=True)
     (_raw_dir() / doc_id).write_bytes(data)
     await redis.hset(
@@ -121,7 +114,7 @@ async def submit_document(data: bytes, filename: str) -> str:
         mapping={"state": "queued", "filename": filename, "done_count": 0, "t0": time.time()},
     )
     await redis.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": filename})
-    logger.info("ingest file=%s", filename)
+    logger.info("ingest file=%s doc_id=%s", filename, doc_id)
     return doc_id
 
 
@@ -131,10 +124,7 @@ async def get_status(doc_id: str) -> dict[str, str]:
 
 
 async def get_result(doc_id: str) -> dict | None:
-    path = _result_dir() / f"{doc_id}.json"
-    if not path.exists():
-        return None
-    return json.loads(path.read_text())
+    return await persistence.get_document_blocks(int(doc_id))
 
 
 # ---- normalize stage (CPU / process pool) ---------------------------------------------
@@ -299,7 +289,7 @@ def map_content_block(block: object, page_idx: int) -> Block:
 async def record_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
     redis = get_redis()
     # hsetnx: a reclaimed/duplicate delivery of the same page is a no-op (first write wins, no double-count)
-    if not await redis.hsetnx(f"blocks:{doc_id}", str(page_idx), json.dumps([asdict(b) for b in blocks])):
+    if not await redis.hsetnx(f"blocks:{doc_id}", str(page_idx), json.dumps([b.model_dump() for b in blocks])):
         return
     done = await redis.hincrby(f"doc:{doc_id}", "done_count", 1)
     expected = int(await redis.hget(f"doc:{doc_id}", "page_count") or 0)
@@ -488,7 +478,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
 
 
 def _dump_blocks(blocks: list[Block]) -> str:
-    return json.dumps([asdict(b) for b in blocks])
+    return json.dumps([b.model_dump() for b in blocks])
 
 
 def _load_blocks(blob: str) -> list[Block]:
@@ -519,18 +509,6 @@ async def emit_vlm_only(fields: dict[str, str]) -> None:
 # ---- merge stage ----------------------------------------------------------------------
 
 
-def blocks_to_markdown(blocks: list[Block]) -> str:
-    lines: list[str] = []
-    for block in blocks:
-        if block.type in {"title", "header"} and block.text:
-            lines.append(f"{'#' * (block.text_level or 1)} {block.text}")
-        elif block.type == "list" and block.list_items:
-            lines.extend(f"- {item}" for item in block.list_items)
-        elif block.text:
-            lines.append(block.text)
-    return "\n\n".join(lines)
-
-
 async def handle_merge(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
@@ -539,12 +517,8 @@ async def handle_merge(fields: dict[str, str]) -> None:
     for page_idx in sorted(int(k) for k in per_page):
         blocks.extend(Block(**raw) for raw in json.loads(per_page[str(page_idx).encode()]))
     source = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
-    document = ParsedDocument(source=source, markdown=blocks_to_markdown(blocks), blocks=blocks)
-    _result_dir().mkdir(parents=True, exist_ok=True)
-    (_result_dir() / f"{doc_id}.json").write_text(
-        json.dumps({"source": document.source, "markdown": document.markdown, "blocks": [asdict(b) for b in blocks]})
-    )
     state = "partial" if any(b.type == "error" for b in blocks) else "done"
+    await persistence.save_document_result(int(doc_id), blocks, state)
     await redis.hset(f"doc:{doc_id}", "state", state)
     t0 = float(await redis.hget(f"doc:{doc_id}", "t0") or 0)
     logger.info("merge file=%s state=%s blocks=%d dur=%.1fs", source, state, len(blocks), time.time() - t0)
