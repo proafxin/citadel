@@ -8,7 +8,7 @@ from citadel.db import get_sessionmaker
 from citadel.models.document import Document
 from citadel.models.library import Library
 from citadel.schemas.library import LibraryRead
-from citadel.services.document import build_document_tree
+from citadel.services.document import load_document_tree
 
 
 async def create_library(name: str) -> LibraryRead:
@@ -60,11 +60,12 @@ async def build_library_tree(library_id: int) -> dict | None:
         library = await session.get(Library, library_id)
         if library is None:
             return None
-        documents = list(
-            await session.scalars(select(Document).where(Document.library_id == library_id).order_by(Document.id))
+        name = library.name
+        doc_ids = list(
+            await session.scalars(select(Document.id).where(Document.library_id == library_id).order_by(Document.id))
         )
-        children = [await build_document_tree(session, document) for document in documents]
-        return {"type": "library", "name": library.name, "children": children}
+    children = [tree for doc_id in doc_ids if (tree := load_document_tree(doc_id)) is not None]
+    return {"type": "library", "name": name, "children": children}
 
 
 async def download_library(library_id: int) -> Response:

@@ -1,3 +1,6 @@
+import json
+
+import zstandard
 from fastapi import HTTPException
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
@@ -6,9 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from citadel.db import get_sessionmaker
 from citadel.models.content import Code, ContentNode, Equation, Heading, ListBlock, Paragraph
 from citadel.models.document import Document
+from citadel.models.library import Library
 from citadel.models.table import Table
 from citadel.schemas.content import Block
-from citadel.services.tree import NodeSpec, build_tree, detail_kind, render_markdown
+from citadel.services.tree import NodeSpec, build_search_text, build_tree, detail_kind, render_markdown
+from citadel.storage import get_object, put_object
 
 
 async def create_document(library_id: int, filename: str) -> int:
@@ -49,9 +54,12 @@ def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:
 async def save_document_tree(doc_id: int, blocks: list[Block], status: str) -> None:
     async with get_sessionmaker()() as session, session.begin():
         document = await session.get_one(Document, doc_id)
+        library = await session.get_one(Library, document.library_id)
         document.status = status
+        specs = list(build_tree(blocks, document.library_id, doc_id))
+        search_text = build_search_text(specs, library.name, document.filename)
         id_map: dict[str, int] = {}
-        for spec in build_tree(blocks, document.library_id, doc_id):
+        for spec in specs:
             parent_id = id_map[spec.parent_content_id] if spec.parent_content_id is not None else None
             node = ContentNode(
                 content_id=spec.content_id,
@@ -62,6 +70,7 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: str) -> N
                 type=spec.type,
                 level=spec.level,
                 bbox=spec.bbox,
+                search_text=search_text.get(spec.content_id),
             )
             session.add(node)
             await session.flush()
@@ -145,23 +154,33 @@ async def build_document_tree(session: AsyncSession, document: Document) -> dict
     return {"type": "document", "filename": document.filename, "children": roots}
 
 
-async def get_document_tree(doc_id: int) -> dict | None:
+def _tree_key(doc_id: int) -> str:
+    return f"{doc_id}.json.zst"
+
+
+async def persist_document_tree(doc_id: int) -> None:
     async with get_sessionmaker()() as session:
-        document = await session.get(Document, doc_id)
-        if document is None:
-            return None
-        return await build_document_tree(session, document)
+        document = await session.get_one(Document, doc_id)
+        tree = await build_document_tree(session, document)
+    put_object(_tree_key(doc_id), zstandard.ZstdCompressor().compress(json.dumps(tree).encode()))
+
+
+def load_document_tree(doc_id: int) -> dict | None:
+    raw = get_object(_tree_key(doc_id))
+    if raw is None:
+        return None
+    return json.loads(zstandard.ZstdDecompressor().decompress(raw))
 
 
 async def get_result(doc_id: int) -> dict:
-    tree = await get_document_tree(doc_id)
+    tree = load_document_tree(doc_id)
     if tree is None:
         raise HTTPException(status_code=404, detail="result not ready")
     return tree
 
 
 async def get_markdown(doc_id: int) -> PlainTextResponse:
-    tree = await get_document_tree(doc_id)
+    tree = load_document_tree(doc_id)
     if tree is None:
         raise HTTPException(status_code=404, detail="result not ready")
     return PlainTextResponse(render_markdown(tree), media_type="text/markdown")

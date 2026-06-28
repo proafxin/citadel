@@ -3,8 +3,8 @@ services:
   # MinerU2.5-Pro raw VLM server (OpenAI-compatible). Driven per-page by our workers via
   # mineru-vl-utils http-client (two_step_extract) — NOT the capped-at-3 mineru-api REST path.
   # Only `--engine` is mineru-openai-server's own flag; --host/--port/--gpu-memory-utilization/
-  # --max-num-seqs are forwarded to vLLM. gpu-mem 0.9 = full GPU for the VLM (no co-located query LLM
-  # running yet; dial back to ~0.6 once the retrieval/query LLM shares this GPU).
+  # --max-num-seqs are forwarded to vLLM. gpu-mem 0.5 reserves ~half the 24GB (mobile 5090) for the
+  # co-located BGE-M3 bi-encoder + the local query/generation SLM (text, ~32k ctx for batching).
   # `mineru:latest` is built from MinerU's Dockerfile (model baked in, MINERU_MODEL_SOURCE=local).
   mineru:
     image: mineru:latest
@@ -22,9 +22,9 @@ services:
       - --port
       - "${CITADEL_MINERU_PORT:-8099}"
       - --gpu-memory-utilization
-      - "0.9"
+      - "0.5"
       - --max-num-seqs
-      - "256"
+      - "128"
       - --quantization
       - fp8
       # MM processor cache: enabled but capped (it lives in HOST RAM). a real win on repeated/templated pages
@@ -63,7 +63,7 @@ services:
       - redis-data:/data
 
   postgres:
-    image: postgres:17-alpine
+    image: pgvector/pgvector:pg17
     container_name: citadel-postgres
     restart: always
     environment:
@@ -74,6 +74,8 @@ services:
       - "${CITADEL_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      # runs on first DB init (empty data dir) → creates the pgvector extension; persists in the volume across restarts
+      - ./scripts/db:/docker-entrypoint-initdb.d:ro
 
 volumes:
   redis-data:

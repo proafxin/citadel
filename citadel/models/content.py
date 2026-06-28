@@ -20,6 +20,7 @@ class ContentNode(Base):
     bbox: Mapped[list[float] | None] = mapped_column(JSONB, default=None)
     angle: Mapped[int | None] = mapped_column(default=None)
     merge_prev: Mapped[bool] = mapped_column(default=False)
+    search_text: Mapped[str | None] = mapped_column(Text, default=None)
 
 
 class Paragraph(Base):

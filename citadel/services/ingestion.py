@@ -21,7 +21,7 @@ from redis.exceptions import ResponseError
 
 from citadel.schemas.content import Block
 from citadel.schemas.document import DocumentStatus, IngestResponse
-from citadel.services.document import create_document, save_document_tree
+from citadel.services.document import create_document, persist_document_tree, save_document_tree
 from citadel.services.library import library_exists
 from citadel.utils import normalize_file
 from config import get_settings
@@ -466,6 +466,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
     source = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
     state = "partial" if any(b.type == "error" for b in blocks) else "done"
     await save_document_tree(int(doc_id), blocks, state)
+    await persist_document_tree(int(doc_id))
     await redis.hset(f"doc:{doc_id}", "state", state)
     t0 = float(await redis.hget(f"doc:{doc_id}", "t0") or 0)
     logger.info("merge file=%s state=%s blocks=%d dur=%.1fs", source, state, len(blocks), time.time() - t0)

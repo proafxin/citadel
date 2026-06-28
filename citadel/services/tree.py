@@ -93,6 +93,33 @@ def build_tree(blocks: list[Block], library_id: int, doc_id: int) -> list[NodeSp
     return specs
 
 
+def _leaf_text(spec: NodeSpec) -> str:
+    if spec.kind == "equation":
+        return spec.latex or ""
+    if spec.kind == "list":
+        return " ".join(item.get("content", "") for item in spec.items or [])
+    return spec.text or ""
+
+
+def build_search_text(specs: list[NodeSpec], library_name: str, filename: str) -> dict[str, str]:
+    by_id = {spec.content_id: spec for spec in specs}
+    result: dict[str, str] = {}
+    for spec in specs:
+        if spec.kind in {"heading", "table"}:
+            continue
+        headings: list[str] = []
+        parent = spec.parent_content_id
+        while parent is not None:
+            ancestor = by_id[parent]
+            if ancestor.kind == "heading" and ancestor.text:
+                headings.append(ancestor.text)
+            parent = ancestor.parent_content_id
+        headings.reverse()
+        parts = [library_name, filename, *headings, _leaf_text(spec)]
+        result[spec.content_id] = "\n".join(part for part in parts if part)
+    return result
+
+
 def _render_node(node: dict, parts: list[str]) -> None:
     match detail_kind(node["type"]):
         case "heading":

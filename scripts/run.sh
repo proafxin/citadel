@@ -9,6 +9,8 @@ until docker compose exec -T postgres pg_isready -U "${CITADEL_POSTGRES_USER:-po
     sleep 1
 done
 
+docker compose exec -T postgres psql -U "${CITADEL_POSTGRES_USER:-postgres}" -d "${CITADEL_POSTGRES_DB:-citadel}" -c "CREATE EXTENSION IF NOT EXISTS vector" >/dev/null
+
 until curl -sf "http://localhost:${CITADEL_MINERU_PORT:-8099}/v1/models" >/dev/null 2>&1; do
     sleep 2
 done
