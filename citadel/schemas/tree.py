@@ -1,33 +1,16 @@
-from pydantic import BaseModel, Field
-
-from citadel.schemas.table import CellValue, Column
-
-JsonValue = dict | list | str | int | float | bool | None
+from pydantic import BaseModel
 
 
-class TableView(BaseModel):
-    columns: list[Column]
-    rows: list[list[CellValue]]
-    description: str
-    caption: str | None = None
-
-
-class TreeNode(BaseModel):
+class NodeSpec(BaseModel):
+    content_id: str
+    parent_content_id: str | None
+    ordinal: int
+    page_no: int
     type: str
-    level: int | None = None
-    label: str | None = None
-    content: str | None = None
-    list_items: list[dict] | None = None
-    json: JsonValue = None
-    table: TableView | None = None
-    children: list["TreeNode"] = Field(default_factory=list)
-
-
-class DocumentTree(BaseModel):
-    filename: str
-    nodes: list[TreeNode] = Field(default_factory=list)
-
-
-class LibraryTree(BaseModel):
-    name: str
-    documents: list[DocumentTree] = Field(default_factory=list)
+    kind: str
+    level: int | None
+    bbox: list[float] | None
+    text: str | None = None
+    latex: str | None = None
+    items: list[dict] | None = None
+    table_html: str | None = None

@@ -2,7 +2,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-CellValue = str | int | float | bool | None
+type CellValue = str | int | float | bool | None
 
 
 class ColumnDType(StrEnum):

@@ -1,9 +1,7 @@
 import re
 
-from pydantic import BaseModel
-
 from citadel.schemas.content import Block
-from citadel.schemas.tree import DocumentTree, TreeNode
+from citadel.schemas.tree import NodeSpec
 
 _HEADING_NUM = re.compile(r"^\s*(\d+(?:\.\d+)*)")
 
@@ -17,21 +15,6 @@ _KIND_BY_TYPE = {
     "list_item": "list",
     "table": "table",
 }
-
-
-class NodeSpec(BaseModel):
-    content_id: str
-    parent_content_id: str | None
-    ordinal: int
-    page_no: int
-    type: str
-    kind: str
-    level: int | None
-    bbox: list[float] | None
-    text: str | None = None
-    latex: str | None = None
-    items: list[dict] | None = None
-    table_html: str | None = None
 
 
 def detail_kind(block_type: str) -> str:
@@ -110,30 +93,25 @@ def build_tree(blocks: list[Block], library_id: int, doc_id: int) -> list[NodeSp
     return specs
 
 
-def _render_one(node: TreeNode) -> str:
-    match detail_kind(node.type):
+def _render_node(node: dict, parts: list[str]) -> None:
+    match detail_kind(node["type"]):
         case "heading":
-            return f"{'#' * (node.level or 1)} {node.content or ''}".rstrip()
+            parts.append(f"{'#' * (node.get('level') or 1)} {node.get('content') or ''}".rstrip())
         case "code":
-            return f"```\n{node.content or ''}\n```"
+            parts.append(f"```\n{node.get('content') or ''}\n```")
         case "equation":
-            return f"$$\n{node.content or ''}\n$$"
+            parts.append(f"$$\n{node.get('content') or ''}\n$$")
         case "list":
-            return "\n".join(f"- {item.get('content', '')}" for item in node.list_items or [])
+            parts.append("\n".join(f"- {item.get('content', '')}" for item in node.get("list_items") or []))
         case _:
-            return node.content or ""
-
-
-def _render_node(node: TreeNode, parts: list[str]) -> None:
-    rendered = _render_one(node)
-    if rendered:
-        parts.append(rendered)
-    for child in node.children:
+            if node.get("content"):
+                parts.append(node["content"])
+    for child in node.get("children", []):
         _render_node(child, parts)
 
 
-def render_markdown(document: DocumentTree) -> str:
+def render_markdown(tree: dict) -> str:
     parts: list[str] = []
-    for node in document.nodes:
-        _render_node(node, parts)
+    for child in tree.get("children", []):
+        _render_node(child, parts)
     return "\n\n".join(parts)

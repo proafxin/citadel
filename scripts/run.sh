@@ -17,5 +17,5 @@ uv run alembic upgrade head
 
 trap 'kill 0' EXIT
 
-uv run uvicorn citadel.app:app --host 0.0.0.0 --port 8000 &
+uv run fastapi dev citadel/app.py &
 uv run python citadel/worker.py

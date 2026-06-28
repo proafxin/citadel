@@ -4,15 +4,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from citadel.router import router
-from citadel.services import ingestion
+from citadel.services.ingestion import STREAMS, ensure_group
 from config import configure_logging
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
-    for stream in ingestion.STREAMS:
-        await ingestion.ensure_group(stream)
+    for stream in STREAMS:
+        await ensure_group(stream)
     # retrieval disabled at startup for now — re-enable once the HF cache perms are fixed:
     #   import asyncio; from citadel.services import retrieval
     #   await asyncio.to_thread(retrieval.get_embedder)

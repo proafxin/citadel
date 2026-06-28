@@ -3,21 +3,16 @@ import io
 import json
 import logging
 import re
-import shutil
-import subprocess
+import tempfile
 import time
-from collections.abc import AsyncIterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import lru_cache
-from pathlib import Path
 
 import cv2
-import filetype
 import numpy as np
 import pypdfium2 as pdfium
 import redis.asyncio as aioredis
-import zstandard
-from markdownify import markdownify
+from fastapi import HTTPException, UploadFile
 from mineru_vl_utils import MinerUClient
 from mineru_vl_utils.structs import ContentBlock, ExtractResult
 from PIL import Image
@@ -25,7 +20,10 @@ from rapidocr_onnxruntime import RapidOCR
 from redis.exceptions import ResponseError
 
 from citadel.schemas.content import Block
-from citadel.services import persistence, tree
+from citadel.schemas.document import DocumentStatus, IngestResponse
+from citadel.services.document import create_document, save_document_tree
+from citadel.services.library import library_exists
+from citadel.utils import normalize_file
 from config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -38,10 +36,6 @@ STREAM_MERGE = "merge"
 STREAM_TABLES = "tables"
 STREAM_GAPFILL = "gapfill"  # decoupled CPU stage: scanned pages do RapidOCR gap-fill here, off the GPU OCR slot
 
-OFFICE_EXTS = {"doc", "docx", "ppt", "pptx", "odt", "odp", "rtf"}
-IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"}
-TEXT_EXTS = {"txt", "md", "markdown"}
-HTML_EXTS = {"html", "htm"}
 
 MAX_ATTEMPTS = 3
 LAYER_TYPES = ("text", "title")  # filled from the PDF text layer on born-digital pages (skip VLM recognition)
@@ -84,127 +78,57 @@ def get_paginate_pool() -> ProcessPoolExecutor:
 
 
 def make_profile_pool(n: int) -> asyncio.Queue[str]:
-    # n dedicated LibreOffice profile dirs; a worker holds one per job so concurrent soffice don't collide
-    base = get_settings().data_dir / "lo_profiles"
-    base.mkdir(parents=True, exist_ok=True)
     queue: asyncio.Queue[str] = asyncio.Queue()
-    for i in range(n):
-        profile = base / str(i)
-        profile.mkdir(exist_ok=True)
-        queue.put_nowait(str(profile.resolve()))
+    for _ in range(n):
+        queue.put_nowait(tempfile.mkdtemp(prefix="lo_profile_"))
     return queue
-
-
-def _raw_dir() -> Path:
-    return get_settings().data_dir / "raw"
-
-
-def _norm_dir() -> Path:
-    return get_settings().data_dir / "normalized"
 
 
 # ---- orchestrator side ----------------------------------------------------------------
 
 
-async def submit_document(data: bytes, filename: str, library: str) -> str:
-    doc_id = str(await persistence.create_document(library, filename))
+async def submit_document(data: bytes, filename: str, library_id: int) -> int:
+    doc_id = await create_document(library_id, filename)
     redis = get_redis()
-    _raw_dir().mkdir(parents=True, exist_ok=True)
-    (_raw_dir() / doc_id).write_bytes(data)
     await redis.hset(
         f"doc:{doc_id}",
         mapping={"state": "queued", "filename": filename, "done_count": 0, "t0": time.time()},
     )
-    await redis.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": filename})
+    await redis.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": filename, "data": data})
     logger.info("ingest file=%s doc_id=%s", filename, doc_id)
     return doc_id
 
 
-async def get_status(doc_id: str) -> dict[str, str]:
+async def submit_documents(files: list[UploadFile], library_id: int) -> IngestResponse:
+    if not await library_exists(library_id):
+        raise HTTPException(status_code=404, detail="unknown library")
+    doc_ids = [await submit_document(await file.read(), file.filename or "upload", library_id) for file in files]
+    return IngestResponse(doc_ids=doc_ids)
+
+
+async def get_status(doc_id: int) -> DocumentStatus:
     raw = await get_redis().hgetall(f"doc:{doc_id}")
-    return {k.decode(): v.decode() for k, v in raw.items()}
-
-
-async def get_result(doc_id: str) -> dict | None:
-    result = await persistence.get_document_tree(int(doc_id))
-    return result.model_dump() if result is not None else None
-
-
-async def get_markdown(doc_id: str) -> str | None:
-    result = await persistence.get_document_tree(int(doc_id))
-    return tree.render_markdown(result) if result is not None else None
-
-
-async def library_exists(library_id: int) -> bool:
-    return await persistence.library_exists(library_id)
-
-
-async def stream_library_zstd(library_id: int) -> AsyncIterator[bytes]:
-    compressor = zstandard.ZstdCompressor().compressobj()
-    async for document_tree in persistence.iter_library(library_id):
-        chunk = compressor.compress((document_tree.model_dump_json() + "\n").encode())
-        if chunk:
-            yield chunk
-    tail = compressor.flush()
-    if tail:
-        yield tail
+    if not raw:
+        raise HTTPException(status_code=404, detail="unknown doc_id")
+    data = {key.decode(): value.decode() for key, value in raw.items()}
+    return DocumentStatus(
+        state=data.get("state", ""),
+        filename=data.get("filename"),
+        page_count=int(data["page_count"]) if "page_count" in data else None,
+        done_count=int(data["done_count"]) if "done_count" in data else None,
+    )
 
 
 # ---- normalize stage (CPU / process pool) ---------------------------------------------
 
 
-def _detect_ext(path: Path, filename: str) -> str:
-    guess = filetype.guess(str(path))
-    if guess is not None:
-        return guess.extension
-    return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-
-
-def normalize_file(raw_path_str: str, doc_id: str, filename: str, profile_dir: str) -> str:
-    raw_path = Path(raw_path_str)
-    ext = _detect_ext(raw_path, filename)
-    _norm_dir().mkdir(parents=True, exist_ok=True)
-    if ext in OFFICE_EXTS:
-        soffice = shutil.which("soffice")
-        if soffice is None:
-            raise RuntimeError("libreoffice 'soffice' not found on PATH")
-        subprocess.run(
-            [
-                soffice,
-                f"-env:UserInstallation=file://{profile_dir}",
-                "--headless",
-                "--convert-to",
-                "pdf",
-                "--outdir",
-                str(_norm_dir()),
-                str(raw_path),
-            ],
-            check=True,
-            capture_output=True,
-        )
-        produced = _norm_dir() / f"{raw_path.stem}.pdf"
-        target = _norm_dir() / f"{doc_id}.pdf"
-        produced.rename(target)
-        return "office-pdf"  # born-digital (libreoffice produced it) → paginate renders at the lower dpi
-    if ext == "pdf":
-        shutil.copyfile(raw_path, _norm_dir() / f"{doc_id}.pdf")
-        return "pdf"
-    if ext in IMAGE_EXTS:
-        shutil.copyfile(raw_path, _norm_dir() / f"{doc_id}.{ext}")
-        return f"image:{ext}"
-    if ext in HTML_EXTS:
-        (_norm_dir() / f"{doc_id}.md").write_text(markdownify(raw_path.read_text(encoding="utf-8")))
-        return "text"
-    # txt / md / unknown → treat as text
-    (_norm_dir() / f"{doc_id}.md").write_text(raw_path.read_text(encoding="utf-8", errors="replace"))
-    return "text"
-
-
-async def handle_normalize(fields: dict[str, str], profile_dir: str) -> None:
+async def handle_normalize(fields: dict[str, str], profile_dir: str, data: bytes) -> None:
     doc_id = fields["doc_id"]
     await get_redis().hset(f"doc:{doc_id}", "state", "normalizing")
-    kind = await asyncio.to_thread(normalize_file, str(_raw_dir() / doc_id), doc_id, fields["filename"], profile_dir)
-    await get_redis().xadd(STREAM_NORMALIZED, {"doc_id": doc_id, "kind": kind, "filename": fields["filename"]})
+    kind, normalized = await asyncio.to_thread(normalize_file, data, fields["filename"], profile_dir)
+    await get_redis().xadd(
+        STREAM_NORMALIZED, {"doc_id": doc_id, "kind": kind, "filename": fields["filename"], "data": normalized}
+    )
     logger.info("normalize file=%s kind=%s", fields["filename"], kind)
 
 
@@ -232,10 +156,10 @@ def _cap_image_bytes(image_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
-def render_pdf_pages(pdf_path_str: str, dpi: int) -> list[tuple[bytes, bool]]:
+def render_pdf_pages(pdf_bytes: bytes, dpi: int) -> list[tuple[bytes, bool]]:
     # (png, is_digital) per page; is_digital = has a real text layer and isn't rotated → safe to read by bbox
     pages: list[tuple[bytes, bool]] = []
-    pdf = pdfium.PdfDocument(pdf_path_str)
+    pdf = pdfium.PdfDocument(pdf_bytes)
     scale = dpi / 72
     for page in pdf:
         bio = io.BytesIO()
@@ -246,9 +170,9 @@ def render_pdf_pages(pdf_path_str: str, dpi: int) -> list[tuple[bytes, bool]]:
     return pages
 
 
-def extract_text_by_bbox(pdf_path_str: str, page_idx: int, bboxes: list[list[float]]) -> list[str]:
+def extract_text_by_bbox(pdf_bytes: bytes, page_idx: int, bboxes: list[list[float]]) -> list[str]:
     # exact text from the PDF text layer inside each normalized (0-1, top-left) bbox; pdfium origin is bottom-left
-    pdf = pdfium.PdfDocument(pdf_path_str)
+    pdf = pdfium.PdfDocument(pdf_bytes)
     page = pdf[page_idx]
     width, height = page.get_size()
     textpage = page.get_textpage()
@@ -262,28 +186,27 @@ def extract_text_by_bbox(pdf_path_str: str, page_idx: int, bboxes: list[list[flo
     return texts
 
 
-async def handle_paginate(fields: dict[str, str]) -> None:
+async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
     doc_id = fields["doc_id"]
     kind = fields["kind"]
     redis = get_redis()
     await redis.hset(f"doc:{doc_id}", "state", "paginating")
     if kind == "text":
-        md = (_norm_dir() / f"{doc_id}.md").read_text()
         await redis.hset(f"doc:{doc_id}", "page_count", 1)
-        await record_page(doc_id, 0, [Block(type="text", page_idx=0, text=md)])
+        await record_page(doc_id, 0, [Block(type="text", page_idx=0, text=data.decode("utf-8", errors="replace"))])
         logger.info("paginate file=%s text", fields["filename"])
         return
     if kind.startswith("image:"):
-        raw = (_norm_dir() / f"{doc_id}.{kind.split(':', 1)[1]}").read_bytes()
-        image_bytes = await asyncio.to_thread(_cap_image_bytes, raw)  # cap huge scans → keep the worker's RAM bounded
+        image_bytes = await asyncio.to_thread(_cap_image_bytes, data)  # cap huge scans → keep the worker's RAM bounded
         await redis.hset(f"doc:{doc_id}", "page_count", 1)
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0, "image": image_bytes})
         logger.info("paginate file=%s image", fields["filename"])
         return
+    await redis.set(f"pdf:{doc_id}", data, ex=3600)
     settings = get_settings()
     dpi = settings.digital_render_dpi if kind == "office-pdf" else settings.render_dpi
     loop = asyncio.get_running_loop()
-    pages = await loop.run_in_executor(get_paginate_pool(), render_pdf_pages, str(_norm_dir() / f"{doc_id}.pdf"), dpi)
+    pages = await loop.run_in_executor(get_paginate_pool(), render_pdf_pages, data, dpi)
     await redis.hset(f"doc:{doc_id}", "page_count", len(pages))
     for idx, (image_bytes, digital) in enumerate(pages):
         await redis.xadd(
@@ -472,11 +395,12 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         content_blocks = await client.aio_two_step_extract(img, not_extract_list=list(LAYER_TYPES))
         text_blocks = [cb for cb in content_blocks if cb.type in LAYER_TYPES]
         if text_blocks:
+            pdf_bytes = await get_redis().get(f"pdf:{doc_id}")
             loop = asyncio.get_running_loop()
             texts = await loop.run_in_executor(
                 get_paginate_pool(),
                 extract_text_by_bbox,
-                str(_norm_dir() / f"{doc_id}.pdf"),
+                pdf_bytes,
                 page_idx,
                 [list(cb.bbox) for cb in text_blocks],
             )
@@ -541,7 +465,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
         blocks.extend(Block(**raw) for raw in json.loads(per_page[str(page_idx).encode()]))
     source = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
     state = "partial" if any(b.type == "error" for b in blocks) else "done"
-    await persistence.save_document_tree(int(doc_id), blocks, state)
+    await save_document_tree(int(doc_id), blocks, state)
     await redis.hset(f"doc:{doc_id}", "state", state)
     t0 = float(await redis.hget(f"doc:{doc_id}", "t0") or 0)
     logger.info("merge file=%s state=%s blocks=%d dur=%.1fs", source, state, len(blocks), time.time() - t0)
@@ -549,11 +473,8 @@ async def handle_merge(fields: dict[str, str]) -> None:
 
 async def cleanup(doc_id: str) -> None:
     redis = get_redis()
-    await redis.delete(f"blocks:{doc_id}")
+    await redis.delete(f"blocks:{doc_id}", f"pdf:{doc_id}")
     await redis.expire(f"doc:{doc_id}", 3600)  # keep final status briefly, then auto-evict — no accumulation
-    (_raw_dir() / doc_id).unlink(missing_ok=True)
-    for path in _norm_dir().glob(f"{doc_id}.*"):
-        path.unlink(missing_ok=True)
 
 
 # ---- stage wiring (used by the worker entrypoint) -------------------------------------

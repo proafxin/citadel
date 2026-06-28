@@ -1,7 +1,6 @@
 import logging
 import os
 from functools import lru_cache
-from pathlib import Path
 
 from loguru import logger as loguru_logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,8 +28,6 @@ class Settings(BaseSettings):
     postgres_user: str = "postgres"
     postgres_password: str
     postgres_db: str = "citadel"
-
-    data_dir: Path = Path("data")  # raw/<doc_id>, normalized/<doc_id>, results/<doc_id>.json
 
     render_dpi: int = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
     digital_render_dpi: int = 110  # office→pdf ONLY (provably born-digital): image is layout-only, text from the PDF layer → render small. validate layout still holds; regular pdf stays at render_dpi

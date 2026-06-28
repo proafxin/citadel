@@ -1,59 +1,72 @@
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi import APIRouter, File, UploadFile
+from fastapi.responses import PlainTextResponse, Response
 
-from citadel.services import ingestion
+from citadel.schemas.document import DocumentStatus, IngestResponse
+from citadel.schemas.library import LibraryCreate, LibraryRead
+from citadel.services.document import get_markdown, get_result
+from citadel.services.ingestion import get_status, submit_documents
+from citadel.services.library import (
+    create_library,
+    delete_library,
+    download_library,
+    get_library,
+    list_libraries,
+    update_library,
+)
 
 router = APIRouter()
 
 
-# /search disabled for now — retrieval is off until the HF cache perms are fixed:
-#   import asyncio; from citadel.services import retrieval
-#   @router.get("/search")
-#   async def search(q: str) -> list[dict]:
-#       return await asyncio.to_thread(retrieval.search, q)
+@router.post("/libraries")
+async def post_library(body: LibraryCreate) -> LibraryRead:
+    return await create_library(body.name)
 
 
-@router.post("/ingest")
-async def ingest(
+@router.get("/libraries")
+async def get_libraries() -> list[LibraryRead]:
+    return await list_libraries()
+
+
+@router.get("/libraries/{library_id}")
+async def get_one_library(library_id: int) -> LibraryRead:
+    return await get_library(library_id)
+
+
+@router.put("/libraries/{library_id}")
+async def put_library(library_id: int, body: LibraryCreate) -> LibraryRead:
+    return await update_library(library_id, body.name)
+
+
+@router.delete("/libraries/{library_id}")
+async def remove_library(library_id: int) -> None:
+    await delete_library(library_id)
+
+
+@router.post("/libraries/{library_id}/documents")
+async def post_documents(
+    library_id: int,
     files: Annotated[list[UploadFile], File(description="Select multiple files to upload")],
-    library: Annotated[str, Form()] = "default",
-) -> dict[str, list[str]]:
-    doc_ids = [await ingestion.submit_document(await f.read(), f.filename or "upload", library) for f in files]
-    return {"doc_ids": doc_ids}
+) -> IngestResponse:
+    return await submit_documents(files, library_id)
+
+
+@router.get("/libraries/{library_id}/tree")
+async def get_library_tree(library_id: int) -> Response:
+    return await download_library(library_id)
 
 
 @router.get("/status/{doc_id}")
-async def status(doc_id: str) -> dict[str, str]:
-    state = await ingestion.get_status(doc_id)
-    if not state:
-        raise HTTPException(status_code=404, detail="unknown doc_id")
-    return state
+async def get_doc_status(doc_id: int) -> DocumentStatus:
+    return await get_status(doc_id)
 
 
 @router.get("/result/{doc_id}")
-async def result(doc_id: str) -> dict:
-    payload = await ingestion.get_result(doc_id)
-    if payload is None:
-        raise HTTPException(status_code=404, detail="result not ready")
-    return payload
-
-
-@router.get("/library/{library_id}")
-async def library(library_id: int) -> StreamingResponse:
-    if not await ingestion.library_exists(library_id):
-        raise HTTPException(status_code=404, detail="unknown library")
-    return StreamingResponse(
-        ingestion.stream_library_zstd(library_id),
-        media_type="application/zstd",
-        headers={"Content-Disposition": f'attachment; filename="library_{library_id}.ndjson.zst"'},
-    )
+async def get_doc_result(doc_id: int) -> dict:
+    return await get_result(doc_id)
 
 
 @router.get("/markdown/{doc_id}")
-async def markdown(doc_id: str) -> PlainTextResponse:
-    text = await ingestion.get_markdown(doc_id)
-    if text is None:
-        raise HTTPException(status_code=404, detail="result not ready")
-    return PlainTextResponse(text, media_type="text/markdown")
+async def get_doc_markdown(doc_id: int) -> PlainTextResponse:
+    return await get_markdown(doc_id)
