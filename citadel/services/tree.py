@@ -3,8 +3,6 @@ import re
 from citadel.schemas.content import Block
 from citadel.schemas.tree import NodeSpec
 
-_HEADING_NUM = re.compile(r"^\s*(\d+(?:\.\d+)*)")
-
 _KIND_BY_TYPE = {
     "title": "heading",
     "code": "code",
@@ -16,80 +14,189 @@ _KIND_BY_TYPE = {
     "table": "table",
 }
 
+_LIST_MARKER = re.compile(r"^\s*(?:[●○•▪◦‣·*]\s|[-–—]\s|\(?\d{1,3}[.)]\s|\(?[A-Za-z][.)]\s|\([A-Za-z0-9]+\)\s)")
+_BULLET_GLYPH = re.compile(r"^\s*[●○•▪◦‣·*\-–—]\s+")
+_NUM_DOTTED = re.compile(r"^\s*\d+(?:\.\d+)+")
+_NUM_SINGLE = re.compile(r"^\s*\d+\.")
+_HEADING_SPLIT = re.compile(r'(?<=["”:.?)])\s*\n\s*')
+
 
 def detail_kind(block_type: str) -> str:
     return _KIND_BY_TYPE.get(block_type, "paragraph")
-
-
-def heading_level(text: str) -> int:
-    match = _HEADING_NUM.match(text or "")
-    return match.group(1).count(".") + 1 if match else 1
 
 
 def make_content_id(library_id: int, doc_id: int, page_no: int, ordinal: int) -> str:
     return f"{library_id}_{doc_id}_{page_no}_{ordinal}"
 
 
+def _flatten(text: str | None) -> str:
+    return re.sub(r"\s*[\r\n]+\s*", " ", text or "").strip()
+
+
+def _normalize_newlines(text: str | None) -> str:
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def is_list_item(block: Block) -> bool:
+    text = (block.text or "").strip()
+    if not text:
+        return False
+    kind = detail_kind(block.type)
+    if kind == "list":
+        return True
+    return kind == "paragraph" and _LIST_MARKER.match(text) is not None
+
+
+def split_heading(text: str) -> list[str]:
+    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    parts = [re.sub(r"\s*\n\s*", " ", part).strip() for part in _HEADING_SPLIT.split(raw)]
+    parts = [part for part in parts if part]
+    return parts or [""]
+
+
+def pattern_level(text: str) -> int:
+    stripped = (text or "").strip()
+    if not stripped:
+        return 1
+    letters = [char for char in stripped if char.isalpha()]
+    if stripped.upper().startswith("SECTION") or (letters and all(char.isupper() for char in letters)):
+        return 1
+    dotted = _NUM_DOTTED.match(stripped)
+    if dotted:
+        return 1 + stripped[: dotted.end()].count(".")
+    if _NUM_SINGLE.match(stripped) or stripped.endswith(":"):
+        return 2
+    return 3
+
+
+def heading_font_levels(blocks: list[Block]) -> dict[float, int]:
+    heads = [block.font_size for block in blocks if detail_kind(block.type) == "heading" and block.font_size]
+    sizes = sorted({round(size * 2) / 2 for size in heads}, reverse=True)
+    if len(sizes) <= 1:
+        return {}
+    return {size: rank + 1 for rank, size in enumerate(sizes)}
+
+
+def _next_ordinal(counters: dict[int, int], page_no: int) -> int:
+    ordinal = counters.get(page_no, 0) + 1
+    counters[page_no] = ordinal
+    return ordinal
+
+
+def _push(stack: list[tuple[int, str]], level: int, content_id: str) -> str | None:
+    while stack and stack[-1][0] >= level:
+        stack.pop()
+    parent = stack[-1][1] if stack else None
+    stack.append((level, content_id))
+    return parent
+
+
+def _list_node(
+    blocks: list[Block], idx: int, library_id: int, doc_id: int, stack: list[tuple[int, str]], counters: dict[int, int]
+) -> tuple[NodeSpec, int]:
+    page_idx = blocks[idx].page_idx
+    bbox = blocks[idx].bbox
+    items: list[dict] = []
+    while idx < len(blocks) and blocks[idx].page_idx == page_idx and is_list_item(blocks[idx]):
+        content = _BULLET_GLYPH.sub("", (blocks[idx].text or "").strip(), count=1)
+        items.append({"ordinal": len(items), "content": _flatten(content)})
+        idx += 1
+    page_no = page_idx + 1
+    ordinal = _next_ordinal(counters, page_no)
+    spec = NodeSpec(
+        content_id=make_content_id(library_id, doc_id, page_no, ordinal),
+        parent_content_id=stack[-1][1] if stack else None,
+        ordinal=ordinal,
+        page_no=page_no,
+        type="list",
+        kind="list",
+        level=None,
+        bbox=bbox,
+        items=items,
+    )
+    return spec, idx
+
+
+def _heading_nodes(
+    block: Block,
+    library_id: int,
+    doc_id: int,
+    stack: list[tuple[int, str]],
+    counters: dict[int, int],
+    font_levels: dict[float, int],
+) -> list[NodeSpec]:
+    page_no = block.page_idx + 1
+    pieces = split_heading(block.text or "")
+    font_level = font_levels.get(round(block.font_size * 2) / 2) if block.font_size else None
+    nodes: list[NodeSpec] = []
+    for piece in pieces:
+        level = font_level if (font_level and len(pieces) == 1) else pattern_level(piece)
+        ordinal = _next_ordinal(counters, page_no)
+        content_id = make_content_id(library_id, doc_id, page_no, ordinal)
+        parent = _push(stack, level, content_id)
+        nodes.append(
+            NodeSpec(
+                content_id=content_id,
+                parent_content_id=parent,
+                ordinal=ordinal,
+                page_no=page_no,
+                type=block.type,
+                kind="heading",
+                level=level,
+                bbox=block.bbox,
+                text=piece,
+            )
+        )
+    return nodes
+
+
+def _content_node(
+    block: Block, library_id: int, doc_id: int, stack: list[tuple[int, str]], counters: dict[int, int]
+) -> NodeSpec:
+    page_no = block.page_idx + 1
+    kind = detail_kind(block.type)
+    ordinal = _next_ordinal(counters, page_no)
+    spec = NodeSpec(
+        content_id=make_content_id(library_id, doc_id, page_no, ordinal),
+        parent_content_id=stack[-1][1] if stack else None,
+        ordinal=ordinal,
+        page_no=page_no,
+        type=block.type,
+        kind=kind,
+        level=None,
+        bbox=block.bbox,
+    )
+    match kind:
+        case "equation":
+            spec.latex = _normalize_newlines(block.text)
+        case "table":
+            spec.table_html = block.text
+        case "code":
+            spec.text = _normalize_newlines(block.text)
+        case _:
+            spec.text = _flatten(block.text)
+    return spec
+
+
 def build_tree(blocks: list[Block], library_id: int, doc_id: int) -> list[NodeSpec]:
+    font_levels = heading_font_levels(blocks)
     specs: list[NodeSpec] = []
     stack: list[tuple[int, str]] = []
     counters: dict[int, int] = {}
     idx = 0
-    total = len(blocks)
-    while idx < total:
+    while idx < len(blocks):
         block = blocks[idx]
-        kind = detail_kind(block.type)
-        page_no = block.page_idx + 1
-        if kind == "list":
-            run: list[Block] = []
-            while idx < total and detail_kind(blocks[idx].type) == "list" and blocks[idx].page_idx == block.page_idx:
-                if blocks[idx].text:
-                    run.append(blocks[idx])
-                idx += 1
-            ordinal = counters.get(page_no, 0) + 1
-            counters[page_no] = ordinal
-            specs.append(
-                NodeSpec(
-                    content_id=make_content_id(library_id, doc_id, page_no, ordinal),
-                    parent_content_id=stack[-1][1] if stack else None,
-                    ordinal=ordinal,
-                    page_no=page_no,
-                    type="list",
-                    kind="list",
-                    level=None,
-                    bbox=block.bbox,
-                    items=[{"ordinal": i, "content": item.text or ""} for i, item in enumerate(run)],
-                )
-            )
-            continue
-        ordinal = counters.get(page_no, 0) + 1
-        counters[page_no] = ordinal
-        content_id = make_content_id(library_id, doc_id, page_no, ordinal)
-        level = heading_level(block.text or "") if kind == "heading" else None
-        if level is not None:
-            while stack and stack[-1][0] >= level:
-                stack.pop()
-        spec = NodeSpec(
-            content_id=content_id,
-            parent_content_id=stack[-1][1] if stack else None,
-            ordinal=ordinal,
-            page_no=page_no,
-            type=block.type,
-            kind=kind,
-            level=level,
-            bbox=block.bbox,
-        )
-        match kind:
-            case "equation":
-                spec.latex = block.text
-            case "table":
-                spec.table_html = block.text
-            case _:
-                spec.text = block.text
-        specs.append(spec)
-        if level is not None:
-            stack.append((level, content_id))
-        idx += 1
+        if is_list_item(block):
+            spec, idx = _list_node(blocks, idx, library_id, doc_id, stack, counters)
+            specs.append(spec)
+        elif detail_kind(block.type) == "list":
+            idx += 1
+        elif detail_kind(block.type) == "heading":
+            specs.extend(_heading_nodes(block, library_id, doc_id, stack, counters, font_levels))
+            idx += 1
+        else:
+            specs.append(_content_node(block, library_id, doc_id, stack, counters))
+            idx += 1
     return specs
 
 

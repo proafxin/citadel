@@ -13,7 +13,7 @@ Mandatory. These persist across sessions and devices because this file is commit
 - NEVER disable or ignore a lint/type rule (`# noqa`, `# type: ignore`, broad except). Write code that satisfies ruff (`select = ALL`, preview) and mypy. If a rule genuinely needs an exception, ASK first.
 - Functions over classes. Typed data containers (pydantic / dataclass) are fine; behavior classes are not.
 - Every DB table inherits `citadel.models.base.Base` (id, created_at, updated_at).
-- `uv` for dependencies (`uv add`). No `print` — use logging. Python >= 3.13, line length 120.
+- `uv` for dependencies (`uv add`); run everything (scripts, migrations, tests, the app) via `uv run` (e.g. `uv run python ...`, `uv run alembic ...`, `uv run pytest`) so it uses the project env. No `print` — use logging. Python >= 3.13, line length 120.
 
 ## Build exactly what's asked
 

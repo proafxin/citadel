@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     mineru_port: int = 8099
     mineru_max_connections: int = 256  # hard cap on the shared httpx pool → bounds VLM sockets (match server max-num-seqs)
 
+    qwen_host: str = "localhost"
+    qwen_port: int = 8199  # vLLM OpenAI-compatible SLM (Qwen3.5-9B); 8000=fastapi, 8099=mineru, 8199=qwen
+
     redis_url: str = "redis://localhost:6379/0"
 
     postgres_host: str = "localhost"
@@ -45,6 +48,10 @@ class Settings(BaseSettings):
     @property
     def mineru_base_url(self) -> str:
         return f"http://{self.mineru_host}:{self.mineru_port}"
+
+    @property
+    def qwen_base_url(self) -> str:
+        return f"http://{self.qwen_host}:{self.qwen_port}/v1"
 
     @property
     def database_url(self) -> str:

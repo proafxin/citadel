@@ -51,6 +51,56 @@ services:
               count: all
               capabilities: [gpu]
 
+  # Qwen3.5-9B via vLLM (OpenAI-compatible) for the local SLM tasks: bounded heading-level assignment
+  # (per-doc heading list only), tabular structure/anchors, evidence filtering, chat/report generation.
+  # Co-located with MinerU → gpu-mem utils must sum ≤ ~0.9 (mineru 0.5 + this 0.3). fp8 KV; hybrid arch → tiny KV.
+  # CITADEL_QWEN_MODEL default = QuantTrio/Qwen3.5-9B-AWQ (~6GB, fits at gpu-mem 0.3); higher-quality alt =
+  # official Qwen/Qwen3.5-9B-FP8 (~9GB → set gpu-mem 0.4). bf16 (Qwen/Qwen3.5-9B) ~18GB won't co-fit with MinerU.
+  # vLLM auto-detects the quant from the repo config. CONFIRM: (1) vLLM image >= 0.17 (Qwen3.5 hybrid Gated-DeltaNet);
+  # (2) add the text-only flag (e.g. --language-model-only) to skip the vision tower once you confirm its exact name.
+  qwen:
+    image: vllm/vllm-openai:latest
+    container_name: citadel-qwen
+    restart: always
+    ipc: host
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    command:
+      - --model
+      - ${CITADEL_QWEN_MODEL:-QuantTrio/Qwen3.5-9B-AWQ}
+      - --served-model-name
+      - qwen3.5-9b
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --gpu-memory-utilization
+      - "0.3"
+      - --max-model-len
+      - "32768"
+      - --kv-cache-dtype
+      - fp8
+      - --language-model-only
+      - --enforce-eager
+      - --uvicorn-log-level
+      - warning
+    ports:
+      - "${CITADEL_QWEN_PORT:-8199}:8000"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      # persist torch.compile / CUDA-graph cache so restarts skip recompilation (the slow part of startup)
+      - ~/.cache/vllm:/root/.cache/vllm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   redis:
     image: redis:7-alpine
     container_name: citadel-redis

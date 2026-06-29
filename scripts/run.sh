@@ -19,5 +19,7 @@ uv run alembic upgrade head
 
 trap 'kill 0' EXIT
 
+
 uv run fastapi dev citadel/app.py &
 uv run python citadel/worker.py
+#curl -s -X POST localhost:8000/libraries/1/documents  -F 'files=@/home/masterkenway/Downloads/ocr_input/hearing_iconix.pdf' -F 'files=@/home/masterkenway/Downloads/ocr_input/hearing_iconix.docx'

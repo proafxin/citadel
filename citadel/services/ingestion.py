@@ -11,6 +11,7 @@ from functools import lru_cache
 import cv2
 import numpy as np
 import pypdfium2 as pdfium
+import pypdfium2.raw as pdfium_c
 import redis.asyncio as aioredis
 from fastapi import HTTPException, UploadFile
 from mineru_vl_utils import MinerUClient
@@ -170,20 +171,30 @@ def render_pdf_pages(pdf_bytes: bytes, dpi: int) -> list[tuple[bytes, bool]]:
     return pages
 
 
-def extract_text_by_bbox(pdf_bytes: bytes, page_idx: int, bboxes: list[list[float]]) -> list[str]:
-    # exact text from the PDF text layer inside each normalized (0-1, top-left) bbox; pdfium origin is bottom-left
+def _page_char_fonts(textpage: object) -> list[tuple[float, float, float]]:
+    # (center_x, center_y, font_size) per char in the PDF text layer; pdfium origin is bottom-left, points
+    chars: list[tuple[float, float, float]] = []
+    for index in range(textpage.count_chars()):
+        left, bottom, right, top = textpage.get_charbox(index)
+        chars.append(((left + right) / 2, (bottom + top) / 2, pdfium_c.FPDFText_GetFontSize(textpage.raw, index)))
+    return chars
+
+
+def extract_layer_by_bbox(pdf_bytes: bytes, page_idx: int, bboxes: list[list[float]]) -> list[tuple[str, float | None]]:
+    # exact text + dominant font size from the PDF text layer inside each normalized (0-1, top-left) bbox
     pdf = pdfium.PdfDocument(pdf_bytes)
     page = pdf[page_idx]
     width, height = page.get_size()
     textpage = page.get_textpage()
-    texts = [
-        textpage.get_text_bounded(
-            left=x0 * width, bottom=(1 - y1) * height, right=x1 * width, top=(1 - y0) * height
-        ).strip()
-        for x0, y0, x1, y1 in bboxes
-    ]
+    chars = _page_char_fonts(textpage)
+    out: list[tuple[str, float | None]] = []
+    for x0, y0, x1, y1 in bboxes:
+        left, right, bottom, top = x0 * width, x1 * width, (1 - y1) * height, (1 - y0) * height
+        text = textpage.get_text_bounded(left=left, bottom=bottom, right=right, top=top).strip()
+        sizes = [size for cx, cy, size in chars if left <= cx <= right and bottom <= cy <= top and size > 0]
+        out.append((text, max(sizes) if sizes else None))
     pdf.close()
-    return texts
+    return out
 
 
 async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
@@ -229,6 +240,7 @@ def map_content_block(block: object, page_idx: int) -> Block:
         bbox=list(get("bbox") or []),
         text=str(text),
         list_items=list(get("list_items") or []),
+        font_size=get("font_size"),
     )
 
 
@@ -397,16 +409,17 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         if text_blocks:
             pdf_bytes = await get_redis().get(f"pdf:{doc_id}")
             loop = asyncio.get_running_loop()
-            texts = await loop.run_in_executor(
+            layer = await loop.run_in_executor(
                 get_paginate_pool(),
-                extract_text_by_bbox,
+                extract_layer_by_bbox,
                 pdf_bytes,
                 page_idx,
                 [list(cb.bbox) for cb in text_blocks],
             )
-            for cb, text in zip(text_blocks, texts, strict=False):
+            for cb, (text, size) in zip(text_blocks, layer, strict=False):
                 if text:
                     cb.content = text
+                cb["font_size"] = size
         # digital only: the VLM never read these text blocks (we used the layer), so a focused crop is a fresh
         # attempt that can catch handwriting the layer lacks. on scanned pages the VLM already read them, so a
         # re-crop only risks re-introducing the same drop and slightly degrading the text — skip it there.
