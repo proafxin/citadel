@@ -529,5 +529,5 @@ book_task.json
 book_result.json
 bake_mineru/*
 data/*
-benchmarks/*
-!benchmarks/RESULTS.md
+benchmarks/out/*
+#!benchmarks/RESULTS.md

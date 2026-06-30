@@ -54,4 +54,8 @@ def normalize_file(data: bytes, filename: str, profile_dir: str) -> tuple[str, b
         return "pdf", data
     if ext in IMAGE_EXTS:
         return f"image:{ext}", data
+    if ext == "csv":
+        return "csv", data
+    if ext in {"tsv", "tab"}:
+        return "tsv", data
     return "text", data.decode("utf-8", errors="replace").encode()

@@ -6,6 +6,7 @@ import logging
 import httpx
 
 from citadel.prompts import load_prompt
+from citadel.schemas.table import Column
 from citadel.schemas.tree import HeadingInfo
 from config import get_settings
 
@@ -47,6 +48,21 @@ async def _chat(prompt: str, fmt: dict | str) -> str:
 
 async def call_slm(prompt: str, schema: dict) -> dict:
     return json.loads(_extract_json(await _chat(prompt, schema)))
+
+
+_DESCRIPTION_SCHEMA = {
+    "type": "object",
+    "properties": {"description": {"type": "string"}},
+    "required": ["description"],
+}
+
+
+async def describe_table(columns: list[Column], sample_rows: list[list], context: str) -> str:
+    header = " | ".join(column.header or f"col{index}" for index, column in enumerate(columns))
+    rows = "\n".join(" | ".join("" if value is None else str(value) for value in row) for row in sample_rows)
+    prompt = f"{load_prompt('table_description')}\nsource: {context}\ncolumns: {header}\nsample rows:\n{rows}"
+    data = await call_slm(prompt, _DESCRIPTION_SCHEMA)
+    return str(data.get("description", ""))
 
 
 async def level_headings(headings: list[HeadingInfo]) -> dict[int, int]:

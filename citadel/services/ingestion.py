@@ -20,8 +20,10 @@ from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
 from redis.exceptions import ResponseError
 
+from citadel.llm import describe_table
 from citadel.schemas.content import Block
 from citadel.schemas.document import DocumentStatus, IngestResponse
+from citadel.services.delimited import read_csv_table
 from citadel.services.document import (
     create_document,
     finalize_tabular,
@@ -220,13 +222,19 @@ async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0, "image": image_bytes})
         logger.info("paginate file=%s image", fields["filename"])
         return
-    if kind == "xlsx":
-        await redis.set(f"xlsx:{doc_id}", data, ex=3600)
-        names = await asyncio.to_thread(sheet_names, data)
-        await redis.hset(f"doc:{doc_id}", mapping={"page_count": len(names), "mode": "tabular"})
-        for sheet_no in range(1, len(names) + 1):
-            await redis.xadd(STREAM_TABLES, {"doc_id": doc_id, "sheet_no": sheet_no})
-        logger.info("paginate file=%s sheets=%d", fields["filename"], len(names))
+    if kind in ("xlsx", "csv", "tsv"):
+        await redis.set(f"tabular:{doc_id}", data, ex=3600)
+        await redis.hset(f"doc:{doc_id}", "mode", "tabular")
+        if kind == "xlsx":
+            names = await asyncio.to_thread(sheet_names, data)
+            await redis.hset(f"doc:{doc_id}", "page_count", len(names))
+            for sheet_no in range(1, len(names) + 1):
+                await redis.xadd(STREAM_TABLES, {"doc_id": doc_id, "kind": kind, "sheet_no": sheet_no})
+            logger.info("paginate file=%s sheets=%d", fields["filename"], len(names))
+        else:
+            await redis.hset(f"doc:{doc_id}", "page_count", 1)
+            await redis.xadd(STREAM_TABLES, {"doc_id": doc_id, "kind": kind, "sheet_no": 0})
+            logger.info("paginate file=%s kind=%s", fields["filename"], kind)
         return
     await redis.set(f"pdf:{doc_id}", data, ex=3600)
     settings = get_settings()
@@ -287,11 +295,22 @@ async def record_sheet(doc_id: str, sheet_no: int) -> None:
 
 async def handle_tabular(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
+    kind = fields["kind"]
     sheet_no = int(fields["sheet_no"])
-    data = await get_redis().get(f"xlsx:{doc_id}")
-    sheet = await asyncio.to_thread(extract_sheet_no, data, sheet_no)
-    tables = await extract_tables(sheet)
-    await save_sheet_tables(int(doc_id), sheet_no, sheet.sheet_name, tables)
+    redis = get_redis()
+    data = await redis.get(f"tabular:{doc_id}")
+    if kind == "xlsx":
+        sheet = await asyncio.to_thread(extract_sheet_no, data, sheet_no)
+        tables = await extract_tables(sheet)
+        sheet_name = sheet.sheet_name
+    else:
+        filename = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
+        separator = "\t" if kind == "tsv" else ","
+        table = await asyncio.to_thread(read_csv_table, data, separator)
+        table.description = await describe_table(table.columns, table.sample_rows, filename)
+        tables = [(1, table)]
+        sheet_name = filename
+    await save_sheet_tables(int(doc_id), sheet_no, sheet_name, tables)
     await record_sheet(doc_id, sheet_no)
 
 
@@ -527,7 +546,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
 
 async def cleanup(doc_id: str) -> None:
     redis = get_redis()
-    await redis.delete(f"blocks:{doc_id}", f"pdf:{doc_id}", f"xlsx:{doc_id}", f"sheets:{doc_id}")
+    await redis.delete(f"blocks:{doc_id}", f"pdf:{doc_id}", f"tabular:{doc_id}", f"sheets:{doc_id}")
     await redis.expire(f"doc:{doc_id}", 3600)  # keep final status briefly, then auto-evict — no accumulation
 
 
