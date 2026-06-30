@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 
 from citadel.models.base import Base
-from citadel.models.content import Code, ContentNode, Equation, JsonBlock, ListBlock, Paragraph
+from citadel.models.content import Code, ContentNode, Equation, ListBlock, Paragraph
 from citadel.models.document import Document
 from citadel.models.library import Library
 from citadel.models.table import Table, TableRow

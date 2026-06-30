@@ -1,12 +1,10 @@
-\documentclass[presentation,aspectratio=169]{beamer}
+\documentclass[presentation,aspectratio=169,12pt]{beamer}
 
 \usepackage{newcomputermodern}
-\usepackage{booktabs}
 \usepackage{amsmath}
 
 \usetheme{Madrid}
 \usecolortheme{beaver}
-
 \usefonttheme{professionalfonts}
 \usefonttheme{serif}
 
@@ -14,7 +12,7 @@
 \setbeamertemplate{footline}[frame number]
 
 \title{Citadel}
-\subtitle{Transform Documents into Lossless Queryable Data}
+\subtitle{The Deterministic Knowledge Layer for Enterprise Data}
 \author{Masum Billal}
 \date{2026}
 
@@ -24,80 +22,83 @@
 	\frame{\titlepage}
 
 	% ---------------- SLIDE 1 ----------------
-	\begin{frame}{The Problem}
-		Companies are drowning in documents:
+	\begin{frame}{Enterprise Data is Not Usable at Query Time}
+		Companies already have the data:
+
 		\begin{itemize}
-			\item PDFs, Excel files, contracts, reports, scanned records
+			\item PDFs, Excel models, contracts, reports
 		\end{itemize}
 
 		\vspace{0.4cm}
 
-		But they are not truly usable.
+		But when leaders ask real questions:
 
-		\vspace{0.3cm}
-
-		\textbf{When someone asks:}
 		\begin{quote}
 			What changed in revenue across all reports since 2019?
 		\end{quote}
 
-		The answer is still:
+		the answer is still:
+
 		\begin{itemize}
-			\item manual work
-			\item spreadsheets rebuilt from scratch
+			\item manual reconstruction
+			\item spreadsheet rebuilding
 			\item human interpretation
 		\end{itemize}
 
 		\vspace{0.3cm}
+
 		\textbf{Enterprise knowledge exists — but it is not computable.}
 	\end{frame}
 
 	% ---------------- SLIDE 2 ----------------
-	\begin{frame}{Why This Is Broken}
-		Current AI systems try to “read” documents:
+	\begin{frame}{Why Existing AI Systems Fail}
+		Modern AI pipelines:
 
 		\begin{itemize}
-			\item OCR extracts text
-			\item LLMs summarize it
-			\item search systems embed it
+			\item OCR → text
+			\item chunking → embeddings
+			\item LLM → reasoning
 		\end{itemize}
 
-		\vspace{0.3cm}
+		\vspace{0.4cm}
 
-		But one critical thing is lost:
+		But one thing is lost permanently:
 
 		\vspace{0.2cm}
 		\textbf{structure}
 
 		\vspace{0.3cm}
 
-		Tables become text. Layout becomes noise. Relationships disappear.
+		Tables become text. Layout disappears. Relationships break.
 
 		\vspace{0.3cm}
 
-		So the AI is forced to guess.
+		So AI is forced to guess.
 
 		\vspace{0.2cm}
-		\textbf{Guessing is unacceptable in financial, legal, and regulated workflows.}
+
+		\textbf{Guessing breaks financial, legal, and audit-grade workflows.}
 	\end{frame}
 
 	% ---------------- SLIDE 3 ----------------
-	\begin{frame}{The Real Bottleneck}
-		Answering important questions today requires:
+	\begin{frame}{The Real Problem}
+		Enterprise workflows today are not search problems.
+
+		They are reconstruction problems:
 
 		\begin{itemize}
-			\item manual document reconstruction
-			\item repeated data cleaning
-			\item multiple teams redoing the same work
+			\item re-reading documents
+			\item rebuilding tables manually
+			\item re-validating numbers repeatedly
 		\end{itemize}
 
-		\vspace{0.3cm}
+		\vspace{0.4cm}
 
 		\textbf{Result:}
 		\begin{itemize}
 			\item days to answer simple questions
-			\item inconsistent outputs
-			\item high risk of error
+			\item inconsistent outputs across teams
+			\item high operational risk
 		\end{itemize}
 
 		\vspace{0.3cm}
@@ -106,18 +107,18 @@
 	\end{frame}
 
 	% ---------------- SLIDE 4 ----------------
-	\begin{frame}{The Insight}
-		We don’t need better document summaries.
+	\begin{frame}{Insight}
+		We don’t need better document understanding.
 
 		\vspace{0.4cm}
 
-		We need something different:
+		We need a new primitive:
 
 		\vspace{0.3cm}
 
 		\begin{center}
 			\Large
-			\textbf{Documents should behave like databases.}
+			\textbf{Documents should behave like databases}
 		\end{center}
 
 		\vspace{0.3cm}
@@ -130,166 +131,118 @@
 	\end{frame}
 
 	% ---------------- SLIDE 5 ----------------
-	\begin{frame}{The Citadel Solution}
-		Citadel converts any document into structured data:
+	\begin{frame}{The Citadel Approach}
+		Citadel converts documents into structured systems of record.
+
+		\vspace{0.3cm}
+
+		We ingest:
 
 		\begin{itemize}
 			\item PDFs
 			\item Excel files
 			\item Word documents
-			\item scanned images
-			\item CSV / JSON
+			\item scans, CSV, JSON
 		\end{itemize}
 
 		\vspace{0.3cm}
 
-		Into:
-
-		\vspace{0.2cm}
+		And compile them into:
 
 		\begin{center}
-			\textbf{a structured, queryable system of record}
+			\textbf{a relational, queryable enterprise knowledge layer}
 		\end{center}
 	\end{frame}
 
 	% ---------------- SLIDE 6 ----------------
 	\begin{frame}{How It Works}
 		\begin{enumerate}
-			\item Ingest documents
-			\item Extract structure (tables, layout, text)
-			\item Store as relational data
-			\item Let AI generate queries
+			\item Ingest any document format
+			\item Extract full structure (tables, layout, text)
+			\item Store as relational data (Postgres)
+			\item AI generates SQL queries
 			\item Database returns exact answers
 		\end{enumerate}
 
 		\vspace{0.4cm}
 
 		\begin{center}
+			\Large
 			\textbf{AI writes queries. Database computes truth.}
 		\end{center}
 	\end{frame}
 
 	% ---------------- SLIDE 7 ----------------
-	\begin{frame}{Key Difference}
-		Current systems:
+	\begin{frame}{What This Unlocks}
+		Citadel enables:
+
 		\begin{itemize}
-			\item flatten everything into text
-			\item lose structure permanently
-			\item rely on AI to guess meaning
+			\item instant cross-document financial analysis
+			\item contract risk discovery at scale
+			\item audit-ready traceable answers
+			\item enterprise-wide data comparison in seconds
 		\end{itemize}
 
 		\vspace{0.4cm}
 
-		Citadel:
-		\begin{itemize}
-			\item preserves structure at ingestion
-			\item stores real relational data
-			\item never lets AI invent values
-		\end{itemize}
-
-		\vspace{0.3cm}
-
-		\textbf{We remove ambiguity at the source.}
+		\textbf{What used to take days now takes seconds.}
 	\end{frame}
 
 	% ---------------- SLIDE 8 ----------------
-	\begin{frame}{What This Enables}
-		Citadel allows companies to:
-
-		\begin{itemize}
-			\item search across thousands of reports instantly
-			\item compare financials across years in seconds
-			\item extract contract risks across repositories
-			\item run audits without manual reconstruction
-		\end{itemize}
-
-		\vspace{0.3cm}
-
-		\textbf{Days of work become seconds.}
-	\end{frame}
-
-	% ---------------- SLIDE 9 ----------------
-	\begin{frame}{Who It’s For}
-		Built for high-stakes environments:
-
-		\begin{itemize}
-			\item financial services / private equity
-			\item legal teams
-			\item healthcare and clinical research
-			\item government and regulated industries
-		\end{itemize}
-
-		\vspace{0.3cm}
-
-		\textbf{Where wrong answers are not acceptable.}
-	\end{frame}
-
-	% ---------------- SLIDE 10 ----------------
-	\begin{frame}{Why Now}
-		Three shifts make this possible:
-
-		\begin{itemize}
-			\item AI models are strong at reasoning and query generation
-			\item enterprises are overloaded with document-based data
-			\item demand for secure, on-prem systems is increasing
-		\end{itemize}
-
-		\vspace{0.3cm}
-
-		\textbf{The problem is now large enough to require a new layer.}
-	\end{frame}
-
-	% ---------------- SLIDE 11 ----------------
-	\begin{frame}{What Makes Citadel Different}
-		Most tools:
+	\begin{frame}{Why Citadel Wins}
+		Most systems:
 		\begin{itemize}
 			\item improve search
-			\item improve summarization
 			\item improve embeddings
+			\item improve summarization
 		\end{itemize}
 
-		\vspace{0.3cm}
+		\vspace{0.4cm}
 
-		Citadel:
+		Citadel removes the problem entirely:
 
 		\vspace{0.2cm}
 
 		\begin{center}
-			\textbf{converts documents into structured systems of record}
+			\Large
+			\textbf{We make documents directly queryable as data}
 		\end{center}
+
+		\vspace{0.3cm}
+
+		No reconstruction. No guessing. No ambiguity.
 	\end{frame}
 
-	% ---------------- SLIDE 12 ----------------
-	\begin{frame}{The Vision}
+	% ---------------- SLIDE 9 ----------------
+	\begin{frame}{Why Now}
+		Three shifts:
+
+		\begin{itemize}
+			\item AI is now strong at reasoning and query generation
+			\item enterprises are drowning in document-based data
+			\item demand for secure, on-prem systems is rising
+		\end{itemize}
+
+		\vspace{0.4cm}
+
+		\textbf{The system gap is now large enough to fund a new layer.}
+	\end{frame}
+
+	% ---------------- SLIDE 10 ----------------
+	\begin{frame}{Vision}
 		In the future:
 
 		\begin{itemize}
 			\item documents are not read
 			\item they are queried
-			\item AI operates on structured enterprise data
+			\item AI operates on structured enterprise knowledge
 		\end{itemize}
-
-		\vspace{0.4cm}
-
-		\begin{center}
-			\Large
-			\textbf{Citadel makes enterprise knowledge computable.}
-		\end{center}
-	\end{frame}
-
-	% ---------------- FINAL ----------------
-	\begin{frame}{Closing}
-		Every company already has the answers.
-
-		\vspace{0.3cm}
-
-		They are just trapped in documents.
 
 		\vspace{0.5cm}
 
 		\begin{center}
 			\Large
-			\textbf{Citadel makes those answers computable.}
+			\textbf{Citadel makes enterprise knowledge computable.}
 		\end{center}
 
 	\end{frame}
