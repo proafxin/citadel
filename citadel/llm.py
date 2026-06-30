@@ -36,8 +36,12 @@ async def level_headings(headings: list[HeadingInfo]) -> dict[int, int]:
     rows: list[str] = []
     for index, info in enumerate(headings):
         size = round(info.font_size, 1) if info.font_size else "?"
-        rows.append(f"{index} | size={size} | p{info.page} | {info.text}")
-        rows.append(f"    intro: {info.context}" if info.context else "    intro: (no text directly under it)")
+        rows.extend(
+            (
+                f"{index} | size={size} | p{info.page} | {info.text}",
+                f"    intro: {info.context}" if info.context else "    intro: (no text directly under it)",
+            )
+        )
     lines = "\n".join(rows)
     payload = {
         "model": get_settings().qwen_model,

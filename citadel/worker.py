@@ -75,9 +75,7 @@ async def _recover(stream: str, consumer: str, spawn: Callable[[str, dict[bytes,
     redis = get_redis()
     cursor = b"0-0"
     while True:
-        cursor, claimed, _ = await redis.xautoclaim(
-            stream, GROUP, consumer, min_idle_time=0, start_id=cursor, count=64
-        )
+        cursor, claimed, _ = await redis.xautoclaim(stream, GROUP, consumer, min_idle_time=0, start_id=cursor, count=64)
         for msg_id, raw in claimed:
             spawn(msg_id.decode(), raw)
         if cursor == b"0-0":
@@ -96,9 +94,7 @@ async def _normalize_job(profiles: asyncio.Queue[str], msg_id: str, raw: dict[by
             await _settle(stream, msg_id)
             return
         logger.error("normalize failed file=%s\n%s", fields.get("filename", "?"), _tb(work.exception()))
-        await _retry_or_fail(
-            stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "normalize")
-        )
+        await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "normalize"))
     finally:
         profiles.put_nowait(profile)
 
@@ -126,9 +122,7 @@ async def _ocr_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes])
             await _settle(stream, msg_id)
             return
         logger.error("ocr failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
-        await _retry_or_fail(
-            stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"]))
-        )
+        await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
 
 
 async def _gapfill_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes]) -> None:
@@ -153,9 +147,7 @@ async def _merge_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes
         await asyncio.wait({work})
         if work.exception() is not None:
             logger.error("merge failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(work.exception()))
-            await _retry_or_fail(
-                stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "merge")
-            )
+            await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "merge"))
             return
         await _settle(stream, msg_id)
         await cleanup(fields["doc_id"])  # only after the merge message is acked → safe to delete blocks

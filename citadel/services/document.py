@@ -89,8 +89,7 @@ async def _load_payloads(session: AsyncSession, ids: list[str]) -> dict[str, dic
             for row in await session.scalars(select(Heading).where(Heading.content_id.in_(ids)))
         },
         "codes": {
-            row.content_id: row.text
-            for row in await session.scalars(select(Code).where(Code.content_id.in_(ids)))
+            row.content_id: row.text for row in await session.scalars(select(Code).where(Code.content_id.in_(ids)))
         },
         "equations": {
             row.content_id: row.latex
@@ -101,8 +100,7 @@ async def _load_payloads(session: AsyncSession, ids: list[str]) -> dict[str, dic
             for row in await session.scalars(select(ListBlock).where(ListBlock.content_id.in_(ids)))
         },
         "tables": {
-            row.content_id: row
-            for row in await session.scalars(select(Table).where(Table.content_id.in_(ids)))
+            row.content_id: row for row in await session.scalars(select(Table).where(Table.content_id.in_(ids)))
         },
     }
 

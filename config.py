@@ -20,7 +20,9 @@ class Settings(BaseSettings):
 
     mineru_host: str = "localhost"
     mineru_port: int = 8099
-    mineru_max_connections: int = 256  # hard cap on the shared httpx pool → bounds VLM sockets (match server max-num-seqs)
+    mineru_max_connections: int = (
+        256  # hard cap on the shared httpx pool → bounds VLM sockets (match server max-num-seqs)
+    )
 
     qwen_host: str = "localhost"
     qwen_port: int = 11434  # ollama OpenAI-compatible endpoint (vLLM hung on Blackwell sm_120 FlashInfer kernels)
