@@ -1,6 +1,6 @@
 [project]
 name = "citadel"
-version = "0.2.0"
+version = "0.2.1"
 description = "Citadel: personal search engine"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -17,6 +17,7 @@ dependencies = [
     "huggingface-hub>=1.21.0",
     "lxml>=6.1.1",
     "markdown-it-py>=4.2.0",
+    "mdit-py-plugins>=0.6.1",
     "mineru-vl-utils>=1.0.5",
     "openpyxl>=3.1.5",
     "pillow>=12.2.0",

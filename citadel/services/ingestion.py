@@ -23,7 +23,6 @@ from redis.exceptions import ResponseError
 from citadel.llm import describe_table
 from citadel.schemas.content import Block
 from citadel.schemas.document import DocumentStatus, IngestResponse
-from citadel.services.delimited import read_csv_table
 from citadel.services.document import (
     create_document,
     finalize_tabular,
@@ -33,8 +32,8 @@ from citadel.services.document import (
 )
 from citadel.services.excel import extract_sheet_no, extract_tables, sheet_names
 from citadel.services.html import parse_html
-from citadel.services.jsontables import extract_json_tables
 from citadel.services.library import library_exists
+from citadel.services.tabular import extract_json_tables, read_csv_table
 from citadel.utils import normalize_file
 from config import get_settings
 
@@ -515,10 +514,6 @@ def _load_blocks(blob: str) -> list[Block]:
 
 
 async def _emit_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
-    # finalize a page: forward any tables and record it (records exactly once → drives the merge barrier)
-    for block in blocks:
-        if block.type == "table":
-            await get_redis().xadd(STREAM_TABLES, {"doc_id": doc_id, "page_idx": page_idx, "html": block.text})
     await record_page(doc_id, page_idx, blocks)
 
 

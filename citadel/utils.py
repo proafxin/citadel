@@ -1,3 +1,4 @@
+import html
 import shutil
 import subprocess
 import tempfile
@@ -5,6 +6,16 @@ from pathlib import Path
 
 import filetype
 from markdown_it import MarkdownIt
+from mdit_py_plugins.dollarmath import dollarmath_plugin
+
+
+def _render_math(content: str, options: dict) -> str:
+    if options.get("display_mode"):
+        return f"<math>{html.escape(content)}</math>"
+    return f"\\({html.escape(content)}\\)"
+
+
+_MARKDOWN = MarkdownIt().use(dollarmath_plugin, renderer=_render_math)
 
 OFFICE_PDF_EXTS = {"doc", "ppt", "pptx", "odp"}
 DOC_HTML_EXTS = {"docx", "odt", "rtf"}
@@ -71,8 +82,8 @@ def normalize_file(data: bytes, filename: str, profile_dir: str) -> tuple[str, b
     if ext in HTML_EXTS:
         return "html", data
     if ext in MARKDOWN_EXTS:
-        return "html", MarkdownIt().render(data.decode("utf-8")).encode()
-    if ext in DOC_HTML_EXTS:
+        return "html", _MARKDOWN.render(data.decode("utf-8")).encode()
+    if ext in DOC_HTML_EXTS or ext == "epub":
         return "html", _pandoc_to_html(data, ext)
     if ext in OFFICE_PDF_EXTS:
         return "office-pdf", _soffice_convert(data, ext, "pdf", profile_dir)

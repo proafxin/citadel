@@ -23,6 +23,49 @@ def _flush(buffer: list[str], blocks: list[Block]) -> None:
         blocks.append(Block(page_idx=0, type="text", text=text))
 
 
+def _li_text(item: Tag) -> str:
+    parts: list[str] = []
+    for child in item.children:
+        if isinstance(child, Tag):
+            if child.name in ("ul", "ol"):
+                continue
+            text = child.get_text(separator=" ", strip=True)
+        else:
+            text = str(child).strip()
+        if text:
+            parts.append(text)
+    return re.sub(r"\s+", " ", " ".join(parts)).strip()
+
+
+def _walk_list(element: Tag, depth: int, blocks: list[Block]) -> None:
+    for item in element.find_all("li", recursive=False):
+        text = _li_text(item)
+        if text:
+            blocks.append(Block(page_idx=0, type="list_item", text=text, text_level=depth))
+        for nested in item.find_all(("ul", "ol"), recursive=False):
+            _walk_list(nested, depth + 1, blocks)
+
+
+def _int_attr(value: object) -> int | None:
+    match = re.match(r"\d+", str(value)) if value is not None else None
+    return int(match.group()) if match else None
+
+
+def _keep_image(element: Tag) -> bool:
+    if (element.get("role") or "").lower() == "presentation" or element.get("aria-hidden") == "true":
+        return False
+    width = _int_attr(element.get("width"))
+    height = _int_attr(element.get("height"))
+    return not (width is not None and height is not None and width < 32 and height < 32)
+
+
+def _latex(element: Tag) -> str:
+    annotation = element.find("annotation", attrs={"encoding": "application/x-tex"})
+    if annotation is not None:
+        return annotation.get_text().strip()
+    return element.get_text(separator=" ", strip=True)
+
+
 def _walk(element: Tag, blocks: list[Block]) -> None:
     buffer: list[str] = []
     for child in element.children:
@@ -46,10 +89,7 @@ def _walk(element: Tag, blocks: list[Block]) -> None:
                 blocks.append(Block(page_idx=0, type="text", text=text))
         elif name in ("ul", "ol"):
             _flush(buffer, blocks)
-            for item in child.find_all("li", recursive=False):
-                text = _text(item)
-                if text:
-                    blocks.append(Block(page_idx=0, type="list_item", text=text))
+            _walk_list(child, 0, blocks)
         elif name == "pre":
             _flush(buffer, blocks)
             if child.get_text().strip():
@@ -57,6 +97,15 @@ def _walk(element: Tag, blocks: list[Block]) -> None:
         elif name == "table":
             _flush(buffer, blocks)
             blocks.append(Block(page_idx=0, type="table", text=str(child)))
+        elif name == "math":
+            _flush(buffer, blocks)
+            latex = _latex(child)
+            if latex:
+                blocks.append(Block(page_idx=0, type="equation", text=latex))
+        elif name == "img":
+            if _keep_image(child):
+                _flush(buffer, blocks)
+                blocks.append(Block(page_idx=0, type="image", text=(child.get("alt") or "").strip()))
         elif name in _INLINE:
             piece = child.get_text(separator=" ", strip=True)
             if piece:

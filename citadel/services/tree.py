@@ -74,8 +74,9 @@ def _list_node(
     bbox = blocks[idx].bbox
     items: list[dict] = []
     while idx < len(blocks) and blocks[idx].page_idx == page_idx and is_list_item(blocks[idx]):
-        content = _BULLET_GLYPH.sub("", (blocks[idx].text or "").strip(), count=1)
-        items.append({"ordinal": len(items), "content": _flatten(content)})
+        block = blocks[idx]
+        content = _BULLET_GLYPH.sub("", (block.text or "").strip(), count=1)
+        items.append({"ordinal": len(items), "content": _flatten(content), "depth": block.text_level or 0})
         idx += 1
     page_no = page_idx + 1
     ordinal = _next_ordinal(counters, page_no)
@@ -189,6 +190,25 @@ def _clean_text(text: str) -> str:
 def _clean_name(name: str) -> str:
     name = unicodedata.normalize("NFC", name)
     return re.sub(r"\s+", " ", re.sub(r"[_-]+", " ", name)).strip()
+
+
+def build_table_search_text(
+    library_name: str,
+    filename: str,
+    sheet: str,
+    title: str | None,
+    caption: str | None,
+    notes: list[str],
+    headers: list[str],
+    description: str,
+) -> str:
+    fields = [sheet, title or "", caption or "", *notes, *headers, description]
+    parts = [
+        _clean_name(library_name),
+        _clean_name(filename.rsplit(".", 1)[0] if "." in filename else filename),
+        *(_clean_text(field) for field in fields),
+    ]
+    return "\n".join(part for part in parts if part)
 
 
 def build_search_text(specs: list[NodeSpec], library_name: str, filename: str) -> dict[str, str]:

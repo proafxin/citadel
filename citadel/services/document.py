@@ -6,13 +6,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
+from citadel.llm import describe_table
 from citadel.models.content import Code, ContentNode, Equation, ListBlock, Paragraph
 from citadel.models.document import Document
 from citadel.models.library import Library
 from citadel.models.table import Table, TableRow
 from citadel.schemas.content import Block
 from citadel.services.excel import MaterializedTable
-from citadel.services.tree import NodeSpec, build_search_text, build_tree, detail_kind, make_content_id
+from citadel.services.tabular import extract_html_table, stitch_tables
+from citadel.services.tree import (
+    NodeSpec,
+    build_search_text,
+    build_table_search_text,
+    build_tree,
+    detail_kind,
+    make_content_id,
+)
 from citadel.storage import get_object, put_object
 
 
@@ -32,32 +41,64 @@ def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:
             session.add(Equation(content_id=spec.content_id, latex=spec.latex or ""))
         case "list":
             session.add(ListBlock(content_id=spec.content_id, items=spec.items or []))
-        case "table":
-            session.add(
-                Table(
-                    content_id=spec.content_id,
-                    document_id=doc_id,
-                    columns=[],
-                    table_metadata={"html": spec.table_html or ""},
-                    description="",
-                    n_rows=0,
-                    sample_rows=[],
-                )
-            )
         case _:
             session.add(Paragraph(content_id=spec.content_id, text=spec.text or ""))
 
 
+async def _extract_doc_tables(specs: list[NodeSpec], filename: str) -> dict[str, MaterializedTable]:
+    tables: dict[str, MaterializedTable] = {}
+    for spec in specs:
+        if spec.kind == "table":
+            table = extract_html_table(spec.table_html or "")
+            table.description = await describe_table(table.columns, table.sample_rows, filename)
+            tables[spec.content_id] = table
+    return tables
+
+
+async def _add_table(session: AsyncSession, content_id: str, doc_id: int, table: MaterializedTable) -> None:
+    row = Table(
+        content_id=content_id,
+        document_id=doc_id,
+        columns=[column.model_dump() for column in table.columns],
+        table_metadata={"title": table.title, "caption": table.caption, "notes": table.notes},
+        description=table.description,
+        n_rows=table.n_rows,
+        sample_rows=table.sample_rows,
+        anchors=table.anchors,
+    )
+    session.add(row)
+    await session.flush()
+    session.add_all(TableRow(table_id=row.id, row_idx=index, values=values) for index, values in enumerate(table.rows))
+
+
 async def save_document_tree(doc_id: int, blocks: list[Block], status: str) -> None:
-    async with get_sessionmaker()() as session, session.begin():
+    async with get_sessionmaker()() as session:
         document = await session.get_one(Document, doc_id)
         library = await session.get_one(Library, document.library_id)
+        library_id, filename, library_name = document.library_id, document.filename, library.name
+    specs = list(build_tree(stitch_tables(blocks), library_id, doc_id))
+    search_text = build_search_text(specs, library_name, filename)
+    tables = await _extract_doc_tables(specs, filename)
+    async with get_sessionmaker()() as session, session.begin():
+        document = await session.get_one(Document, doc_id)
         document.status = status
-        specs = list(build_tree(blocks, document.library_id, doc_id))
-        search_text = build_search_text(specs, library.name, document.filename)
         id_map: dict[str, int] = {}
         for spec in specs:
             parent_id = id_map[spec.parent_content_id] if spec.parent_content_id is not None else None
+            table = tables.get(spec.content_id)
+            if table is not None:
+                node_search = build_table_search_text(
+                    library_name,
+                    filename,
+                    "",
+                    table.title,
+                    table.caption,
+                    table.notes,
+                    [column.header or "" for column in table.columns],
+                    table.description,
+                )
+            else:
+                node_search = search_text.get(spec.content_id)
             node = ContentNode(
                 content_id=spec.content_id,
                 document_id=doc_id,
@@ -68,12 +109,14 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: str) -> N
                 level=spec.level,
                 label=spec.text if spec.kind == "heading" else None,
                 bbox=spec.bbox,
-                search_text=search_text.get(spec.content_id),
+                search_text=node_search,
             )
             session.add(node)
             await session.flush()
             id_map[spec.content_id] = node.id
-            if spec.kind != "heading":
+            if table is not None:
+                await _add_table(session, spec.content_id, doc_id, table)
+            elif spec.kind != "heading":
                 _add_detail(session, spec, doc_id)
 
 
@@ -87,6 +130,7 @@ async def save_sheet_tables(
         if existing is not None:
             return
         document = await session.get_one(Document, doc_id)
+        library = await session.get_one(Library, document.library_id)
         sheet = ContentNode(
             content_id=make_content_id(document.library_id, doc_id, sheet_no, 0),
             document_id=doc_id,
@@ -107,6 +151,16 @@ async def save_sheet_tables(
                 sheet_no=sheet_no,
                 ordinal=ordinal,
                 type="table",
+                search_text=build_table_search_text(
+                    library.name,
+                    document.filename,
+                    sheet_name,
+                    table.title,
+                    table.caption,
+                    table.notes,
+                    [column.header or "" for column in table.columns],
+                    table.description,
+                ),
             )
             session.add(node)
             await session.flush()
