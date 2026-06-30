@@ -32,6 +32,8 @@ from citadel.services.document import (
     save_sheet_tables,
 )
 from citadel.services.excel import extract_sheet_no, extract_tables, sheet_names
+from citadel.services.html import parse_html
+from citadel.services.jsontables import extract_json_tables
 from citadel.services.library import library_exists
 from citadel.utils import normalize_file
 from config import get_settings
@@ -216,13 +218,19 @@ async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
         await record_page(doc_id, 0, [Block(type="text", page_idx=0, text=data.decode("utf-8", errors="replace"))])
         logger.info("paginate file=%s text", fields["filename"])
         return
+    if kind == "html":
+        blocks = await asyncio.to_thread(parse_html, data)
+        await redis.hset(f"doc:{doc_id}", "page_count", 1)
+        await record_page(doc_id, 0, blocks)
+        logger.info("paginate file=%s html blocks=%d", fields["filename"], len(blocks))
+        return
     if kind.startswith("image:"):
         image_bytes = await asyncio.to_thread(_cap_image_bytes, data)  # cap huge scans → keep the worker's RAM bounded
         await redis.hset(f"doc:{doc_id}", "page_count", 1)
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0, "image": image_bytes})
         logger.info("paginate file=%s image", fields["filename"])
         return
-    if kind in ("xlsx", "csv", "tsv"):
+    if kind in ("xlsx", "csv", "tsv", "json"):
         await redis.set(f"tabular:{doc_id}", data, ex=3600)
         await redis.hset(f"doc:{doc_id}", "mode", "tabular")
         if kind == "xlsx":
@@ -305,10 +313,13 @@ async def handle_tabular(fields: dict[str, str]) -> None:
         sheet_name = sheet.sheet_name
     else:
         filename = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
-        separator = "\t" if kind == "tsv" else ","
-        table = await asyncio.to_thread(read_csv_table, data, separator)
-        table.description = await describe_table(table.columns, table.sample_rows, filename)
-        tables = [(1, table)]
+        if kind == "json":
+            tables = await asyncio.to_thread(extract_json_tables, data, filename.rsplit(".", 1)[0] or "root")
+        else:
+            separator = "\t" if kind == "tsv" else ","
+            tables = [(1, await asyncio.to_thread(read_csv_table, data, separator))]
+        for _ordinal, table in tables:
+            table.description = await describe_table(table.columns, table.sample_rows, filename)
         sheet_name = filename
     await save_sheet_tables(int(doc_id), sheet_no, sheet_name, tables)
     await record_sheet(doc_id, sheet_no)

@@ -123,7 +123,7 @@ def _heading_nodes(
     page_no = block.page_idx + 1
     nodes: list[NodeSpec] = []
     for piece in split_heading(block.text or ""):
-        level = levels.get(next(heading_idx), 1)
+        level = block.text_level or levels.get(next(heading_idx), 1)
         ordinal = _next_ordinal(counters, page_no)
         content_id = make_content_id(library_id, doc_id, page_no, ordinal)
         parent = _push(stack, level, content_id)
