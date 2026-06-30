@@ -18,8 +18,6 @@ class ContentNode(Base):
     level: Mapped[int | None] = mapped_column(default=None)
     label: Mapped[str | None] = mapped_column(default=None)
     bbox: Mapped[list[float] | None] = mapped_column(JSONB, default=None)
-    angle: Mapped[int | None] = mapped_column(default=None)
-    merge_prev: Mapped[bool] = mapped_column(default=False)
     search_text: Mapped[str | None] = mapped_column(Text, default=None)
 
 
@@ -35,7 +33,6 @@ class Code(Base):
 
     content_id: Mapped[str] = mapped_column(ForeignKey("content.content_id"), unique=True)
     text: Mapped[str] = mapped_column(Text)
-    language: Mapped[str | None] = mapped_column(default=None)
 
 
 class Equation(Base):
@@ -50,11 +47,3 @@ class ListBlock(Base):
 
     content_id: Mapped[str] = mapped_column(ForeignKey("content.content_id"), unique=True)
     items: Mapped[list[dict]] = mapped_column(JSONB)
-    ordering: Mapped[str | None] = mapped_column(default=None)
-
-
-class JsonBlock(Base):
-    __tablename__ = "json_blocks"
-
-    content_id: Mapped[str] = mapped_column(ForeignKey("content.content_id"), unique=True)
-    payload: Mapped[dict] = mapped_column(JSONB)

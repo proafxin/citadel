@@ -11,7 +11,6 @@ from functools import lru_cache
 import cv2
 import numpy as np
 import pypdfium2 as pdfium
-import pypdfium2.raw as pdfium_c
 import redis.asyncio as aioredis
 from fastapi import HTTPException, UploadFile
 from mineru_vl_utils import MinerUClient
@@ -181,28 +180,16 @@ def render_pdf_pages(pdf_bytes: bytes, dpi: int) -> list[tuple[bytes, bool]]:
     return pages
 
 
-def _page_char_fonts(textpage: object) -> list[tuple[float, float, float]]:
-    # (center_x, center_y, font_size) per char in the PDF text layer; pdfium origin is bottom-left, points
-    chars: list[tuple[float, float, float]] = []
-    for index in range(textpage.count_chars()):
-        left, bottom, right, top = textpage.get_charbox(index)
-        chars.append(((left + right) / 2, (bottom + top) / 2, pdfium_c.FPDFText_GetFontSize(textpage.raw, index)))
-    return chars
-
-
-def extract_layer_by_bbox(pdf_bytes: bytes, page_idx: int, bboxes: list[list[float]]) -> list[tuple[str, float | None]]:
-    # exact text + dominant font size from the PDF text layer inside each normalized (0-1, top-left) bbox
+def extract_layer_by_bbox(pdf_bytes: bytes, page_idx: int, bboxes: list[list[float]]) -> list[str]:
+    # exact text from the PDF text layer inside each normalized (0-1, top-left) bbox
     pdf = pdfium.PdfDocument(pdf_bytes)
     page = pdf[page_idx]
     width, height = page.get_size()
     textpage = page.get_textpage()
-    chars = _page_char_fonts(textpage)
-    out: list[tuple[str, float | None]] = []
+    out: list[str] = []
     for x0, y0, x1, y1 in bboxes:
         left, right, bottom, top = x0 * width, x1 * width, (1 - y1) * height, (1 - y0) * height
-        text = textpage.get_text_bounded(left=left, bottom=bottom, right=right, top=top).strip()
-        sizes = [size for cx, cy, size in chars if left <= cx <= right and bottom <= cy <= top and size > 0]
-        out.append((text, max(sizes) if sizes else None))
+        out.append(textpage.get_text_bounded(left=left, bottom=bottom, right=right, top=top).strip())
     pdf.close()
     return out
 
@@ -234,7 +221,7 @@ async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
         logger.info("paginate file=%s image", fields["filename"])
         return
     if kind in ("xlsx", "csv", "tsv", "json"):
-        await redis.set(f"tabular:{doc_id}", data, ex=3600)
+        await redis.set(f"tabular:{doc_id}", data)  # no TTL: cleaned by cleanup() on completion or terminal failure
         await redis.hset(f"doc:{doc_id}", "mode", "tabular")
         if kind == "xlsx":
             names = await asyncio.to_thread(sheet_names, data)
@@ -247,7 +234,7 @@ async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
             await redis.xadd(STREAM_TABLES, {"doc_id": doc_id, "kind": kind, "sheet_no": 0})
             logger.info("paginate file=%s kind=%s", fields["filename"], kind)
         return
-    await redis.set(f"pdf:{doc_id}", data, ex=3600)
+    await redis.set(f"pdf:{doc_id}", data)  # no TTL: the source must outlive OCR; cleaned by cleanup()
     settings = get_settings()
     dpi = settings.digital_render_dpi if kind == "office-pdf" else settings.render_dpi
     loop = asyncio.get_running_loop()
@@ -273,8 +260,6 @@ def map_content_block(block: object, page_idx: int) -> Block:
         page_idx=page_idx,
         bbox=list(get("bbox") or []),
         text=str(text),
-        list_items=list(get("list_items") or []),
-        font_size=get("font_size"),
     )
 
 
@@ -330,6 +315,7 @@ async def handle_tabular(fields: dict[str, str]) -> None:
 
 async def fail_document(doc_id: str, stage: str) -> None:
     await get_redis().hset(f"doc:{doc_id}", mapping={"state": "failed", "error": f"{stage} failed"})
+    await cleanup(doc_id)  # terminal failure → release the source blobs (no wall-clock TTL to fall back on)
 
 
 FILLIN = re.compile(r"\.{4,}|_{4,}|…")  # form fill-in markers → the line may carry handwriting the layer can't see
@@ -484,10 +470,9 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
                 page_idx,
                 [list(cb.bbox) for cb in text_blocks],
             )
-            for cb, (text, size) in zip(text_blocks, layer, strict=False):
+            for cb, text in zip(text_blocks, layer, strict=True):
                 if text:
                     cb.content = text
-                cb["font_size"] = size
         # digital only: the VLM never read these text blocks (we used the layer), so a focused crop is a fresh
         # attempt that can catch handwriting the layer lacks. on scanned pages the VLM already read them, so a
         # re-crop only risks re-introducing the same drop and slightly degrading the text — skip it there.

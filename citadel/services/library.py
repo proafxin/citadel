@@ -1,6 +1,5 @@
-import json
+import asyncio
 
-import zstandard
 from fastapi import HTTPException, Response
 from sqlalchemy import select
 
@@ -8,7 +7,7 @@ from citadel.db import get_sessionmaker
 from citadel.models.document import Document
 from citadel.models.library import Library
 from citadel.schemas.library import LibraryRead
-from citadel.services.document import load_document_tree
+from citadel.services.document import compress_tree, load_document_tree
 
 
 async def create_library(name: str) -> LibraryRead:
@@ -64,7 +63,11 @@ async def build_library_tree(library_id: int) -> dict | None:
         doc_ids = list(
             await session.scalars(select(Document.id).where(Document.library_id == library_id).order_by(Document.id))
         )
-    children = [tree for doc_id in doc_ids if (tree := load_document_tree(doc_id)) is not None]
+    children: list[dict] = []
+    for doc_id in doc_ids:
+        tree = await asyncio.to_thread(load_document_tree, doc_id)
+        if tree is not None:
+            children.append(tree)
     return {"type": "library", "name": name, "children": children}
 
 
@@ -72,7 +75,7 @@ async def download_library(library_id: int) -> Response:
     tree = await build_library_tree(library_id)
     if tree is None:
         raise HTTPException(status_code=404, detail="unknown library")
-    payload = zstandard.ZstdCompressor().compress(json.dumps(tree).encode())
+    payload = await asyncio.to_thread(compress_tree, tree)
     return Response(
         content=payload,
         media_type="application/zstd",

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import traceback
 from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass, field
 from typing import Any
 
 from citadel.services.ingestion import (
@@ -33,8 +34,36 @@ from config import configure_logging, get_settings
 logger = logging.getLogger(__name__)
 
 BLOCK_MS = 5000
+RECLAIM_BATCH = 64
 
 _tasks: set[asyncio.Task[None]] = set()
+
+Spawn = Callable[[str, dict[bytes, bytes]], None]
+
+
+@dataclass
+class _Capacity:
+    # bounds in-flight messages, not just compute: the dispatch loop reads at most free() messages, so a backlog
+    # never pulls more than `limit` claimed entries (and their image/file blobs) into worker RAM at once
+    limit: int
+    inflight: int = 0
+    slot: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def free(self) -> int:
+        return self.limit - self.inflight
+
+    def take(self) -> None:
+        self.inflight += 1
+
+    def release(self) -> None:
+        self.inflight -= 1
+        self.slot.set()
+
+    async def wait_free(self) -> None:
+        self.slot.clear()
+        if self.free() > 0:
+            return
+        await self.slot.wait()
 
 
 def _tb(exc: BaseException) -> str:
@@ -72,22 +101,49 @@ async def _retry_or_fail(
     await _settle(stream, msg_id)
 
 
-async def _recover(stream: str, consumer: str, spawn: Callable[[str, dict[bytes, bytes]], None]) -> None:
-    # startup only: reclaim whatever a previous (crashed) run left pending and reprocess it (idempotent)
+async def _recover(stream: str, consumer: str, cap: _Capacity, spawn: Spawn) -> None:
+    # startup only: reclaim whatever a previous (crashed) run left pending and reprocess it (idempotent),
+    # bounded by capacity so a large pending set is drained gradually instead of pulled in all at once
     redis = get_redis()
     cursor = b"0-0"
     while True:
-        cursor, claimed, _ = await redis.xautoclaim(stream, GROUP, consumer, min_idle_time=0, start_id=cursor, count=64)
+        if cap.free() <= 0:
+            await cap.wait_free()
+            continue
+        cursor, claimed, _ = await redis.xautoclaim(
+            stream, GROUP, consumer, min_idle_time=0, start_id=cursor, count=min(RECLAIM_BATCH, cap.free())
+        )
         for msg_id, raw in claimed:
+            cap.take()
             spawn(msg_id.decode(), raw)
         if cursor == b"0-0":
             return
 
 
+async def _pump(stream: str, consumer: str, cap: _Capacity, spawn: Spawn) -> None:
+    redis = get_redis()
+    while True:
+        if cap.free() <= 0:
+            await cap.wait_free()  # no slot → block here instead of claiming more messages into RAM
+            continue
+        fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=cap.free(), block=BLOCK_MS)
+        for msg_id, raw in fresh[0][1] if fresh else []:
+            cap.take()
+            spawn(msg_id.decode(), raw)
+
+
+async def _drive(stream: str, cap: _Capacity, spawn: Spawn) -> None:
+    await ensure_group(stream)
+    consumer = f"{stream}-{get_settings().worker_id}"
+    logger.info("consuming %s concurrency=%d", stream, cap.limit)
+    await _recover(stream, consumer, cap, spawn)
+    await _pump(stream, consumer, cap, spawn)
+
+
 # ---- per-job work: run the handler as a sub-task, settle on success, requeue/giveup on failure ----------
-async def _normalize_job(profiles: asyncio.Queue[str], msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _normalize_job(cap: _Capacity, profiles: asyncio.Queue[str], msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_INGEST
-    profile = await profiles.get()  # blocks until a libreoffice profile frees up → bounds concurrency
+    profile = await profiles.get()  # one dedicated libreoffice profile per in-flight normalize job
     try:
         fields = {k.decode(): v.decode() for k, v in raw.items() if k != b"data"}
         work = asyncio.create_task(handle_normalize(fields, profile, raw.get(b"data", b"")))
@@ -99,11 +155,12 @@ async def _normalize_job(profiles: asyncio.Queue[str], msg_id: str, raw: dict[by
         await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "normalize"))
     finally:
         profiles.put_nowait(profile)
+        cap.release()
 
 
-async def _paginate_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _paginate_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_NORMALIZED
-    async with sem:
+    try:
         fields = {k.decode(): v.decode() for k, v in raw.items() if k != b"data"}
         work = asyncio.create_task(handle_paginate(fields, raw.get(b"data", b"")))
         await asyncio.wait({work})
@@ -112,11 +169,13 @@ async def _paginate_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, by
             return
         logger.error("paginate failed file=%s\n%s", fields.get("filename", "?"), _tb(work.exception()))
         await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "paginate"))
+    finally:
+        cap.release()
 
 
-async def _ocr_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_PAGES
-    async with sem:
+    try:
         fields = {k.decode(): v.decode() for k, v in raw.items() if k != b"image"}
         work = asyncio.create_task(handle_ocr(fields, raw.get(b"image", b"")))
         await asyncio.wait({work})
@@ -125,11 +184,13 @@ async def _ocr_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes])
             return
         logger.error("ocr failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
         await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
+    finally:
+        cap.release()
 
 
-async def _gapfill_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _gapfill_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_GAPFILL
-    async with sem:
+    try:
         fields = {k.decode(): v.decode() for k, v in raw.items() if k != b"image"}
         work = asyncio.create_task(handle_gapfill(fields, raw.get(b"image", b"")))
         await asyncio.wait({work})
@@ -139,11 +200,13 @@ async def _gapfill_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, byt
         logger.error("gapfill failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
         # retries exhausted → finalize with the VLM blocks alone so a RapidOCR error never loses the page
         await _retry_or_fail(stream, msg_id, raw, lambda: emit_vlm_only(fields))
+    finally:
+        cap.release()
 
 
-async def _merge_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _merge_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_MERGE
-    async with sem:
+    try:
         fields = {k.decode(): v.decode() for k, v in raw.items()}
         work = asyncio.create_task(handle_merge(fields))
         await asyncio.wait({work})
@@ -153,92 +216,13 @@ async def _merge_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes
             return
         await _settle(stream, msg_id)
         await cleanup(fields["doc_id"])  # only after the merge message is acked → safe to delete blocks
+    finally:
+        cap.release()
 
 
-# ---- normalize: read `ingest`, convert, write `normalized`. one dedicated libreoffice profile per worker
-async def normalize() -> None:
-    stream = STREAM_INGEST
-    redis = get_redis()
-    await ensure_group(stream)
-    consumer = f"{stream}-{get_settings().worker_id}"
-    limit = get_settings().normalize_concurrency
-    profiles = make_profile_pool(limit)
-    logger.info("consuming %s concurrency=%d", stream, limit)
-    await _recover(stream, consumer, lambda mid, raw: _spawn(_normalize_job(profiles, mid, raw)))
-    while True:
-        fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
-        for msg_id, raw in fresh[0][1] if fresh else []:
-            _spawn(_normalize_job(profiles, msg_id.decode(), raw))
-
-
-# ---- paginate: read `normalized`, render pages, write `pages`. dedicated pdfium per process-pool worker
-async def paginate() -> None:
-    stream = STREAM_NORMALIZED
-    redis = get_redis()
-    await ensure_group(stream)
-    consumer = f"{stream}-{get_settings().worker_id}"
-    limit = get_settings().paginate_concurrency
-    sem = asyncio.Semaphore(limit)
-    logger.info("consuming %s concurrency=%d", stream, limit)
-    await _recover(stream, consumer, lambda mid, raw: _spawn(_paginate_job(sem, mid, raw)))
-    while True:
-        fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
-        for msg_id, raw in fresh[0][1] if fresh else []:
-            _spawn(_paginate_job(sem, msg_id.decode(), raw))
-
-
-# ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. one global concurrency bound ----------
-async def ocr() -> None:
-    stream = STREAM_PAGES
-    redis = get_redis()
-    await ensure_group(stream)
-    await asyncio.to_thread(get_mineru_client)  # build the http client once now, not lazily mid-OCR
-    consumer = f"{stream}-{get_settings().worker_id}"
-    limit = get_settings().ocr_concurrency
-    sem = asyncio.Semaphore(limit)
-    logger.info("consuming %s concurrency=%d", stream, limit)
-    await _recover(stream, consumer, lambda mid, raw: _spawn(_ocr_job(sem, mid, raw)))
-    while True:
-        fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
-        for msg_id, raw in fresh[0][1] if fresh else []:
-            _spawn(_ocr_job(sem, msg_id.decode(), raw))
-
-
-# ---- gapfill: read `gapfill`, RapidOCR the lines the VLM dropped, finalize the page. CPU-bound, bounded low ----
-async def gapfill() -> None:
-    stream = STREAM_GAPFILL
-    redis = get_redis()
-    await ensure_group(stream)
-    consumer = f"{stream}-{get_settings().worker_id}"
-    limit = get_settings().rapidocr_concurrency  # match the RapidOCR thread pool → ≤limit decoded page arrays resident
-    sem = asyncio.Semaphore(limit)
-    logger.info("consuming %s concurrency=%d", stream, limit)
-    await _recover(stream, consumer, lambda mid, raw: _spawn(_gapfill_job(sem, mid, raw)))
-    while True:
-        fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
-        for msg_id, raw in fresh[0][1] if fresh else []:
-            _spawn(_gapfill_job(sem, msg_id.decode(), raw))
-
-
-# ---- merge: read `merge`, assemble result.json, clean up. light concurrency ----------------------------
-async def merge() -> None:
-    stream = STREAM_MERGE
-    redis = get_redis()
-    await ensure_group(stream)
-    consumer = f"{stream}-{get_settings().worker_id}"
-    limit = get_settings().merge_concurrency
-    sem = asyncio.Semaphore(limit)
-    logger.info("consuming %s concurrency=%d", stream, limit)
-    await _recover(stream, consumer, lambda mid, raw: _spawn(_merge_job(sem, mid, raw)))
-    while True:
-        fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
-        for msg_id, raw in fresh[0][1] if fresh else []:
-            _spawn(_merge_job(sem, msg_id.decode(), raw))
-
-
-async def _tabular_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _tabular_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_TABLES
-    async with sem:
+    try:
         fields = {k.decode(): v.decode() for k, v in raw.items()}
         work = asyncio.create_task(handle_tabular(fields))
         await asyncio.wait({work})
@@ -247,21 +231,46 @@ async def _tabular_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, byt
             return
         logger.error("tabular failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(work.exception()))
         await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "tabular"))
+    finally:
+        cap.release()
 
 
+# ---- normalize: read `ingest`, convert, write `normalized`. one dedicated libreoffice profile per job
+async def normalize() -> None:
+    cap = _Capacity(get_settings().normalize_concurrency)
+    profiles = make_profile_pool(cap.limit)
+    await _drive(STREAM_INGEST, cap, lambda mid, raw: _spawn(_normalize_job(cap, profiles, mid, raw)))
+
+
+# ---- paginate: read `normalized`, render pages, write `pages`. dedicated pdfium per process-pool worker
+async def paginate() -> None:
+    cap = _Capacity(get_settings().paginate_concurrency)
+    await _drive(STREAM_NORMALIZED, cap, lambda mid, raw: _spawn(_paginate_job(cap, mid, raw)))
+
+
+# ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. one global concurrency bound ----------
+async def ocr() -> None:
+    await asyncio.to_thread(get_mineru_client)  # build the http client once now, not lazily mid-OCR
+    cap = _Capacity(get_settings().ocr_concurrency)
+    await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)))
+
+
+# ---- gapfill: read `gapfill`, RapidOCR the lines the VLM dropped, finalize the page. CPU-bound, bounded low ----
+async def gapfill() -> None:
+    cap = _Capacity(get_settings().rapidocr_concurrency)
+    await _drive(STREAM_GAPFILL, cap, lambda mid, raw: _spawn(_gapfill_job(cap, mid, raw)))
+
+
+# ---- merge: read `merge`, assemble result.json, clean up. light concurrency ----------------------------
+async def merge() -> None:
+    cap = _Capacity(get_settings().merge_concurrency)
+    await _drive(STREAM_MERGE, cap, lambda mid, raw: _spawn(_merge_job(cap, mid, raw)))
+
+
+# ---- tabular: read `tables`, SLM structure + describe, write tables. bounded by the SLM slot ------------
 async def tabular() -> None:
-    stream = STREAM_TABLES
-    redis = get_redis()
-    await ensure_group(stream)
-    consumer = f"{stream}-{get_settings().worker_id}"
-    limit = get_settings().slm_concurrency
-    sem = asyncio.Semaphore(limit)
-    logger.info("consuming %s concurrency=%d", stream, limit)
-    await _recover(stream, consumer, lambda mid, raw: _spawn(_tabular_job(sem, mid, raw)))
-    while True:
-        fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
-        for msg_id, raw in fresh[0][1] if fresh else []:
-            _spawn(_tabular_job(sem, msg_id.decode(), raw))
+    cap = _Capacity(get_settings().slm_concurrency)
+    await _drive(STREAM_TABLES, cap, lambda mid, raw: _spawn(_tabular_job(cap, mid, raw)))
 
 
 async def _main() -> None:

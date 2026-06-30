@@ -183,11 +183,6 @@ def extract_sheet(worksheet: Worksheet, sheet_no: int) -> SheetExtraction:
     )
 
 
-def extract_workbook(data: bytes) -> list[SheetExtraction]:
-    workbook = openpyxl.load_workbook(BytesIO(data), data_only=True)
-    return [extract_sheet(workbook[name], sheet_no) for sheet_no, name in enumerate(workbook.sheetnames, start=1)]
-
-
 def sheet_names(data: bytes) -> list[str]:
     return openpyxl.load_workbook(BytesIO(data), read_only=True).sheetnames
 

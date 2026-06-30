@@ -1,215 +1,297 @@
-\documentclass{beamer}
-\usepackage{newcomputermodern}
-\usepackage{booktabs} % For cleaner tables
+\documentclass[presentation,aspectratio=169]{beamer}
 
-\title{Citadel}
-\subtitle{The Operating System for Private Organizational Knowledge}
-\author{Masum Billal}
-\usefonttheme{professionalfonts}
-\usefonttheme{serif}
+\usepackage{newcomputermodern}
+\usepackage{booktabs}
+\usepackage{amsmath}
 
 \usetheme{Madrid}
 \usecolortheme{beaver}
 
+\usefonttheme{professionalfonts}
+\usefonttheme{serif}
+
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+
+\title{Citadel}
+\subtitle{Transform Documents into Lossless Queryable Data}
+\author{Masum Billal}
+\date{2026}
+
 \begin{document}
+
+	% ---------------- TITLE ----------------
 	\frame{\titlepage}
 
-	% SLIDE 1: HUGE EXPENSIVE PROBLEM
-	\begin{frame}
-		\frametitle{Every Company Already Owns the Answers...}
+	% ---------------- SLIDE 1 ----------------
+	\begin{frame}{The Problem}
+		Companies are drowning in documents:
 		\begin{itemize}
-			\item \textbf{Trapped in Millions of Files:} Contracts, PDFs, invoices, emails, spreadsheets, scanned documents, CAD drawings, and compliance reports.
-			\item \textbf{Yet Nobody Can Ask Concrete Questions:}
-			\begin{itemize}
-				\item \emph{"Which suppliers increased prices more than 15\% over the last three years?"}
-				\item \emph{"Find every contract exposing us to GDPR liability."}
-			\end{itemize}
-			\item \vspace{0.3cm} \textbf{\Large 95\% of enterprise knowledge is effectively unsearchable.}
+			\item PDFs, Excel files, contracts, reports, scanned records
 		\end{itemize}
-	\end{frame}
 
-	% SLIDE 2: WHY EXISTING TOOLS FUNDAMENTALLY FAIL
-	\begin{frame}
-		\frametitle{Why Today's AI Still Fails}
-		\begin{columns}[t]
-			\begin{column}{0.5\textwidth}
-				\textbf{LLMs \& Deep Research}
-				\begin{itemize}
-					\item Require manual file uploads.
-					\item Forget information over long chats.
-					\item Hit strict token/context limits.
-				\end{itemize}
-
-				\vspace{0.2cm}
-				\textbf{Naive RAG}
-				\begin{itemize}
-					\item Text chunking destroys layouts.
-					\item Fails completely on large tables.
-					\item Poor cross-document reasoning.
-				\end{itemize}
-			\end{column}
-			\begin{column}{0.5\textwidth}
-				\textbf{Enterprise Search \& Glean}
-				\begin{itemize}
-					\item Returns links to documents, not verified answers.
-					\item Relies on keyword/simple matching.
-				\end{itemize}
-
-				\vspace{0.2cm}
-				\textbf{Legacy OCR}
-				\begin{itemize}
-					\item Extracts raw text strings but completely loses meaning and relations.
-				\end{itemize}
-			\end{column}
-		\end{columns}
 		\vspace{0.4cm}
-		\centering
-		\textbf{Companies don't need another chatbot. They need an intelligence layer.}
-	\end{frame}
 
-	% SLIDE 3: YOUR BREAKTHROUGH / POSITIONING
-	\begin{frame}
-		\frametitle{Citadel: Turn Unstructured Docs into Structured Intelligence}
-		\begin{center}
-			\textbf{\Large A search engine for your entire private knowledge base.}
-			\vfill
-			Upload millions of documents once. Ask questions forever.
-		\end{center}
-		\vfill
-		\begin{block}{Every single answer is:}
-			\begin{itemize}
-				\item \textbf{Traceable:} Labeled back to the exact source coordinate.
-				\item \textbf{Structured:} Extracted cleanly into usable data tables.
-				\item \textbf{Explainable:} Driven by evidence, not LLM guesses.
-				\item \textbf{Private:} Run completely locally or in an isolated sandbox.
-			\end{itemize}
-		\end{block}
-	\end{frame}
+		But they are not truly usable.
 
-	% SLIDE 4: BEFORE VS AFTER (VALUE COMMUNICATOR)
-	\begin{frame}
-		\frametitle{The Workflow Shift}
-		\begin{columns}[c]
-			\begin{column}{0.48\textwidth}
-				\begin{block}{Without Citadel (Hours Lost)}
-					\centering
-					Employee \\ $\downarrow$ \\ Search nested folders \\ $\downarrow$ \\ Open dozens of PDFs \\ $\downarrow$ \\ Copy-paste into ChatGPT \\ $\downarrow$ \\ Spot hallucinations / Wrong answer \\ $\downarrow$ \\ \textbf{Repeat process manually}
-				\end{block}
-			\end{column}
-			\begin{column}{0.04\textwidth}
-				\centering \Large $\rightarrow$
-			\end{column}
-			\begin{column}{0.48\textwidth}
-				\begin{block}{With Citadel (Seconds Saved)}
-					\centering
-					\textbf{Ask one single question} \\ $\downarrow$ \\ Citadel searches all repositories \\ $\downarrow$ \\ Returns precise answers, unified tables, and click-to-verify sources \\ $\downarrow$ \\ \textbf{Done.}
-				\end{block}
-			\end{column}
-		\end{columns}
-	\end{frame}
+		\vspace{0.3cm}
 
-	% SLIDE 5: HARD PROOF / BENCHMARK
-	\begin{frame}
-		\frametitle{Built on the World's Best Open OCR — Made Faster}
-		\begin{columns}[c]
-			\begin{column}{0.5\textwidth}
-				\begin{center}
-					{\Huge \textbf{95.04}} \\
-					\textbf{Official OmniDocBench Score} \\
-					Top-3 Worldwide (Beating GPT-4o, Gemini 3, and Mistral OCR)
-				\end{center}
-			\end{column}
-			\begin{column}{0.5\textwidth}
-				\begin{center}
-					{\Huge \textbf{2.2$\times$}} \\
-					\textbf{Faster Throughput} \\
-					Than stock MinerU pipeline using the exact same model and GPU
-				\end{center}
-			\end{column}
-		\end{columns}
-		\vfill
-		\begin{block}{Production-Ready Infrastructure}
-			Tested over an official \textbf{1,651-page enterprise benchmark} with \textbf{0 timeouts or processing failures}. Runs entirely locally with zero cloud dependencies required.
-		\end{block}
-	\end{frame}
+		\textbf{When someone asks:}
+		\begin{quote}
+			What changed in revenue across all reports since 2019?
+		\end{quote}
 
-	% SLIDE 6: WHY CITADEL IS DIFFERENT (ARCHITECTURE SIMPLIFIED)
-	\begin{frame}
-		\frametitle{Why Citadel is Different}
-		We replaced traditional RAG text-splitting with a three-layer production architecture:
-		\vfill
-		\begin{description}
-			\item[\textbf{1. Intelligent Ingestion:}] Natively preserves multi-dimensional tables, layouts, formulas, and visual relationships instead of flattening documents into generic text.
-			\item[\textbf{2. Structured Knowledge Engine:}] Creates searchable, interconnected data objects instead of isolated, fragmented text chunks.
-			\item[\textbf{3. Evidence-First Retrieval:}] Answers are synthesized strictly from verified evidence clusters, preventing standard vector embedding hallucinations.
-		\end{description}
-	\end{frame}
-
-	% SLIDE 7: USE CASES (CONCRETE EXAMPLES)
-	\begin{frame}
-		\frametitle{One Engine. Every Domain.}
-		\begin{description}
-			\item[\textbf{Finance:}] \emph{"Which vendors increased their line-item prices after the Q3 inflation spikes?"}
-			\item[\textbf{Legal:}] \emph{"Show me every active counterparty contract that contains an automatic renewal clause."}
-			\item[\textbf{Manufacturing:}] \emph{"Compare all field maintenance reports from the last decade mentioning bearing failures."}
-			\item[\textbf{Healthcare:}] \emph{"Identify all local patient records meeting the precise clinical inclusion criteria."}
-			\item[\textbf{HR \& Ops:}] \emph{"Which candidates in our resume database mention both Rust and Kubernetes?"}
-		\end{description}
-	\end{frame}
-
-	% SLIDE 8: PRIVACY
-	\begin{frame}
-		\frametitle{Private by Design}
+		The answer is still:
 		\begin{itemize}
-			\item \textbf{Zero Training Guardrails:} Customer document assets are never utilized to train, fine-tune, or modify underlying model weights.
-			\item \textbf{Bring Your Own LLM:} Connects ephemerally to your existing enterprise infrastructure (OpenAI API, Azure, or entirely local weights).
-			\item \textbf{Walled Sandbox Indexing:} Files are processed on-the-fly into localized layout structures with absolute data isolation.
-			\item \textbf{Cloud Optional:} Fully operational inside on-premise air-gapped secure facilities or private clouds.
+			\item manual work
+			\item spreadsheets rebuilt from scratch
+			\item human interpretation
 		\end{itemize}
+
+		\vspace{0.3cm}
+		\textbf{Enterprise knowledge exists — but it is not computable.}
 	\end{frame}
 
-	% SLIDE 9: DIFFICULT TO COPY (THE MOAT)
-	\begin{frame}
-		\frametitle{Why This is Difficult to Copy}
-		Instead of generic AI wrappers, our moat is built on years of foundational ingestion engineering:
-		\vfill
+	% ---------------- SLIDE 2 ----------------
+	\begin{frame}{Why This Is Broken}
+		Current AI systems try to “read” documents:
+
 		\begin{itemize}
-			\item \textbf{High-Performance Parsing Pipeline:} Custom state-of-the-art layout preservation engine.
-			\item \textbf{Deterministic Table Reconstruction:} Keeps structural cell geometry intact without breaking text strings or losing header hierarchies.
-			\item \textbf{Evidence Graph Layer:} Maps real-time cross-document relationships before synthesis.
-			\item \textbf{Massively Parallel Inference Stream:} Custom streaming implementation optimized to run 128-wide concurrent processing streams.
+			\item OCR extracts text
+			\item LLMs summarize it
+			\item search systems embed it
 		\end{itemize}
+
+		\vspace{0.3cm}
+
+		But one critical thing is lost:
+
+		\vspace{0.2cm}
+		\textbf{structure}
+
+		\vspace{0.3cm}
+
+		Tables become text. Layout becomes noise. Relationships disappear.
+
+		\vspace{0.3cm}
+
+		So the AI is forced to guess.
+
+		\vspace{0.2cm}
+		\textbf{Guessing is unacceptable in financial, legal, and regulated workflows.}
 	\end{frame}
 
-	% SLIDE 10: BUSINESS MODEL
-	\begin{frame}
-		\frametitle{Scalable Business Model}
+	% ---------------- SLIDE 3 ----------------
+	\begin{frame}{The Real Bottleneck}
+		Answering important questions today requires:
+
+		\begin{itemize}
+			\item manual document reconstruction
+			\item repeated data cleaning
+			\item multiple teams redoing the same work
+		\end{itemize}
+
+		\vspace{0.3cm}
+
+		\textbf{Result:}
+		\begin{itemize}
+			\item days to answer simple questions
+			\item inconsistent outputs
+			\item high risk of error
+		\end{itemize}
+
+		\vspace{0.3cm}
+
+		\textbf{The bottleneck is reconstruction, not access.}
+	\end{frame}
+
+	% ---------------- SLIDE 4 ----------------
+	\begin{frame}{The Insight}
+		We don’t need better document summaries.
+
+		\vspace{0.4cm}
+
+		We need something different:
+
+		\vspace{0.3cm}
+
 		\begin{center}
-			\begin{tabular}{lll}
-				\toprule
-				\textbf{Tier} & \textbf{Delivery Mechanism} & \textbf{Pricing Metric} \\
-				\midrule
-				\textbf{Desktop Pro} & Native Application & Predictable Subscription \\
-				\textbf{Cloud Scale} & Managed SaaS Infrastructure & Consumption Usage Pricing \\
-				\textbf{Enterprise} & On-Prem / Air-gapped Private Cloud & Per-Seat Licensing + Platform Fee \\
-				\textbf{API Layer} & Developer Infrastructure Pipeline & Metered Per-Page Pricing \\
-				\bottomrule
-			\end{tabular}
+			\Large
+			\textbf{Documents should behave like databases.}
 		\end{center}
-		\vfill
-		\begin{block}{Go-To-Market Friction Reduction}
-			Product-led growth starting at the developer and professional desktop level, scaling seamlessly into total corporate data infrastructure.
-		\end{block}
+
+		\vspace{0.3cm}
+
+		Not text. Not embeddings. Not summaries.
+
+		\vspace{0.2cm}
+
+		But structured, queryable data.
 	\end{frame}
 
-	% SLIDE 11: VISION
-	\begin{frame}
-		\frametitle{The Long-Term Vision}
-		\begin{description}
-			\item[\textbf{Today:}] Search, aggregate, and instantly extract insights across all your unstructured corporate documents.
-			\item[\textbf{Tomorrow:}] Every scaling enterprise runs a continuous, private, self-updating knowledge engine over their entire historical data footprint.
-			\item[\textbf{Eventually:}] Citadel becomes the foundational, secure infrastructure layer sitting between human knowledge and AI reasoning models.
-		\end{description}
+	% ---------------- SLIDE 5 ----------------
+	\begin{frame}{The Citadel Solution}
+		Citadel converts any document into structured data:
+
+		\begin{itemize}
+			\item PDFs
+			\item Excel files
+			\item Word documents
+			\item scanned images
+			\item CSV / JSON
+		\end{itemize}
+
+		\vspace{0.3cm}
+
+		Into:
+
+		\vspace{0.2cm}
+
+		\begin{center}
+			\textbf{a structured, queryable system of record}
+		\end{center}
+	\end{frame}
+
+	% ---------------- SLIDE 6 ----------------
+	\begin{frame}{How It Works}
+		\begin{enumerate}
+			\item Ingest documents
+			\item Extract structure (tables, layout, text)
+			\item Store as relational data
+			\item Let AI generate queries
+			\item Database returns exact answers
+		\end{enumerate}
+
+		\vspace{0.4cm}
+
+		\begin{center}
+			\textbf{AI writes queries. Database computes truth.}
+		\end{center}
+	\end{frame}
+
+	% ---------------- SLIDE 7 ----------------
+	\begin{frame}{Key Difference}
+		Current systems:
+		\begin{itemize}
+			\item flatten everything into text
+			\item lose structure permanently
+			\item rely on AI to guess meaning
+		\end{itemize}
+
+		\vspace{0.4cm}
+
+		Citadel:
+		\begin{itemize}
+			\item preserves structure at ingestion
+			\item stores real relational data
+			\item never lets AI invent values
+		\end{itemize}
+
+		\vspace{0.3cm}
+
+		\textbf{We remove ambiguity at the source.}
+	\end{frame}
+
+	% ---------------- SLIDE 8 ----------------
+	\begin{frame}{What This Enables}
+		Citadel allows companies to:
+
+		\begin{itemize}
+			\item search across thousands of reports instantly
+			\item compare financials across years in seconds
+			\item extract contract risks across repositories
+			\item run audits without manual reconstruction
+		\end{itemize}
+
+		\vspace{0.3cm}
+
+		\textbf{Days of work become seconds.}
+	\end{frame}
+
+	% ---------------- SLIDE 9 ----------------
+	\begin{frame}{Who It’s For}
+		Built for high-stakes environments:
+
+		\begin{itemize}
+			\item financial services / private equity
+			\item legal teams
+			\item healthcare and clinical research
+			\item government and regulated industries
+		\end{itemize}
+
+		\vspace{0.3cm}
+
+		\textbf{Where wrong answers are not acceptable.}
+	\end{frame}
+
+	% ---------------- SLIDE 10 ----------------
+	\begin{frame}{Why Now}
+		Three shifts make this possible:
+
+		\begin{itemize}
+			\item AI models are strong at reasoning and query generation
+			\item enterprises are overloaded with document-based data
+			\item demand for secure, on-prem systems is increasing
+		\end{itemize}
+
+		\vspace{0.3cm}
+
+		\textbf{The problem is now large enough to require a new layer.}
+	\end{frame}
+
+	% ---------------- SLIDE 11 ----------------
+	\begin{frame}{What Makes Citadel Different}
+		Most tools:
+		\begin{itemize}
+			\item improve search
+			\item improve summarization
+			\item improve embeddings
+		\end{itemize}
+
+		\vspace{0.3cm}
+
+		Citadel:
+
+		\vspace{0.2cm}
+
+		\begin{center}
+			\textbf{converts documents into structured systems of record}
+		\end{center}
+	\end{frame}
+
+	% ---------------- SLIDE 12 ----------------
+	\begin{frame}{The Vision}
+		In the future:
+
+		\begin{itemize}
+			\item documents are not read
+			\item they are queried
+			\item AI operates on structured enterprise data
+		\end{itemize}
+
+		\vspace{0.4cm}
+
+		\begin{center}
+			\Large
+			\textbf{Citadel makes enterprise knowledge computable.}
+		\end{center}
+	\end{frame}
+
+	% ---------------- FINAL ----------------
+	\begin{frame}{Closing}
+		Every company already has the answers.
+
+		\vspace{0.3cm}
+
+		They are just trapped in documents.
+
+		\vspace{0.5cm}
+
+		\begin{center}
+			\Large
+			\textbf{Citadel makes those answers computable.}
+		\end{center}
+
 	\end{frame}
 
 \end{document}

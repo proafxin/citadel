@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import zstandard
@@ -73,6 +74,12 @@ async def _add_table(session: AsyncSession, content_id: str, doc_id: int, table:
 
 async def save_document_tree(doc_id: int, blocks: list[Block], status: str) -> None:
     async with get_sessionmaker()() as session:
+        # idempotent merge: a redelivered/retried merge (worker died after commit, or persist failed post-commit)
+        # finds the tree already written and only refreshes status — never re-inserts duplicate content_ids
+        if await session.scalar(select(ContentNode.id).where(ContentNode.document_id == doc_id).limit(1)) is not None:
+            async with session.begin():
+                (await session.get_one(Document, doc_id)).status = status
+            return
         document = await session.get_one(Document, doc_id)
         library = await session.get_one(Library, document.library_id)
         library_id, filename, library_name = document.library_id, document.filename, library.name
@@ -272,11 +279,16 @@ def _tree_key(doc_id: int) -> str:
     return f"{doc_id}.json.zst"
 
 
+def compress_tree(tree: dict) -> bytes:
+    return zstandard.ZstdCompressor().compress(json.dumps(tree).encode())
+
+
 async def persist_document_tree(doc_id: int) -> None:
     async with get_sessionmaker()() as session:
         document = await session.get_one(Document, doc_id)
         tree = await build_document_tree(session, document)
-    put_object(_tree_key(doc_id), zstandard.ZstdCompressor().compress(json.dumps(tree).encode()))
+    payload = await asyncio.to_thread(compress_tree, tree)
+    await asyncio.to_thread(put_object, _tree_key(doc_id), payload)
 
 
 def load_document_tree(doc_id: int) -> dict | None:
@@ -287,7 +299,7 @@ def load_document_tree(doc_id: int) -> dict | None:
 
 
 async def get_result(doc_id: int) -> dict:
-    tree = load_document_tree(doc_id)
+    tree = await asyncio.to_thread(load_document_tree, doc_id)
     if tree is None:
         raise HTTPException(status_code=404, detail="result not ready")
     return tree

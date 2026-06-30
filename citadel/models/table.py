@@ -10,7 +10,6 @@ class Table(Base):
 
     content_id: Mapped[str] = mapped_column(ForeignKey("content.content_id"), unique=True)
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
-    page_range: Mapped[list[int] | None] = mapped_column(JSONB, default=None)
     columns: Mapped[list[dict]] = mapped_column(JSONB)
     table_metadata: Mapped[dict] = mapped_column(JSONB)
     description: Mapped[str] = mapped_column(Text)
