@@ -214,9 +214,13 @@ async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
     redis = get_redis()
     await redis.hset(f"doc:{doc_id}", "state", "paginating")
     if kind == "text":
+        text = data.decode("utf-8", errors="replace")
+        blocks = [
+            Block(type="text", page_idx=0, text=part.strip()) for part in re.split(r"\n\s*\n", text) if part.strip()
+        ]
         await redis.hset(f"doc:{doc_id}", "page_count", 1)
-        await record_page(doc_id, 0, [Block(type="text", page_idx=0, text=data.decode("utf-8", errors="replace"))])
-        logger.info("paginate file=%s text", fields["filename"])
+        await record_page(doc_id, 0, blocks)
+        logger.info("paginate file=%s text paragraphs=%d", fields["filename"], len(blocks))
         return
     if kind == "html":
         blocks = await asyncio.to_thread(parse_html, data)

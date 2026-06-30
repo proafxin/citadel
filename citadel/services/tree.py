@@ -1,9 +1,8 @@
-import itertools
 import re
-from collections.abc import Iterator
+import unicodedata
 
 from citadel.schemas.content import Block
-from citadel.schemas.tree import HeadingInfo, NodeSpec
+from citadel.schemas.tree import NodeSpec
 
 _KIND_BY_TYPE = {
     "title": "heading",
@@ -18,8 +17,6 @@ _KIND_BY_TYPE = {
 
 _LIST_MARKER = re.compile(r"^\s*(?:[●○•▪◦‣·*]\s|[-–—]\s|\(?\d{1,3}[.)]\s|\(?[A-Za-z][.)]\s|\([A-Za-z0-9]+\)\s)")
 _BULLET_GLYPH = re.compile(r"^\s*[●○•▪◦‣·*\-–—]\s+")
-_NUM_DOTTED = re.compile(r"^\s*\d+(?:\.\d+)+")
-_NUM_SINGLE = re.compile(r"^\s*\d+\.")
 _HEADING_SPLIT = re.compile(r'(?<=["”:.?)])\s*\n\s*')
 
 
@@ -54,21 +51,6 @@ def split_heading(text: str) -> list[str]:
     parts = [re.sub(r"\s*\n\s*", " ", part).strip() for part in _HEADING_SPLIT.split(raw)]
     parts = [part for part in parts if part]
     return parts or [""]
-
-
-def pattern_level(text: str) -> int:
-    stripped = (text or "").strip()
-    if not stripped:
-        return 1
-    letters = [char for char in stripped if char.isalpha()]
-    if stripped.upper().startswith("SECTION") or (letters and all(char.isupper() for char in letters)):
-        return 1
-    dotted = _NUM_DOTTED.match(stripped)
-    if dotted:
-        return 1 + stripped[: dotted.end()].count(".")
-    if _NUM_SINGLE.match(stripped) or stripped.endswith(":"):
-        return 2
-    return 3
 
 
 def _next_ordinal(counters: dict[int, int], page_no: int) -> int:
@@ -117,13 +99,11 @@ def _heading_nodes(
     doc_id: int,
     stack: list[tuple[int, str]],
     counters: dict[int, int],
-    levels: dict[int, int],
-    heading_idx: Iterator[int],
 ) -> list[NodeSpec]:
     page_no = block.page_idx + 1
     nodes: list[NodeSpec] = []
     for piece in split_heading(block.text or ""):
-        level = block.text_level or levels.get(next(heading_idx), 1)
+        level = block.text_level or 1
         ordinal = _next_ordinal(counters, page_no)
         content_id = make_content_id(library_id, doc_id, page_no, ordinal)
         parent = _push(stack, level, content_id)
@@ -171,34 +151,7 @@ def _content_node(
     return spec
 
 
-def _following_snippet(blocks: list[Block], index: int) -> str:
-    for block in blocks[index + 1 :]:
-        if detail_kind(block.type) == "heading":
-            return ""
-        text = (block.text or "").strip()
-        if text:
-            return text[:150]
-    return ""
-
-
-def heading_infos(blocks: list[Block]) -> list[HeadingInfo]:
-    infos: list[HeadingInfo] = []
-    for index, block in enumerate(blocks):
-        if detail_kind(block.type) != "heading":
-            continue
-        snippet = _following_snippet(blocks, index)
-        infos.extend(
-            HeadingInfo(text=piece, font_size=block.font_size, page=block.page_idx + 1, context=snippet)
-            for piece in split_heading(block.text or "")
-        )
-    return infos
-
-
-def build_tree(
-    blocks: list[Block], library_id: int, doc_id: int, heading_levels: dict[int, int] | None = None
-) -> list[NodeSpec]:
-    levels = heading_levels or {}
-    heading_idx = itertools.count()
+def build_tree(blocks: list[Block], library_id: int, doc_id: int) -> list[NodeSpec]:
     specs: list[NodeSpec] = []
     stack: list[tuple[int, str]] = []
     counters: dict[int, int] = {}
@@ -211,7 +164,7 @@ def build_tree(
         elif detail_kind(block.type) == "list":
             idx += 1
         elif detail_kind(block.type) == "heading":
-            specs.extend(_heading_nodes(block, library_id, doc_id, stack, counters, levels, heading_idx))
+            specs.extend(_heading_nodes(block, library_id, doc_id, stack, counters))
             idx += 1
         else:
             specs.append(_content_node(block, library_id, doc_id, stack, counters))
@@ -225,6 +178,17 @@ def _leaf_text(spec: NodeSpec) -> str:
     if spec.kind == "list":
         return " ".join(item.get("content", "") for item in spec.items or [])
     return spec.text or ""
+
+
+def _clean_text(text: str) -> str:
+    text = unicodedata.normalize("NFC", text)
+    text = re.sub(r"(?<=[a-z])-\s+(?=[a-z])", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _clean_name(name: str) -> str:
+    name = unicodedata.normalize("NFC", name)
+    return re.sub(r"\s+", " ", re.sub(r"[_-]+", " ", name)).strip()
 
 
 def build_search_text(specs: list[NodeSpec], library_name: str, filename: str) -> dict[str, str]:
@@ -241,6 +205,11 @@ def build_search_text(specs: list[NodeSpec], library_name: str, filename: str) -
                 headings.append(ancestor.text)
             parent = ancestor.parent_content_id
         headings.reverse()
-        parts = [library_name, filename, *headings, _leaf_text(spec)]
+        parts = [
+            _clean_name(library_name),
+            _clean_name(filename.rsplit(".", 1)[0] if "." in filename else filename),
+            *(_clean_text(text) for text in headings),
+            _clean_text(_leaf_text(spec)),
+        ]
         result[spec.content_id] = "\n".join(part for part in parts if part)
     return result
