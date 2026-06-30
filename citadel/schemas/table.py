@@ -21,7 +21,6 @@ class ColumnRole(StrEnum):
 
 
 class Column(BaseModel):
-    name: str
     header: str | None = None
     dtype: ColumnDType = ColumnDType.STRING
     role: ColumnRole = ColumnRole.DATA
@@ -60,3 +59,28 @@ class TableRow(BaseModel):
     content_id: str
     row_idx: int
     values: list[CellValue]
+
+
+class StructureColumn(BaseModel):
+    header: str | None = None
+    dtype: ColumnDType = ColumnDType.STRING
+    role: ColumnRole = ColumnRole.DATA
+    unit: str | None = None
+
+
+class TableStructure(BaseModel):
+    col_start: int
+    col_end: int
+    header_rows: list[int] = Field(default_factory=list)
+    data_start: int
+    data_end: int
+    columns: list[StructureColumn]
+    section_label_col: int | None = None
+    title: str | None = None
+    caption: str | None = None
+    notes: list[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class RegionStructure(BaseModel):
+    tables: list[TableStructure]

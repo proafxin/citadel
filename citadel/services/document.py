@@ -10,9 +10,10 @@ from citadel.db import get_sessionmaker
 from citadel.models.content import Code, ContentNode, Equation, Heading, ListBlock, Paragraph
 from citadel.models.document import Document
 from citadel.models.library import Library
-from citadel.models.table import Table
+from citadel.models.table import Table, TableRow
 from citadel.schemas.content import Block
-from citadel.services.tree import NodeSpec, build_search_text, build_tree, detail_kind, render_markdown
+from citadel.services.excel import MaterializedTable
+from citadel.services.tree import NodeSpec, build_search_text, build_tree, detail_kind, make_content_id, render_markdown
 from citadel.storage import get_object, put_object
 
 
@@ -75,6 +76,55 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: str) -> N
             await session.flush()
             id_map[spec.content_id] = node.id
             _add_detail(session, spec, doc_id)
+
+
+async def save_sheet_tables(
+    doc_id: int, sheet_no: int, sheet_name: str, tables: list[tuple[int, MaterializedTable]]
+) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        document = await session.get_one(Document, doc_id)
+        sheet = ContentNode(
+            content_id=make_content_id(document.library_id, doc_id, sheet_no, 0),
+            document_id=doc_id,
+            sheet_no=sheet_no,
+            ordinal=0,
+            type="sheet",
+            label=sheet_name,
+        )
+        session.add(sheet)
+        await session.flush()
+        for ordinal, table in tables:
+            content_id = make_content_id(document.library_id, doc_id, sheet_no, ordinal)
+            node = ContentNode(
+                content_id=content_id,
+                document_id=doc_id,
+                parent_id=sheet.id,
+                sheet_no=sheet_no,
+                ordinal=ordinal,
+                type="table",
+            )
+            session.add(node)
+            await session.flush()
+            row = Table(
+                content_id=content_id,
+                document_id=doc_id,
+                columns=[column.model_dump() for column in table.columns],
+                table_metadata={
+                    "sheet": sheet_name,
+                    "title": table.title,
+                    "caption": table.caption,
+                    "notes": table.notes,
+                },
+                description=table.description,
+                n_rows=table.n_rows,
+                sample_rows=table.sample_rows,
+                anchors=table.anchors,
+            )
+            session.add(row)
+            await session.flush()
+            session.add_all(
+                TableRow(table_id=row.id, row_idx=index, values=values) for index, values in enumerate(table.rows)
+            )
 
 
 async def _load_payloads(session: AsyncSession, ids: list[str]) -> dict[str, dict]:

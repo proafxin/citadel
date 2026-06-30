@@ -11,6 +11,8 @@ from config import get_settings
 
 logger = logging.getLogger(__name__)
 
+SLM_TIMEOUT = 180
+
 
 @functools.lru_cache
 def _ollama_chat_url() -> str:
@@ -28,6 +30,25 @@ def _extract_json(text: str) -> str:
     return text[start : end + 1] if start != -1 and end != -1 else text
 
 
+async def _chat(prompt: str, fmt: dict | str) -> str:
+    payload = {
+        "model": get_settings().qwen_model,
+        "messages": [{"role": "user", "content": prompt}],
+        "think": False,
+        "stream": False,
+        "format": fmt,
+        "options": {"temperature": 0},
+    }
+    async with _slm_semaphore(), httpx.AsyncClient(timeout=SLM_TIMEOUT) as client:
+        response = await client.post(_ollama_chat_url(), json=payload)
+        response.raise_for_status()
+        return response.json()["message"]["content"]
+
+
+async def call_slm(prompt: str, schema: dict) -> dict:
+    return json.loads(_extract_json(await _chat(prompt, schema)))
+
+
 async def level_headings(headings: list[HeadingInfo]) -> dict[int, int]:
     if not headings:
         return {}
@@ -42,24 +63,12 @@ async def level_headings(headings: list[HeadingInfo]) -> dict[int, int]:
                 f"    intro: {info.context}" if info.context else "    intro: (no text directly under it)",
             )
         )
-    lines = "\n".join(rows)
-    payload = {
-        "model": get_settings().qwen_model,
-        "messages": [{"role": "user", "content": f"{load_prompt('heading_levels')}\n{lines}"}],
-        "think": False,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0},
-    }
-    async with _slm_semaphore():
-        try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                response = await client.post(_ollama_chat_url(), json=payload)
-                response.raise_for_status()
-        except httpx.HTTPError:
-            logger.warning("SLM unreachable for heading levels; falling back to pattern")
-            return {}
-        content = response.json()["message"]["content"]
+    prompt = f"{load_prompt('heading_levels')}\n" + "\n".join(rows)
+    try:
+        content = await _chat(prompt, "json")
+    except httpx.HTTPError:
+        logger.warning("SLM unreachable for heading levels; falling back to pattern")
+        return {}
     data = json.loads(_extract_json(content))
     levels = {int(key): int(value) for key, value in data.items() if key.isdigit()} if isinstance(data, dict) else {}
     if len(levels) < len(headings):
