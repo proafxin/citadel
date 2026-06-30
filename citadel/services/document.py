@@ -7,13 +7,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
-from citadel.llm import level_headings
 from citadel.models.content import Code, ContentNode, Equation, Heading, ListBlock, Paragraph
 from citadel.models.document import Document
 from citadel.models.library import Library
 from citadel.models.table import Table
 from citadel.schemas.content import Block
-from citadel.services.tree import NodeSpec, build_search_text, build_tree, detail_kind, render_markdown, split_heading
+from citadel.services.tree import NodeSpec, build_search_text, build_tree, detail_kind, render_markdown
 from citadel.storage import get_object, put_object
 
 
@@ -53,15 +52,11 @@ def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:
 
 
 async def save_document_tree(doc_id: int, blocks: list[Block], status: str) -> None:
-    heading_pieces = [
-        piece for block in blocks if detail_kind(block.type) == "heading" for piece in split_heading(block.text or "")
-    ]
-    levels = await level_headings(heading_pieces)
     async with get_sessionmaker()() as session, session.begin():
         document = await session.get_one(Document, doc_id)
         library = await session.get_one(Library, document.library_id)
         document.status = status
-        specs = list(build_tree(blocks, document.library_id, doc_id, levels))
+        specs = list(build_tree(blocks, document.library_id, doc_id))
         search_text = build_search_text(specs, library.name, document.filename)
         id_map: dict[str, int] = {}
         for spec in specs:

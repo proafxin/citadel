@@ -1,8 +1,9 @@
+import itertools
 import re
 from collections.abc import Iterator
 
 from citadel.schemas.content import Block
-from citadel.schemas.tree import NodeSpec
+from citadel.schemas.tree import HeadingInfo, NodeSpec
 
 _KIND_BY_TYPE = {
     "title": "heading",
@@ -116,12 +117,13 @@ def _heading_nodes(
     doc_id: int,
     stack: list[tuple[int, str]],
     counters: dict[int, int],
-    level_iter: Iterator[int] | None,
+    levels: dict[int, int],
+    heading_idx: Iterator[int],
 ) -> list[NodeSpec]:
     page_no = block.page_idx + 1
     nodes: list[NodeSpec] = []
     for piece in split_heading(block.text or ""):
-        level = (next(level_iter, None) if level_iter is not None else None) or pattern_level(piece)
+        level = levels.get(next(heading_idx), 1)
         ordinal = _next_ordinal(counters, page_no)
         content_id = make_content_id(library_id, doc_id, page_no, ordinal)
         parent = _push(stack, level, content_id)
@@ -169,10 +171,34 @@ def _content_node(
     return spec
 
 
+def _following_snippet(blocks: list[Block], index: int) -> str:
+    for block in blocks[index + 1 :]:
+        if detail_kind(block.type) == "heading":
+            return ""
+        text = (block.text or "").strip()
+        if text:
+            return text[:150]
+    return ""
+
+
+def heading_infos(blocks: list[Block]) -> list[HeadingInfo]:
+    infos: list[HeadingInfo] = []
+    for index, block in enumerate(blocks):
+        if detail_kind(block.type) != "heading":
+            continue
+        snippet = _following_snippet(blocks, index)
+        infos.extend(
+            HeadingInfo(text=piece, font_size=block.font_size, page=block.page_idx + 1, context=snippet)
+            for piece in split_heading(block.text or "")
+        )
+    return infos
+
+
 def build_tree(
-    blocks: list[Block], library_id: int, doc_id: int, heading_levels: list[int] | None = None
+    blocks: list[Block], library_id: int, doc_id: int, heading_levels: dict[int, int] | None = None
 ) -> list[NodeSpec]:
-    level_iter: Iterator[int] | None = iter(heading_levels) if heading_levels else None
+    levels = heading_levels or {}
+    heading_idx = itertools.count()
     specs: list[NodeSpec] = []
     stack: list[tuple[int, str]] = []
     counters: dict[int, int] = {}
@@ -185,7 +211,7 @@ def build_tree(
         elif detail_kind(block.type) == "list":
             idx += 1
         elif detail_kind(block.type) == "heading":
-            specs.extend(_heading_nodes(block, library_id, doc_id, stack, counters, level_iter))
+            specs.extend(_heading_nodes(block, library_id, doc_id, stack, counters, levels, heading_idx))
             idx += 1
         else:
             specs.append(_content_node(block, library_id, doc_id, stack, counters))

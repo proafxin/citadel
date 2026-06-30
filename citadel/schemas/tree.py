@@ -1,6 +1,13 @@
 from pydantic import BaseModel
 
 
+class HeadingInfo(BaseModel):
+    text: str
+    font_size: float | None = None
+    page: int
+    context: str = ""
+
+
 class NodeSpec(BaseModel):
     content_id: str
     parent_content_id: str | None

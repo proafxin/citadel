@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     paginate_concurrency: int = CPU_THIRD  # pdfium process-pool workers, one dedicated pdfium per process
     ocr_concurrency: int = 128  # pages in flight; sockets are capped by mineru_max_connections, so keep this high to feed the server (born-digital makes few requests/page → needs many concurrent pages)
     merge_concurrency: int = 4  # light assembly
+    slm_concurrency: int = 2  # concurrent ollama SLM calls (heading-leveling); keep <= OLLAMA_NUM_PARALLEL, low so it doesn't starve MinerU OCR
     worker_id: str = "0"  # stable per-replica id → deterministic Redis consumer names; set distinctly per replica
     rapidocr_concurrency: int = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
     gap_fill: bool = True  # RapidOCR scanned gap-fill; set CITADEL_GAP_FILL=0 for clean-image benchmarks (pure VLM)
