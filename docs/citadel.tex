@@ -1,8 +1,9 @@
 \documentclass{beamer}
 \usepackage{newcomputermodern}
+\usepackage{booktabs} % For cleaner tables
 
 \title{Citadel}
-\subtitle{Search Engine for Everyone}
+\subtitle{The Operating System for Private Organizational Knowledge}
 \author{Masum Billal}
 \usefonttheme{professionalfonts}
 \usefonttheme{serif}
@@ -13,167 +14,202 @@
 \begin{document}
 	\frame{\titlepage}
 
-	% SLIDE 1: THE PROBLEM & MARKET EXPANSION
+	% SLIDE 1: HUGE EXPENSIVE PROBLEM
 	\begin{frame}
-		\frametitle{The Universal Search Market Opportunity}
+		\frametitle{Every Company Already Owns the Answers...}
 		\begin{itemize}
-			\item \textbf{The Dark Data Dilemma}
-			\item Most personal and enterprise data remains completely dark and unsearchable.
-			\item Thousands of files, spreadsheets, and PDFs are scattered across drives without a unified index.
+			\item \textbf{Trapped in Millions of Files:} Contracts, PDFs, invoices, emails, spreadsheets, scanned documents, CAD drawings, and compliance reports.
+			\item \textbf{Yet Nobody Can Ask Concrete Questions:}
+			\begin{itemize}
+				\item \emph{"Which suppliers increased prices more than 15\% over the last three years?"}
+				\item \emph{"Find every contract exposing us to GDPR liability."}
+			\end{itemize}
+			\item \vspace{0.3cm} \textbf{\Large 95\% of enterprise knowledge is effectively unsearchable.}
 		\end{itemize}
 	\end{frame}
 
+	% SLIDE 2: WHY EXISTING TOOLS FUNDAMENTALLY FAIL
 	\begin{frame}
-		\frametitle{High Value Vertical Examples}
+		\frametitle{Why Today's AI Still Fails}
+		\begin{columns}[t]
+			\begin{column}{0.5\textwidth}
+				\textbf{LLMs \& Deep Research}
+				\begin{itemize}
+					\item Require manual file uploads.
+					\item Forget information over long chats.
+					\item Hit strict token/context limits.
+				\end{itemize}
+
+				\vspace{0.2cm}
+				\textbf{Naive RAG}
+				\begin{itemize}
+					\item Text chunking destroys layouts.
+					\item Fails completely on large tables.
+					\item Poor cross-document reasoning.
+				\end{itemize}
+			\end{column}
+			\begin{column}{0.5\textwidth}
+				\textbf{Enterprise Search \& Glean}
+				\begin{itemize}
+					\item Returns links to documents, not verified answers.
+					\item Relies on keyword/simple matching.
+				\end{itemize}
+
+				\vspace{0.2cm}
+				\textbf{Legacy OCR}
+				\begin{itemize}
+					\item Extracts raw text strings but completely loses meaning and relations.
+				\end{itemize}
+			\end{column}
+		\end{columns}
+		\vspace{0.4cm}
+		\centering
+		\textbf{Companies don't need another chatbot. They need an intelligence layer.}
+	\end{frame}
+
+	% SLIDE 3: YOUR BREAKTHROUGH / POSITIONING
+	\begin{frame}
+		\frametitle{Citadel: Turn Unstructured Docs into Structured Intelligence}
+		\begin{center}
+			\textbf{\Large A search engine for your entire private knowledge base.}
+			\vfill
+			Upload millions of documents once. Ask questions forever.
+		\end{center}
+		\vfill
+		\begin{block}{Every single answer is:}
+			\begin{itemize}
+				\item \textbf{Traceable:} Labeled back to the exact source coordinate.
+				\item \textbf{Structured:} Extracted cleanly into usable data tables.
+				\item \textbf{Explainable:} Driven by evidence, not LLM guesses.
+				\item \textbf{Private:} Run completely locally or in an isolated sandbox.
+			\end{itemize}
+		\end{block}
+	\end{frame}
+
+	% SLIDE 4: BEFORE VS AFTER (VALUE COMMUNICATOR)
+	\begin{frame}
+		\frametitle{The Workflow Shift}
+		\begin{columns}[c]
+			\begin{column}{0.48\textwidth}
+				\begin{block}{Without Citadel (Hours Lost)}
+					\centering
+					Employee \\ $\downarrow$ \\ Search nested folders \\ $\downarrow$ \\ Open dozens of PDFs \\ $\downarrow$ \\ Copy-paste into ChatGPT \\ $\downarrow$ \\ Spot hallucinations / Wrong answer \\ $\downarrow$ \\ \textbf{Repeat process manually}
+				\end{block}
+			\end{column}
+			\begin{column}{0.04\textwidth}
+				\centering \Large $\rightarrow$
+			\end{column}
+			\begin{column}{0.48\textwidth}
+				\begin{block}{With Citadel (Seconds Saved)}
+					\centering
+					\textbf{Ask one single question} \\ $\downarrow$ \\ Citadel searches all repositories \\ $\downarrow$ \\ Returns precise answers, unified tables, and click-to-verify sources \\ $\downarrow$ \\ \textbf{Done.}
+				\end{block}
+			\end{column}
+		\end{columns}
+	\end{frame}
+
+	% SLIDE 5: HARD PROOF / BENCHMARK
+	\begin{frame}
+		\frametitle{Built on the World's Best Open OCR — Made Faster}
+		\begin{columns}[c]
+			\begin{column}{0.5\textwidth}
+				\begin{center}
+					{\Huge \textbf{95.04}} \\
+					\textbf{Official OmniDocBench Score} \\
+					Top-3 Worldwide (Beating GPT-4o, Gemini 3, and Mistral OCR)
+				\end{center}
+			\end{column}
+			\begin{column}{0.5\textwidth}
+				\begin{center}
+					{\Huge \textbf{2.2$\times$}} \\
+					\textbf{Faster Throughput} \\
+					Than stock MinerU pipeline using the exact same model and GPU
+				\end{center}
+			\end{column}
+		\end{columns}
+		\vfill
+		\begin{block}{Production-Ready Infrastructure}
+			Tested over an official \textbf{1,651-page enterprise benchmark} with \textbf{0 timeouts or processing failures}. Runs entirely locally with zero cloud dependencies required.
+		\end{block}
+	\end{frame}
+
+	% SLIDE 6: WHY CITADEL IS DIFFERENT (ARCHITECTURE SIMPLIFIED)
+	\begin{frame}
+		\frametitle{Why Citadel is Different}
+		We replaced traditional RAG text-splitting with a three-layer production architecture:
+		\vfill
+		\begin{description}
+			\item[\textbf{1. Intelligent Ingestion:}] Natively preserves multi-dimensional tables, layouts, formulas, and visual relationships instead of flattening documents into generic text.
+			\item[\textbf{2. Structured Knowledge Engine:}] Creates searchable, interconnected data objects instead of isolated, fragmented text chunks.
+			\item[\textbf{3. Evidence-First Retrieval:}] Answers are synthesized strictly from verified evidence clusters, preventing standard vector embedding hallucinations.
+		\end{description}
+	\end{frame}
+
+	% SLIDE 7: USE CASES (CONCRETE EXAMPLES)
+	\begin{frame}
+		\frametitle{One Engine. Every Domain.}
+		\begin{description}
+			\item[\textbf{Finance:}] \emph{"Which vendors increased their line-item prices after the Q3 inflation spikes?"}
+			\item[\textbf{Legal:}] \emph{"Show me every active counterparty contract that contains an automatic renewal clause."}
+			\item[\textbf{Manufacturing:}] \emph{"Compare all field maintenance reports from the last decade mentioning bearing failures."}
+			\item[\textbf{Healthcare:}] \emph{"Identify all local patient records meeting the precise clinical inclusion criteria."}
+			\item[\textbf{HR \& Ops:}] \emph{"Which candidates in our resume database mention both Rust and Kubernetes?"}
+		\end{description}
+	\end{frame}
+
+	% SLIDE 8: PRIVACY
+	\begin{frame}
+		\frametitle{Private by Design}
 		\begin{itemize}
-			\item \textbf{Financial Automation:} Automatically parsing, cross-referencing, and analyzing millions of messy shop invoices.
-			\item \textbf{Operations and Real Estate:} Streamlining dense contract auditing and financial schemas in property management.
-			\item \textbf{Human Capital Infrastructure:} Analysis of recruiting, and HR management e.g. drop in resumes and job descriptions, get recommendations
-			\item  \textbf{Legal:} Due diligence, compliance, discrepancy analysis, contract review and so on.
-			\item \textbf{Personal:} Finance tracking, recommendations regarding virtually any life goals, improvement based on user data, etc.
+			\item \textbf{Zero Training Guardrails:} Customer document assets are never utilized to train, fine-tune, or modify underlying model weights.
+			\item \textbf{Bring Your Own LLM:} Connects ephemerally to your existing enterprise infrastructure (OpenAI API, Azure, or entirely local weights).
+			\item \textbf{Walled Sandbox Indexing:} Files are processed on-the-fly into localized layout structures with absolute data isolation.
+			\item \textbf{Cloud Optional:} Fully operational inside on-premise air-gapped secure facilities or private clouds.
 		\end{itemize}
 	\end{frame}
 
-	% SLIDE 2: INDUSTRY FLAWS
+	% SLIDE 9: DIFFICULT TO COPY (THE MOAT)
 	\begin{frame}
-		\frametitle{Where Current Leading Market Solutions Fail}
+		\frametitle{Why This is Difficult to Copy}
+		Instead of generic AI wrappers, our moat is built on years of foundational ingestion engineering:
+		\vfill
 		\begin{itemize}
-			\item Standard semantic search breaks during macroscopic aggregation and cross document trend filtering.
-			\item Existing architectures suffer from a multi dimensional layout blindness that causes highly unreliable tabular output.
-			\item Traditional systems struggle with coarse grained boundaries, frequently tearing cell associations away from header schemas.
-			\item This structural fragmentation results in severe analytical degradation even when advanced text parsers are used.
-			\item Citadel preserves the two dimensional relational geometry of tabular data while maintaining the root of origin.
-			\item Market product cause severe prompt bloat by exploding context token limits with raw files.
-			\item Large files suffer from critical retrieval degradation and information loss inside standard cloud architectures.
+			\item \textbf{High-Performance Parsing Pipeline:} Custom state-of-the-art layout preservation engine.
+			\item \textbf{Deterministic Table Reconstruction:} Keeps structural cell geometry intact without breaking text strings or losing header hierarchies.
+			\item \textbf{Evidence Graph Layer:} Maps real-time cross-document relationships before synthesis.
+			\item \textbf{Massively Parallel Inference Stream:} Custom streaming implementation optimized to run 128-wide concurrent processing streams.
 		\end{itemize}
 	\end{frame}
 
-	% SLIDE 3: CITADEL AS THE SOLUTION
+	% SLIDE 10: BUSINESS MODEL
 	\begin{frame}
-		\frametitle{Enter Citadel}
-		\begin{itemize}
-			\item As a dedicated isolated search engine, Citadel provides a unified platform built for individuals and organizations alike.
-			\item Users can instantly instantiate a private search engine over their life, work, or company.
-			\item Query documents, extract structural insights, and auto generate comprehensive reports.
-		\end{itemize}
+		\frametitle{Scalable Business Model}
+		\begin{center}
+			\begin{tabular}{lll}
+				\toprule
+				\textbf{Tier} & \textbf{Delivery Mechanism} & \textbf{Pricing Metric} \\
+				\midrule
+				\textbf{Desktop Pro} & Native Application & Predictable Subscription \\
+				\textbf{Cloud Scale} & Managed SaaS Infrastructure & Consumption Usage Pricing \\
+				\textbf{Enterprise} & On-Prem / Air-gapped Private Cloud & Per-Seat Licensing + Platform Fee \\
+				\textbf{API Layer} & Developer Infrastructure Pipeline & Metered Per-Page Pricing \\
+				\bottomrule
+			\end{tabular}
+		\end{center}
+		\vfill
+		\begin{block}{Go-To-Market Friction Reduction}
+			Product-led growth starting at the developer and professional desktop level, scaling seamlessly into total corporate data infrastructure.
+		\end{block}
 	\end{frame}
 
+	% SLIDE 11: VISION
 	\begin{frame}
-		\frametitle{Ingestion and Intelligence}
-		\begin{itemize}
-			\item Achieve uncompromised retrieval accuracy across massive file scales.
-			\item Process hundreds of multi page, complex files completely in minutes.
-			\item Convert completely unstructured visual, text, and layout media into clean searchable formats.
-		\end{itemize}
+		\frametitle{The Long-Term Vision}
+		\begin{description}
+			\item[\textbf{Today:}] Search, aggregate, and instantly extract insights across all your unstructured corporate documents.
+			\item[\textbf{Tomorrow:}] Every scaling enterprise runs a continuous, private, self-updating knowledge engine over their entire historical data footprint.
+			\item[\textbf{Eventually:}] Citadel becomes the foundational, secure infrastructure layer sitting between human knowledge and AI reasoning models.
+		\end{description}
 	\end{frame}
 
-	% SLIDE 4: ADAPTABILITY
-	\begin{frame}
-		\frametitle{Universal Adaptability}
-		\begin{itemize}
-			\item \textbf{Domain Agnostic Engine} \\
-			\begin{itemize}
-				\item Processes medical, legal, financial, or engineering data with identical mathematical precision.
-				\item Imposes no rigid vertical boundaries or hard coded use case templates.
-			\end{itemize}
-			\item \textbf{Language Agnostic Execution} \\
-			\begin{itemize}
-				\item Naturally navigates and synthesizes multi lingual document pools directly.
-				\item Eliminates the need for secondary translation layers or preprocessing.
-			\end{itemize}
-			\item \textbf{User Defined Strategy} \\
-			\begin{itemize}
-				\item Leaves final analytical execution completely open to user prompt strategies.
-				\item Employs system prompts strictly under the hood to enrich layout parsing and data retrieval.
-			\end{itemize}
-		\end{itemize}
-	\end{frame}
-
-	% SLIDE 5: ARCHITECTURE
-	\begin{frame}
-		\frametitle{Moving Beyond Legacy AI Framework Paradigms}
-		\begin{itemize}
-			\item \textbf{Transcending Traditional RAG} \\
-			\begin{itemize}
-				\item Avoids naive vector lookups to remain immune to standard retrieval bottlenecks.
-			\end{itemize}
-			\item \textbf{Surpassing Rigid Knowledge Graphs} \\
-			\begin{itemize}
-				\item Removes complex schema mapping latencies and entity relationship triplet failures.
-			\end{itemize}
-			\item \textbf{Granular Traceability} \\
-			\begin{itemize}
-				\item Maps every generated insight or report metric back to its exact file coordinate path.
-			\end{itemize}
-			\item \textbf{Ingestion Architecture} \\
-			\begin{itemize}
-				\item Eliminates fixed size sliding windows and token chunking to prevent context fracturing.
-			\end{itemize}
-		\end{itemize}
-	\end{frame}
-
-	% SLIDE 6: PRIVACY ENGINE
-	\begin{frame}
-		\frametitle{Data Privacy with Leading Intelligence}
-		\begin{itemize}
-			\item \textbf{Zero Training Architecture} \\
-			\begin{itemize}
-				\item Private data assets are never used to train, fine tune, or modify model weights.
-			\end{itemize}
-			\item \textbf{Instant Automated Indexing} \\
-			\begin{itemize}
-				\item Files are processed on the fly into custom layouts to enable immediate query routing.
-			\end{itemize}
-			\item \textbf{Isolated Storage Perimeter} \\
-			\begin{itemize}
-				\item Document sets stay safely walled off inside a local sandbox index away from training loops.
-			\end{itemize}
-			\item \textbf{Zero Training Enterprise APIs} \\
-			\begin{itemize}
-				\item Routes optimized context fragments to top tier reasoning engines purely for ephemeral response generation.
-				\item Ensures absolute data isolation with no underlying model contamination or trace retention.
-			\end{itemize}
-		\end{itemize}
-	\end{frame}
-
-	% SLIDE 7: BUSINESS MODEL
-	\begin{frame}
-		\frametitle{Business Model \& Scalable Go-To-Market}
-		\begin{itemize}
-			\item \textbf{Product Led Growth} \\
-			\begin{itemize}
-				\item Drive mass market adoption through a frictionless, self serve cloud or desktop application.
-			\end{itemize}
-			\item \textbf{Frictionless Monetization} \\
-			\begin{itemize}
-				\item Deploy value based tier pricing scaled to total ingestion volume and active indices.
-			\end{itemize}
-			\item \textbf{Mass Market Reach} \\
-			\begin{itemize}
-				\item Position the platform as a foundational, secure private alternative to public search web layers.
-			\end{itemize}
-		\end{itemize}
-	\end{frame}
-
-	% SLIDE 8: THE MOAT
-	\begin{frame}
-		\frametitle{The Citadel Moat}
-		\begin{itemize}
-			\item \textbf{Elite Evidence Isolation Engine} \\
-			\begin{itemize}
-				\item Local synthesis, filtering, and cross document aggregation occur entirely at our engine layer first.
-				\item Feeds only distilled context fragments to the LLM to completely avoid hallucinations.
-			\end{itemize}
-			\item \textbf{Intelligent Token Bottleneck Avoidance} \\
-			\begin{itemize}
-				\item Respects hard model context limits by filtering synthetic queries beforehand.
-				\item Avoids context overflow issues instead of blindly flooding the context window with raw material.
-			\end{itemize}
-			\item \textbf{Zero Structural Tabular Degradation} \\
-			\begin{itemize}
-				\item Natively retains multi dimensional relational formats to block information loss.
-				\item Prevents the unaligned text strings and broken cell configurations of alternative systems.
-			\end{itemize}
-		\end{itemize}
-	\end{frame}
 \end{document}
