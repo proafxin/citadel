@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     mineru_max_connections: int = 256  # hard cap on the shared httpx pool → bounds VLM sockets (match server max-num-seqs)
 
     qwen_host: str = "localhost"
-    qwen_port: int = 8199  # vLLM OpenAI-compatible SLM (Qwen3.5-9B); 8000=fastapi, 8099=mineru, 8199=qwen
+    qwen_port: int = 11434  # ollama OpenAI-compatible endpoint (vLLM hung on Blackwell sm_120 FlashInfer kernels)
+    qwen_model: str = "qwen3.5:9b"  # exact ollama tag (`ollama list`)
 
     redis_url: str = "redis://localhost:6379/0"
 

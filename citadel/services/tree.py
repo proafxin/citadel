@@ -1,4 +1,5 @@
 import re
+from collections.abc import Iterator
 
 from citadel.schemas.content import Block
 from citadel.schemas.tree import NodeSpec
@@ -69,14 +70,6 @@ def pattern_level(text: str) -> int:
     return 3
 
 
-def heading_font_levels(blocks: list[Block]) -> dict[float, int]:
-    heads = [block.font_size for block in blocks if detail_kind(block.type) == "heading" and block.font_size]
-    sizes = sorted({round(size * 2) / 2 for size in heads}, reverse=True)
-    if len(sizes) <= 1:
-        return {}
-    return {size: rank + 1 for rank, size in enumerate(sizes)}
-
-
 def _next_ordinal(counters: dict[int, int], page_no: int) -> int:
     ordinal = counters.get(page_no, 0) + 1
     counters[page_no] = ordinal
@@ -123,14 +116,12 @@ def _heading_nodes(
     doc_id: int,
     stack: list[tuple[int, str]],
     counters: dict[int, int],
-    font_levels: dict[float, int],
+    level_iter: Iterator[int] | None,
 ) -> list[NodeSpec]:
     page_no = block.page_idx + 1
-    pieces = split_heading(block.text or "")
-    font_level = font_levels.get(round(block.font_size * 2) / 2) if block.font_size else None
     nodes: list[NodeSpec] = []
-    for piece in pieces:
-        level = font_level if (font_level and len(pieces) == 1) else pattern_level(piece)
+    for piece in split_heading(block.text or ""):
+        level = (next(level_iter, None) if level_iter is not None else None) or pattern_level(piece)
         ordinal = _next_ordinal(counters, page_no)
         content_id = make_content_id(library_id, doc_id, page_no, ordinal)
         parent = _push(stack, level, content_id)
@@ -178,8 +169,10 @@ def _content_node(
     return spec
 
 
-def build_tree(blocks: list[Block], library_id: int, doc_id: int) -> list[NodeSpec]:
-    font_levels = heading_font_levels(blocks)
+def build_tree(
+    blocks: list[Block], library_id: int, doc_id: int, heading_levels: list[int] | None = None
+) -> list[NodeSpec]:
+    level_iter: Iterator[int] | None = iter(heading_levels) if heading_levels else None
     specs: list[NodeSpec] = []
     stack: list[tuple[int, str]] = []
     counters: dict[int, int] = {}
@@ -192,7 +185,7 @@ def build_tree(blocks: list[Block], library_id: int, doc_id: int) -> list[NodeSp
         elif detail_kind(block.type) == "list":
             idx += 1
         elif detail_kind(block.type) == "heading":
-            specs.extend(_heading_nodes(block, library_id, doc_id, stack, counters, font_levels))
+            specs.extend(_heading_nodes(block, library_id, doc_id, stack, counters, level_iter))
             idx += 1
         else:
             specs.append(_content_node(block, library_id, doc_id, stack, counters))

@@ -16,6 +16,7 @@ dependencies = [
     "huggingface-hub>=1.21.0",
     "markdownify>=1.2.2",
     "mineru-vl-utils>=1.0.5",
+    "openai>=2.44.0",
     "pillow>=12.2.0",
     "protobuf>=7.35.0",
     "pypdfium2>=5.10.1",
