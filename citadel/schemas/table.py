@@ -21,6 +21,7 @@ class ColumnRole(StrEnum):
 
 
 class Column(BaseModel):
+    name: str
     header: str | None = None
     dtype: ColumnDType = ColumnDType.STRING
     role: ColumnRole = ColumnRole.DATA
@@ -44,7 +45,7 @@ class TableMetadata(BaseModel):
 
 
 class Table(BaseModel):
-    id: str
+    content_id: str
     doc_id: int
     origin: TableOrigin
     columns: list[Column]
@@ -52,13 +53,10 @@ class Table(BaseModel):
     sample_rows: list[list[CellValue]]
     description: str
     metadata: TableMetadata = Field(default_factory=TableMetadata)
+    anchors: list[dict] | None = None
 
 
 class TableRow(BaseModel):
-    table_id: str
+    content_id: str
     row_idx: int
     values: list[CellValue]
-
-
-def make_table_id(doc_id: int, sheet_or_page: int, ordinal: int) -> str:
-    return f"{doc_id}_{sheet_or_page}_{ordinal}"

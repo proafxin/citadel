@@ -39,7 +39,6 @@ def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:
                 Table(
                     content_id=spec.content_id,
                     document_id=doc_id,
-                    origin="pdf",
                     columns=[],
                     table_metadata={"html": spec.table_html or ""},
                     description="",
