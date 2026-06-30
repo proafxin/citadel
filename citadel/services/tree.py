@@ -244,27 +244,3 @@ def build_search_text(specs: list[NodeSpec], library_name: str, filename: str) -
         parts = [library_name, filename, *headings, _leaf_text(spec)]
         result[spec.content_id] = "\n".join(part for part in parts if part)
     return result
-
-
-def _render_node(node: dict, parts: list[str]) -> None:
-    match detail_kind(node["type"]):
-        case "heading":
-            parts.append(f"{'#' * (node.get('level') or 1)} {node.get('content') or ''}".rstrip())
-        case "code":
-            parts.append(f"```\n{node.get('content') or ''}\n```")
-        case "equation":
-            parts.append(f"$$\n{node.get('content') or ''}\n$$")
-        case "list":
-            parts.append("\n".join(f"- {item.get('content', '')}" for item in node.get("list_items") or []))
-        case _:
-            if node.get("content"):
-                parts.append(node["content"])
-    for child in node.get("children", []):
-        _render_node(child, parts)
-
-
-def render_markdown(tree: dict) -> str:
-    parts: list[str] = []
-    for child in tree.get("children", []):
-        _render_node(child, parts)
-    return "\n\n".join(parts)

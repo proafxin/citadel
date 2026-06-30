@@ -12,6 +12,7 @@ from citadel.services.ingestion import (
     STREAM_MERGE,
     STREAM_NORMALIZED,
     STREAM_PAGES,
+    STREAM_TABLES,
     cleanup,
     emit_vlm_only,
     ensure_group,
@@ -24,6 +25,7 @@ from citadel.services.ingestion import (
     handle_normalize,
     handle_ocr,
     handle_paginate,
+    handle_tabular,
     make_profile_pool,
 )
 from config import configure_logging, get_settings
@@ -234,8 +236,36 @@ async def merge() -> None:
             _spawn(_merge_job(sem, msg_id.decode(), raw))
 
 
+async def _tabular_job(sem: asyncio.Semaphore, msg_id: str, raw: dict[bytes, bytes]) -> None:
+    stream = STREAM_TABLES
+    async with sem:
+        fields = {k.decode(): v.decode() for k, v in raw.items()}
+        work = asyncio.create_task(handle_tabular(fields))
+        await asyncio.wait({work})
+        if work.exception() is None:
+            await _settle(stream, msg_id)
+            return
+        logger.error("tabular failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(work.exception()))
+        await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "tabular"))
+
+
+async def tabular() -> None:
+    stream = STREAM_TABLES
+    redis = get_redis()
+    await ensure_group(stream)
+    consumer = f"{stream}-{get_settings().worker_id}"
+    limit = get_settings().slm_concurrency
+    sem = asyncio.Semaphore(limit)
+    logger.info("consuming %s concurrency=%d", stream, limit)
+    await _recover(stream, consumer, lambda mid, raw: _spawn(_tabular_job(sem, mid, raw)))
+    while True:
+        fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=limit, block=BLOCK_MS)
+        for msg_id, raw in fresh[0][1] if fresh else []:
+            _spawn(_tabular_job(sem, msg_id.decode(), raw))
+
+
 async def _main() -> None:
-    await asyncio.gather(normalize(), paginate(), ocr(), gapfill(), merge())
+    await asyncio.gather(normalize(), paginate(), ocr(), gapfill(), merge(), tabular())
 
 
 def main() -> None:

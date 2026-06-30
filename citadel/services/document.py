@@ -2,7 +2,6 @@ import json
 
 import zstandard
 from fastapi import HTTPException
-from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,7 +12,7 @@ from citadel.models.library import Library
 from citadel.models.table import Table, TableRow
 from citadel.schemas.content import Block
 from citadel.services.excel import MaterializedTable
-from citadel.services.tree import NodeSpec, build_search_text, build_tree, detail_kind, make_content_id, render_markdown
+from citadel.services.tree import NodeSpec, build_search_text, build_tree, detail_kind, make_content_id
 from citadel.storage import get_object, put_object
 
 
@@ -82,13 +81,19 @@ async def save_sheet_tables(
     doc_id: int, sheet_no: int, sheet_name: str, tables: list[tuple[int, MaterializedTable]]
 ) -> None:
     async with get_sessionmaker()() as session, session.begin():
+        existing = await session.scalar(
+            select(ContentNode.id).where(ContentNode.document_id == doc_id, ContentNode.sheet_no == sheet_no).limit(1)
+        )
+        if existing is not None:
+            return
         document = await session.get_one(Document, doc_id)
         sheet = ContentNode(
             content_id=make_content_id(document.library_id, doc_id, sheet_no, 0),
             document_id=doc_id,
             sheet_no=sheet_no,
             ordinal=0,
-            type="sheet",
+            type="level",
+            level=1,
             label=sheet_name,
         )
         session.add(sheet)
@@ -127,6 +132,13 @@ async def save_sheet_tables(
             )
 
 
+async def finalize_tabular(doc_id: int) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        document = await session.get_one(Document, doc_id)
+        document.status = "done"
+    await persist_document_tree(doc_id)
+
+
 async def _load_payloads(session: AsyncSession, ids: list[str]) -> dict[str, dict]:
     return {
         "paragraphs": {
@@ -160,6 +172,8 @@ def _node_dict(node: ContentNode, payloads: dict[str, dict]) -> dict:
         data["level"] = node.level
     if node.label is not None:
         data["label"] = node.label
+    if node.type == "level":
+        return data
     match detail_kind(node.type):
         case "heading":
             data["content"] = payloads["headings"].get(node.content_id)
@@ -171,7 +185,12 @@ def _node_dict(node: ContentNode, payloads: dict[str, dict]) -> dict:
             data["list_items"] = payloads["lists"].get(node.content_id)
         case "table":
             table = payloads["tables"].get(node.content_id)
-            data["content"] = table.table_metadata.get("html") if table is not None else None
+            if table is not None:
+                data["columns"] = table.columns
+                data["sample_rows"] = table.sample_rows
+                data["n_rows"] = table.n_rows
+                data["description"] = table.description
+                data["metadata"] = table.table_metadata
         case _:
             data["content"] = payloads["paragraphs"].get(node.content_id)
     return data
@@ -224,10 +243,3 @@ async def get_result(doc_id: int) -> dict:
     if tree is None:
         raise HTTPException(status_code=404, detail="result not ready")
     return tree
-
-
-async def get_markdown(doc_id: int) -> PlainTextResponse:
-    tree = load_document_tree(doc_id)
-    if tree is None:
-        raise HTTPException(status_code=404, detail="result not ready")
-    return PlainTextResponse(render_markdown(tree), media_type="text/markdown")

@@ -1,11 +1,11 @@
 from typing import Annotated
 
 from fastapi import APIRouter, File, UploadFile
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import Response
 
 from citadel.schemas.document import DocumentStatus, IngestResponse
 from citadel.schemas.library import LibraryCreate, LibraryRead
-from citadel.services.document import get_markdown, get_result
+from citadel.services.document import get_result
 from citadel.services.ingestion import get_status, submit_documents
 from citadel.services.library import (
     create_library,
@@ -65,8 +65,3 @@ async def get_doc_status(doc_id: int) -> DocumentStatus:
 @router.get("/result/{doc_id}")
 async def get_doc_result(doc_id: int) -> dict:
     return await get_result(doc_id)
-
-
-@router.get("/markdown/{doc_id}")
-async def get_doc_markdown(doc_id: int) -> PlainTextResponse:
-    return await get_markdown(doc_id)

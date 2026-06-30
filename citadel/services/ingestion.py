@@ -22,7 +22,14 @@ from redis.exceptions import ResponseError
 
 from citadel.schemas.content import Block
 from citadel.schemas.document import DocumentStatus, IngestResponse
-from citadel.services.document import create_document, persist_document_tree, save_document_tree
+from citadel.services.document import (
+    create_document,
+    finalize_tabular,
+    persist_document_tree,
+    save_document_tree,
+    save_sheet_tables,
+)
+from citadel.services.excel import extract_sheet_no, extract_tables, sheet_names
 from citadel.services.library import library_exists
 from citadel.utils import normalize_file
 from config import get_settings
@@ -213,6 +220,14 @@ async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0, "image": image_bytes})
         logger.info("paginate file=%s image", fields["filename"])
         return
+    if kind == "xlsx":
+        await redis.set(f"xlsx:{doc_id}", data, ex=3600)
+        names = await asyncio.to_thread(sheet_names, data)
+        await redis.hset(f"doc:{doc_id}", mapping={"page_count": len(names), "mode": "tabular"})
+        for sheet_no in range(1, len(names) + 1):
+            await redis.xadd(STREAM_TABLES, {"doc_id": doc_id, "sheet_no": sheet_no})
+        logger.info("paginate file=%s sheets=%d", fields["filename"], len(names))
+        return
     await redis.set(f"pdf:{doc_id}", data, ex=3600)
     settings = get_settings()
     dpi = settings.digital_render_dpi if kind == "office-pdf" else settings.render_dpi
@@ -258,6 +273,26 @@ async def record_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
 async def fail_page(doc_id: str, page_idx: int) -> None:
     # one page exhausting retries must not fail the whole doc: record a marker, keep going
     await record_page(doc_id, page_idx, [Block(type="error", page_idx=page_idx, text="[extraction failed]")])
+
+
+async def record_sheet(doc_id: str, sheet_no: int) -> None:
+    redis = get_redis()
+    if not await redis.hsetnx(f"sheets:{doc_id}", str(sheet_no), "1"):
+        return
+    done = await redis.hincrby(f"doc:{doc_id}", "done_count", 1)
+    expected = int(await redis.hget(f"doc:{doc_id}", "page_count") or 0)
+    if expected and done == expected:
+        await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
+
+
+async def handle_tabular(fields: dict[str, str]) -> None:
+    doc_id = fields["doc_id"]
+    sheet_no = int(fields["sheet_no"])
+    data = await get_redis().get(f"xlsx:{doc_id}")
+    sheet = await asyncio.to_thread(extract_sheet_no, data, sheet_no)
+    tables = await extract_tables(sheet)
+    await save_sheet_tables(int(doc_id), sheet_no, sheet.sheet_name, tables)
+    await record_sheet(doc_id, sheet_no)
 
 
 async def fail_document(doc_id: str, stage: str) -> None:
@@ -472,6 +507,11 @@ async def emit_vlm_only(fields: dict[str, str]) -> None:
 async def handle_merge(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
+    if (await redis.hget(f"doc:{doc_id}", "mode") or b"").decode() == "tabular":
+        await finalize_tabular(int(doc_id))
+        await redis.hset(f"doc:{doc_id}", "state", "done")
+        logger.info("merge doc_id=%s state=done tabular", doc_id)
+        return
     per_page = await redis.hgetall(f"blocks:{doc_id}")
     blocks: list[Block] = []
     for page_idx in sorted(int(k) for k in per_page):
@@ -487,7 +527,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
 
 async def cleanup(doc_id: str) -> None:
     redis = get_redis()
-    await redis.delete(f"blocks:{doc_id}", f"pdf:{doc_id}")
+    await redis.delete(f"blocks:{doc_id}", f"pdf:{doc_id}", f"xlsx:{doc_id}", f"sheets:{doc_id}")
     await redis.expire(f"doc:{doc_id}", 3600)  # keep final status briefly, then auto-evict — no accumulation
 
 
