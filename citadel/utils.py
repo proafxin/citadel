@@ -4,11 +4,9 @@ import tempfile
 from pathlib import Path
 
 import filetype
-from markdownify import markdownify
 
 OFFICE_EXTS = {"doc", "docx", "ppt", "pptx", "odt", "odp", "rtf"}
 IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"}
-HTML_EXTS = {"html", "htm"}
 SPREADSHEET_NATIVE_EXTS = {"xlsx", "xlsm"}
 SPREADSHEET_CONVERT_EXTS = {"xls", "xlsb", "ods", "fods"}
 
@@ -56,6 +54,4 @@ def normalize_file(data: bytes, filename: str, profile_dir: str) -> tuple[str, b
         return "pdf", data
     if ext in IMAGE_EXTS:
         return f"image:{ext}", data
-    if ext in HTML_EXTS:
-        return "text", markdownify(data.decode("utf-8")).encode()
     return "text", data.decode("utf-8", errors="replace").encode()

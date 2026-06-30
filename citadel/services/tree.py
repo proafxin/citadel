@@ -133,7 +133,7 @@ def _heading_nodes(
                 parent_content_id=parent,
                 ordinal=ordinal,
                 page_no=page_no,
-                type=block.type,
+                type="level",
                 kind="heading",
                 level=level,
                 bbox=block.bbox,

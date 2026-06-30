@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
-from citadel.models.content import Code, ContentNode, Equation, Heading, ListBlock, Paragraph
+from citadel.models.content import Code, ContentNode, Equation, ListBlock, Paragraph
 from citadel.models.document import Document
 from citadel.models.library import Library
 from citadel.models.table import Table, TableRow
@@ -26,8 +26,6 @@ async def create_document(library_id: int, filename: str) -> int:
 
 def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:
     match spec.kind:
-        case "heading":
-            session.add(Heading(content_id=spec.content_id, text=spec.text or ""))
         case "code":
             session.add(Code(content_id=spec.content_id, text=spec.text or ""))
         case "equation":
@@ -68,13 +66,15 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: str) -> N
                 page_no=spec.page_no,
                 type=spec.type,
                 level=spec.level,
+                label=spec.text if spec.kind == "heading" else None,
                 bbox=spec.bbox,
                 search_text=search_text.get(spec.content_id),
             )
             session.add(node)
             await session.flush()
             id_map[spec.content_id] = node.id
-            _add_detail(session, spec, doc_id)
+            if spec.kind != "heading":
+                _add_detail(session, spec, doc_id)
 
 
 async def save_sheet_tables(
@@ -145,10 +145,6 @@ async def _load_payloads(session: AsyncSession, ids: list[str]) -> dict[str, dic
             row.content_id: row.text
             for row in await session.scalars(select(Paragraph).where(Paragraph.content_id.in_(ids)))
         },
-        "headings": {
-            row.content_id: row.text
-            for row in await session.scalars(select(Heading).where(Heading.content_id.in_(ids)))
-        },
         "codes": {
             row.content_id: row.text for row in await session.scalars(select(Code).where(Code.content_id.in_(ids)))
         },
@@ -175,8 +171,6 @@ def _node_dict(node: ContentNode, payloads: dict[str, dict]) -> dict:
     if node.type == "level":
         return data
     match detail_kind(node.type):
-        case "heading":
-            data["content"] = payloads["headings"].get(node.content_id)
         case "code":
             data["content"] = payloads["codes"].get(node.content_id)
         case "equation":

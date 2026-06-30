@@ -30,13 +30,6 @@ class Paragraph(Base):
     text: Mapped[str] = mapped_column(Text)
 
 
-class Heading(Base):
-    __tablename__ = "headings"
-
-    content_id: Mapped[str] = mapped_column(ForeignKey("content.content_id"), unique=True)
-    text: Mapped[str] = mapped_column(Text)
-
-
 class Code(Base):
     __tablename__ = "codes"
 
