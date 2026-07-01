@@ -89,7 +89,9 @@ async def run_predict(dataset_dir: str, url: str, concurrency: int) -> None:
     sem = asyncio.Semaphore(concurrency)
     # no keep-alive: each poll uses a fresh connection so we never reuse one uvicorn already closed
     # (that race surfaces as RemoteProtocolError "server disconnected"); cheap at benchmark scale
-    async with httpx.AsyncClient(timeout=httpx.Timeout(None), limits=httpx.Limits(max_keepalive_connections=0)) as client:
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(None), limits=httpx.Limits(max_keepalive_connections=0)
+    ) as client:
         start = time.monotonic()
         # no return_exceptions: the first real failure propagates and crashes loudly with its stacktrace
         await asyncio.gather(*(_predict_one(client, sem, url, img) for img in todo))

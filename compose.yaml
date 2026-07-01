@@ -51,55 +51,6 @@ services:
               count: all
               capabilities: [gpu]
 
-  # Qwen3-8B (TEXT-NATIVE) via vLLM (OpenAI-compatible) for the local SLM tasks: bounded heading-level assignment
-  # (per-doc heading list only), tabular structure/anchors, evidence filtering, chat/report generation.
-  # NOTE: Qwen3.5-9B was DROPPED — it is multimodal and vLLM 0.23 won't unload its vision tower even with
-  # --language-model-only (model stayed ~10.3GB), so it couldn't co-fit with MinerU. Qwen3-8B has NO vision tower.
-  # Co-located with MinerU → gpu-mem utils sum ≤ ~0.9 (mineru 0.5 + this 0.35), leaving ~3.6GB for BGE-M3.
-  # CITADEL_QWEN_MODEL default = Qwen/Qwen3-8B-AWQ (~5.5GB). vLLM auto-detects the quant from the repo config.
-  # NO fp8 KV-cache: on Blackwell sm_120 fp8-KV forces the FlashInfer attention backend whose kernels HANG at init;
-  # dropping it lets vLLM use TRITON_ATTN (the sm_120 default). KV is fp16 → max-model-len capped at 16384 to fit.
-  qwen:
-    image: vllm/vllm-openai:latest
-    container_name: citadel-qwen
-    profiles: ["vllm"]  # DISABLED by default — vLLM hangs on Blackwell sm_120 (FlashInfer); SLM runs via host ollama.
-    restart: always
-    ipc: host
-    environment:
-      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
-    command:
-      - --model
-      - ${CITADEL_QWEN_MODEL:-Qwen/Qwen3-8B-AWQ}
-      - --served-model-name
-      - qwen
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
-      - --gpu-memory-utilization
-      - "0.35"
-      - --max-model-len
-      - "16384"
-      - --enforce-eager
-      - --uvicorn-log-level
-      - warning
-    ports:
-      - "${CITADEL_QWEN_PORT:-8199}:8000"
-    ulimits:
-      memlock: -1
-      stack: 67108864
-    volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-      # persist torch.compile / CUDA-graph cache so restarts skip recompilation (the slow part of startup)
-      - ~/.cache/vllm:/root/.cache/vllm
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
   redis:
     image: redis:7-alpine
     container_name: citadel-redis

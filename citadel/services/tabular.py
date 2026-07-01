@@ -76,7 +76,7 @@ def _grid(table: Tag) -> list[list[str]]:
             rowspan = max(int(cell.get("rowspan") or 1), 1)
             for delta_row in range(rowspan):
                 for delta_col in range(colspan):
-                    occupied[(row_idx + delta_row, col + delta_col)] = value
+                    occupied[row_idx + delta_row, col + delta_col] = value
             col += colspan
             width = max(width, col)
         height = row_idx + 1

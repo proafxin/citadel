@@ -116,7 +116,7 @@ def _capture_cells(worksheet: Worksheet) -> tuple[list[Cell], dict[tuple[int, in
     for row in worksheet.iter_rows():
         for cell in row:
             if cell.comment is not None:
-                comments[(cell.row, cell.column)] = cell.comment.text or ""
+                comments[cell.row, cell.column] = cell.comment.text or ""
             if cell.value is None:
                 continue
             bold, filled, bordered = _style_flags(cell)
@@ -367,11 +367,11 @@ def _cast(value: RawCellValue, dtype: ColumnDType) -> CellValue:
     numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
     if dtype == ColumnDType.INTEGER and numeric:
         return int(value)
-    if dtype in (ColumnDType.FLOAT, ColumnDType.DECIMAL) and numeric:
+    if dtype in {ColumnDType.FLOAT, ColumnDType.DECIMAL} and numeric:
         return float(value)
     if dtype == ColumnDType.BOOLEAN and isinstance(value, bool):
         return value
-    if dtype in (ColumnDType.DATE, ColumnDType.DATETIME) and isinstance(value, datetime):
+    if dtype in {ColumnDType.DATE, ColumnDType.DATETIME} and isinstance(value, datetime):
         return value.isoformat()
     return str(value)
 
@@ -443,4 +443,3 @@ async def extract_tables(sheet: SheetExtraction) -> list[tuple[int, Materialized
             ordinal += 1
             tables.append((ordinal, apply_structure(region, table, sheet.sheet_no)))
     return tables
-

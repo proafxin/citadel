@@ -220,7 +220,7 @@ async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0, "image": image_bytes})
         logger.info("paginate file=%s image", fields["filename"])
         return
-    if kind in ("xlsx", "csv", "tsv", "json"):
+    if kind in {"xlsx", "csv", "tsv", "json"}:
         await redis.set(f"tabular:{doc_id}", data)  # no TTL: cleaned by cleanup() on completion or terminal failure
         await redis.hset(f"doc:{doc_id}", "mode", "tabular")
         if kind == "xlsx":

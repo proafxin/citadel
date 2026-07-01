@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     qwen_port: int = 11434  # ollama OpenAI-compatible endpoint (vLLM hung on Blackwell sm_120 FlashInfer kernels)
     qwen_model: str = "qwen3:8b"  # exact ollama tag (`ollama list`)
 
+    embed_model: str = "BAAI/bge-m3"
+    embed_device: str = "cuda"
+
     redis_url: str = "redis://localhost:6379/0"
 
     postgres_host: str = "localhost"

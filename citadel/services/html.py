@@ -7,8 +7,32 @@ from citadel.schemas.content import Block
 
 _HEADINGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
 _INLINE = {
-    "span", "a", "b", "i", "em", "strong", "u", "small", "sub", "sup", "mark", "abbr", "cite", "q",
-    "time", "code", "kbd", "samp", "var", "s", "del", "ins", "tt", "font", "label", "br",
+    "span",
+    "a",
+    "b",
+    "i",
+    "em",
+    "strong",
+    "u",
+    "small",
+    "sub",
+    "sup",
+    "mark",
+    "abbr",
+    "cite",
+    "q",
+    "time",
+    "code",
+    "kbd",
+    "samp",
+    "var",
+    "s",
+    "del",
+    "ins",
+    "tt",
+    "font",
+    "label",
+    "br",
 }
 
 
@@ -27,7 +51,7 @@ def _li_text(item: Tag) -> str:
     parts: list[str] = []
     for child in item.children:
         if isinstance(child, Tag):
-            if child.name in ("ul", "ol"):
+            if child.name in {"ul", "ol"}:
                 continue
             text = child.get_text(separator=" ", strip=True)
         else:
@@ -87,7 +111,7 @@ def _walk(element: Tag, blocks: list[Block]) -> None:
             text = _text(child)
             if text:
                 blocks.append(Block(page_idx=0, type="text", text=text))
-        elif name in ("ul", "ol"):
+        elif name in {"ul", "ol"}:
             _flush(buffer, blocks)
             _walk_list(child, 0, blocks)
         elif name == "pre":
