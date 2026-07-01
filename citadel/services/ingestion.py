@@ -45,6 +45,7 @@ STREAM_PAGES = "pages"
 STREAM_MERGE = "merge"
 STREAM_TABLES = "tables"
 STREAM_GAPFILL = "gapfill"  # decoupled CPU stage: scanned pages do RapidOCR gap-fill here, off the GPU OCR slot
+STREAM_EMBED = "embed"  # post-ingestion: the dedicated embedding worker (concurrency 1) fills leaf/table vectors
 
 
 MAX_ATTEMPTS = 3
@@ -535,6 +536,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
     if (await redis.hget(f"doc:{doc_id}", "mode") or b"").decode() == "tabular":
         await finalize_tabular(int(doc_id))
         await redis.hset(f"doc:{doc_id}", "state", "done")
+        await redis.xadd(STREAM_EMBED, {"doc_id": doc_id})
         logger.info("merge doc_id=%s state=done tabular", doc_id)
         return
     per_page = await redis.hgetall(f"blocks:{doc_id}")
@@ -546,6 +548,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
     await save_document_tree(int(doc_id), blocks, state)
     await persist_document_tree(int(doc_id))
     await redis.hset(f"doc:{doc_id}", "state", state)
+    await redis.xadd(STREAM_EMBED, {"doc_id": doc_id})
     t0 = float(await redis.hget(f"doc:{doc_id}", "t0") or 0)
     logger.info("merge file=%s state=%s blocks=%d dur=%.1fs", source, state, len(blocks), time.time() - t0)
 

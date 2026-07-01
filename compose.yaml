@@ -41,8 +41,9 @@ services:
       stack: 67108864
     volumes:
       # Models are baked into the image at build time (mineru-models-download). Do NOT mount the
-      # host HF cache here — it shadows the baked-in model. Persist only the torch.compile cache.
-      - ~/.cache/vllm:/root/.cache/vllm
+      # host HF cache here — it shadows the baked-in model. Persist the torch.compile cache in a
+      # NAMED volume (docker-managed) so the root container never creates root-owned files on the host.
+      - vllm-cache:/root/.cache/vllm
     deploy:
       resources:
         reservations:
@@ -80,3 +81,4 @@ services:
 volumes:
   redis-data:
   postgres-data:
+  vllm-cache:

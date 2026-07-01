@@ -1,6 +1,6 @@
 [project]
 name = "citadel"
-version = "0.2.1"
+version = "0.2.2"
 description = "Citadel: personal search engine"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -11,7 +11,7 @@ dependencies = [
     "asyncpg>=0.31.0",
     "beautifulsoup4>=4.15.0",
     "datasets>=5.0.0",
-    "fastapi[standard]>=0.138.2",
+    "fastapi[standard]>=0.139.0",
     "filetype>=1.2.0",
     "httpx>=0.28.1",
     "huggingface-hub>=1.21.0",

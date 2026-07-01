@@ -7,7 +7,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
-from citadel.embedding import embed_texts
 from citadel.models.content import Code, ContentNode, Equation, ListBlock, Paragraph
 from citadel.models.document import Document
 from citadel.models.library import Library
@@ -58,14 +57,6 @@ async def _resolve_tables(blocks: list[Block], context: str) -> tuple[dict[int, 
     return counts, queue
 
 
-async def _embed_nodes(pending: list[tuple[ContentNode, str]]) -> None:
-    if not pending:
-        return
-    vectors = await asyncio.to_thread(embed_texts, [text for _, text in pending])
-    for (node, _), vector in zip(pending, vectors, strict=True):
-        node.embedding = vector
-
-
 async def _add_table(session: AsyncSession, content_id: str, doc_id: int, table: MaterializedTable) -> None:
     row = Table(
         content_id=content_id,
@@ -103,7 +94,6 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: str) -> N
         document = await session.get_one(Document, doc_id)
         document.status = status
         id_map: dict[str, int] = {}
-        embed_pending: list[tuple[ContentNode, str]] = []
         for spec in specs:
             parent_id = id_map[spec.parent_content_id] if spec.parent_content_id is not None else None
             table = next(tables) if spec.kind == "table" else None
@@ -136,13 +126,10 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: str) -> N
             session.add(node)
             await session.flush()
             id_map[spec.content_id] = node.id
-            if node_search:
-                embed_pending.append((node, node_search))
             if table is not None:
                 await _add_table(session, spec.content_id, doc_id, table)
             elif spec.kind != "heading":
                 _add_detail(session, spec, doc_id)
-        await _embed_nodes(embed_pending)
 
 
 async def save_sheet_tables(
@@ -167,7 +154,6 @@ async def save_sheet_tables(
         )
         session.add(sheet)
         await session.flush()
-        embed_pending: list[tuple[ContentNode, str]] = []
         for ordinal, table in tables:
             content_id = make_content_id(document.library_id, doc_id, sheet_no, ordinal)
             node_search = build_table_search_text(
@@ -191,7 +177,6 @@ async def save_sheet_tables(
             )
             session.add(node)
             await session.flush()
-            embed_pending.append((node, node_search))
             row = Table(
                 content_id=content_id,
                 document_id=doc_id,
@@ -212,7 +197,6 @@ async def save_sheet_tables(
             session.add_all(
                 TableRow(table_id=row.id, row_idx=index, values=values) for index, values in enumerate(table.rows)
             )
-        await _embed_nodes(embed_pending)
 
 
 async def finalize_tabular(doc_id: int) -> None:

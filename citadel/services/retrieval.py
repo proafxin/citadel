@@ -82,6 +82,24 @@ async def _channel(
     return _rrf(lists)
 
 
+async def embed_document(doc_id: int) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        nodes = list(
+            await session.scalars(
+                select(ContentNode).where(
+                    ContentNode.document_id == doc_id,
+                    ContentNode.search_text.isnot(None),
+                    ContentNode.embedding.is_(None),
+                )
+            )
+        )
+        if not nodes:
+            return
+        vectors = await asyncio.to_thread(embed_texts, [node.search_text or "" for node in nodes])
+        for node, vector in zip(nodes, vectors, strict=True):
+            node.embedding = vector
+
+
 async def retrieve(queries: list[str]) -> Retrieval:
     vectors = await asyncio.to_thread(embed_texts, queries)
     terms = _terms(queries)
