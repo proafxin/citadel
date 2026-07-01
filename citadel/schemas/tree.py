@@ -13,4 +13,3 @@ class NodeSpec(BaseModel):
     text: str | None = None
     latex: str | None = None
     items: list[dict] | None = None
-    table_html: str | None = None

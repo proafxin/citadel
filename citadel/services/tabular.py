@@ -7,8 +7,10 @@ import polars as pl
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
+from citadel.llm import call_slm
+from citadel.prompts import load_prompt
 from citadel.schemas.content import Block
-from citadel.schemas.table import CellValue, Column, ColumnDType
+from citadel.schemas.table import CellValue, Column, ColumnDType, ColumnRole, RegionStructure, TableStructure
 from citadel.services.excel import SAMPLE_TABLE_ROWS, MaterializedTable
 
 _DTYPE_BY_PREFIX = {
@@ -149,6 +151,83 @@ def extract_html_table(html: str) -> MaterializedTable:
         description="",
         anchors=None,
     )
+
+
+_GRID_HEAD_ROWS = 4
+_GRID_SAMPLE_ROWS = 6
+
+
+def _render_grid(grid: list[list[str]], context: str) -> str:
+    height = len(grid)
+    width = len(grid[0]) if grid else 0
+    head_end = min(_GRID_HEAD_ROWS, height)
+    lines = [
+        f"Source: {context}",
+        f"Region: {height} rows x {width} cols (0-based offsets within the region).",
+        "Top rows:",
+        *(f"  r{offset}: {' | '.join(grid[offset])}" for offset in range(head_end)),
+    ]
+    body = list(range(head_end, height))
+    if body:
+        step = max(len(body) // _GRID_SAMPLE_ROWS, 1)
+        lines.append("Sample data rows:")
+        lines.extend(f"  r{offset}: {' | '.join(grid[offset])}" for offset in body[::step][:_GRID_SAMPLE_ROWS])
+    return "\n".join(lines)
+
+
+def _grid_cell(grid: list[list[str]], row: int, col: int) -> str:
+    return grid[row][col] if 0 <= row < len(grid) and 0 <= col < len(grid[row]) else ""
+
+
+def apply_grid_structure(grid: list[list[str]], structure: TableStructure) -> MaterializedTable:
+    count = len(structure.columns)
+    relative = structure.section_label_col - structure.col_start if structure.section_label_col is not None else -1
+    section_i = relative if 0 <= relative < count else None
+    collected: list[tuple[CellValue, list[str]]] = []
+    section: CellValue = None
+    for offset in range(structure.data_start, structure.data_end + 1):
+        raw = [_grid_cell(grid, offset, structure.col_start + index) for index in range(count)]
+        if all(value == "" for value in raw):
+            continue
+        if section_i is not None and raw[section_i] and all(v == "" for i, v in enumerate(raw) if i != section_i):
+            section = raw[section_i]
+            continue
+        collected.append((section, raw))
+    dtypes = [_dtype([raw[index] for _, raw in collected]) for index in range(count)]
+    data_columns = [
+        Column(header=col.header or None, dtype=dtypes[index], role=col.role, unit=col.unit)
+        for index, col in enumerate(structure.columns)
+    ]
+    columns = (
+        [Column(header="section", role=ColumnRole.SECTION), *data_columns] if section_i is not None else data_columns
+    )
+    rows: list[list[CellValue]] = []
+    for sect, raw in collected:
+        cast = [_cast(value, dtypes[index]) for index, value in enumerate(raw)]
+        rows.append([sect, *cast] if section_i is not None else cast)
+    return MaterializedTable(
+        sheet_no=0,
+        columns=columns,
+        rows=rows,
+        sample_rows=rows[:SAMPLE_TABLE_ROWS],
+        n_rows=len(rows),
+        title=structure.title,
+        caption=structure.caption,
+        notes=structure.notes,
+        description=structure.description,
+        anchors=None,
+    )
+
+
+async def structure_html_tables(html: str, context: str) -> list[MaterializedTable]:
+    table = BeautifulSoup(html, "lxml").find("table")
+    grid = _grid(table) if isinstance(table, Tag) else []
+    if not grid:
+        return []
+    prompt = f"{load_prompt('table_structure')}\n{_render_grid(grid, context)}"
+    structure = RegionStructure.model_validate(await call_slm(prompt, RegionStructure.model_json_schema()))
+    tables = [apply_grid_structure(grid, spec) for spec in structure.tables]
+    return tables or [extract_html_table(html)]
 
 
 def _next(counters: dict[str, int], entity: str) -> int:

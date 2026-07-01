@@ -19,7 +19,7 @@ from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
 from redis.exceptions import ResponseError
 
-from citadel.llm import describe_table
+from citadel.llm import describe_table, name_columns
 from citadel.schemas.content import Block
 from citadel.schemas.document import DocumentStatus, IngestResponse
 from citadel.services.document import (
@@ -29,7 +29,7 @@ from citadel.services.document import (
     save_document_tree,
     save_sheet_tables,
 )
-from citadel.services.excel import extract_sheet_no, extract_tables, sheet_names
+from citadel.services.excel import MaterializedTable, extract_sheet_no, extract_tables, sheet_names
 from citadel.services.html import parse_html
 from citadel.services.library import library_exists
 from citadel.services.tabular import extract_json_tables, read_csv_table
@@ -289,6 +289,15 @@ async def record_sheet(doc_id: str, sheet_no: int) -> None:
         await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
 
 
+async def _name_blank_columns(table: MaterializedTable, context: str) -> None:
+    if not any(not (column.header or "").strip() for column in table.columns):
+        return
+    names = await name_columns([column.header for column in table.columns], table.sample_rows, context)
+    for column, name in zip(table.columns, names, strict=True):
+        if not (column.header or "").strip():
+            column.header = name
+
+
 async def handle_tabular(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     kind = fields["kind"]
@@ -305,7 +314,9 @@ async def handle_tabular(fields: dict[str, str]) -> None:
             tables = await asyncio.to_thread(extract_json_tables, data, filename.rsplit(".", 1)[0] or "root")
         else:
             separator = "\t" if kind == "tsv" else ","
-            tables = [(1, await asyncio.to_thread(read_csv_table, data, separator))]
+            table = await asyncio.to_thread(read_csv_table, data, separator)
+            await _name_blank_columns(table, filename)
+            tables = [(1, table)]
         for _ordinal, table in tables:
             table.description = await describe_table(table.columns, table.sample_rows, filename)
         sheet_name = filename

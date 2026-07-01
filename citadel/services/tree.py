@@ -19,6 +19,24 @@ _LIST_MARKER = re.compile(r"^\s*(?:[●○•▪◦‣·*]\s|[-–—]\s|\(?\d{1
 _BULLET_GLYPH = re.compile(r"^\s*[●○•▪◦‣·*\-–—]\s+")
 _HEADING_SPLIT = re.compile(r'(?<=["”:.?)])\s*\n\s*')
 
+_PARATEXT_TYPES = {"header", "footer", "page_number", "page_footnote", "aside_text"}
+_EMPTY_IMAGE_TYPES = {"image", "image_block"}
+
+
+def split_paratext(blocks: list[Block]) -> tuple[list[Block], dict[int, list[str]]]:
+    content: list[Block] = []
+    paratext: dict[int, list[str]] = {}
+    for block in blocks:
+        if block.type in _PARATEXT_TYPES:
+            text = (block.text or "").strip()
+            if text:
+                paratext.setdefault(block.page_idx + 1, []).append(text)
+            continue
+        if block.type in _EMPTY_IMAGE_TYPES and not (block.text or "").strip():
+            continue
+        content.append(block)
+    return content, paratext
+
 
 def detail_kind(block_type: str) -> str:
     return _KIND_BY_TYPE.get(block_type, "paragraph")
@@ -143,8 +161,6 @@ def _content_node(
     match kind:
         case "equation":
             spec.latex = _normalize_newlines(block.text)
-        case "table":
-            spec.table_html = block.text
         case "code":
             spec.text = _normalize_newlines(block.text)
         case _:
@@ -152,20 +168,47 @@ def _content_node(
     return spec
 
 
-def build_tree(blocks: list[Block], library_id: int, doc_id: int) -> list[NodeSpec]:
+def _table_nodes(
+    block: Block, library_id: int, doc_id: int, stack: list[tuple[int, str]], counters: dict[int, int], count: int
+) -> list[NodeSpec]:
+    page_no = block.page_idx + 1
+    parent = stack[-1][1] if stack else None
+    nodes: list[NodeSpec] = []
+    for _ in range(max(count, 1)):
+        ordinal = _next_ordinal(counters, page_no)
+        nodes.append(
+            NodeSpec(
+                content_id=make_content_id(library_id, doc_id, page_no, ordinal),
+                parent_content_id=parent,
+                ordinal=ordinal,
+                page_no=page_no,
+                type="table",
+                kind="table",
+                level=None,
+                bbox=block.bbox,
+            )
+        )
+    return nodes
+
+
+def build_tree(blocks: list[Block], library_id: int, doc_id: int, table_counts: dict[int, int]) -> list[NodeSpec]:
     specs: list[NodeSpec] = []
     stack: list[tuple[int, str]] = []
     counters: dict[int, int] = {}
     idx = 0
     while idx < len(blocks):
         block = blocks[idx]
+        kind = detail_kind(block.type)
         if is_list_item(block):
             spec, idx = _list_node(blocks, idx, library_id, doc_id, stack, counters)
             specs.append(spec)
-        elif detail_kind(block.type) == "list":
+        elif kind == "list":
             idx += 1
-        elif detail_kind(block.type) == "heading":
+        elif kind == "heading":
             specs.extend(_heading_nodes(block, library_id, doc_id, stack, counters))
+            idx += 1
+        elif kind == "table":
+            specs.extend(_table_nodes(block, library_id, doc_id, stack, counters, table_counts.get(idx, 1)))
             idx += 1
         else:
             specs.append(_content_node(block, library_id, doc_id, stack, counters))
@@ -201,8 +244,9 @@ def build_table_search_text(
     notes: list[str],
     headers: list[str],
     description: str,
+    paratext: list[str] | None = None,
 ) -> str:
-    fields = [sheet, title or "", caption or "", *notes, *headers, description]
+    fields = [sheet, title or "", caption or "", *notes, *headers, description, *(paratext or [])]
     parts = [
         _clean_name(library_name),
         _clean_name(filename.rsplit(".", 1)[0] if "." in filename else filename),
@@ -211,8 +255,11 @@ def build_table_search_text(
     return "\n".join(part for part in parts if part)
 
 
-def build_search_text(specs: list[NodeSpec], library_name: str, filename: str) -> dict[str, str]:
+def build_search_text(
+    specs: list[NodeSpec], library_name: str, filename: str, paratext: dict[int, list[str]] | None = None
+) -> dict[str, str]:
     by_id = {spec.content_id: spec for spec in specs}
+    by_page = paratext or {}
     result: dict[str, str] = {}
     for spec in specs:
         if spec.kind in {"heading", "table"}:
@@ -230,6 +277,7 @@ def build_search_text(specs: list[NodeSpec], library_name: str, filename: str) -
             _clean_name(filename.rsplit(".", 1)[0] if "." in filename else filename),
             *(_clean_text(text) for text in headings),
             _clean_text(_leaf_text(spec)),
+            *(_clean_text(text) for text in by_page.get(spec.page_no, [])),
         ]
         result[spec.content_id] = "\n".join(part for part in parts if part)
     return result

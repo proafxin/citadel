@@ -59,3 +59,21 @@ async def describe_table(columns: list[Column], sample_rows: list[list], context
     prompt = f"{load_prompt('table_description')}\nsource: {context}\ncolumns: {header}\nsample rows:\n{rows}"
     data = await call_slm(prompt, _DESCRIPTION_SCHEMA)
     return str(data.get("description", ""))
+
+
+_COLUMN_NAMES_SCHEMA = {
+    "type": "object",
+    "properties": {"headers": {"type": "array", "items": {"type": "string"}}},
+    "required": ["headers"],
+}
+
+
+async def name_columns(headers: list[str | None], sample_rows: list[list], context: str) -> list[str]:
+    current = " | ".join(header or f"col{index}" for index, header in enumerate(headers))
+    rows = "\n".join(" | ".join("" if value is None else str(value) for value in row) for row in sample_rows)
+    prompt = f"{load_prompt('column_names')}\nsource: {context}\ncurrent headers: {current}\nsample rows:\n{rows}"
+    data = await call_slm(prompt, _COLUMN_NAMES_SCHEMA)
+    names = data.get("headers", [])
+    if len(names) != len(headers):
+        return [header or "" for header in headers]
+    return [str(name) for name in names]
