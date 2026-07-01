@@ -1,250 +1,276 @@
-\documentclass[presentation,aspectratio=169,12pt]{beamer}
+\documentclass[aspectratio=169, 11pt]{beamer}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{booktabs}
 
-\usepackage{newcomputermodern}
-\usepackage{amsmath}
+% --- Custom Color Palette ---
+\definecolor{CitadelDark}{RGB}{6, 17, 28}
+\definecolor{CitadelBlue}{RGB}{20, 40, 65}
+\definecolor{CitadelTextLight}{RGB}{240, 244, 248}
 
-\usetheme{Madrid}
-\usecolortheme{beaver}
-\usefonttheme{professionalfonts}
-\usefonttheme{serif}
+% --- Beamer Theme Setup ---
+\setbeamercolor{background canvas}{bg=CitadelDark}
+\setbeamercolor{normal text}{fg=CitadelTextLight}
+\setbeamercolor{title}{fg=CitadelTextLight}
+\setbeamercolor{frametitle}{fg=CitadelTextLight}
+\setbeamercolor{structure}{fg=CitadelTextLight}
+\setbeamercolor{block title}{fg=CitadelTextLight, bg=CitadelBlue}
+\setbeamercolor{block body}{fg=CitadelTextLight, bg=CitadelBlue!50}
 
 \setbeamertemplate{navigation symbols}{}
-\setbeamertemplate{footline}[frame number]
+\setbeamertemplate{headline}{
+	\vspace{0.2cm}\hspace{0.5cm}\textbf{\tiny\color{CitadelTextLight}CITADEL}
+}
 
-\title{Citadel}
-\subtitle{The Deterministic Knowledge Layer for Enterprise Data}
+% --- Document Metadata ---
+\title[Citadel 2026 Pitch Deck]{Citadel: The Missing Lossless Layer for Enterprise Data}
 \author{Masum Billal}
-\date{2026}
+
 
 \begin{document}
+	\maketitle
 
-	% ---------------- TITLE ----------------
-	\frame{\titlepage}
-
-	% ---------------- SLIDE 1 ----------------
-	\begin{frame}{Enterprise Data is Not Usable at Query Time}
-		Companies already have the data:
-
-		\begin{itemize}
-			\item PDFs, Excel models, contracts, reports
-		\end{itemize}
-
-		\vspace{0.4cm}
-
-		But when leaders ask real questions:
-
-		\begin{quote}
-			What changed in revenue across all reports since 2019?
-		\end{quote}
-
-		the answer is still:
-
-		\begin{itemize}
-			\item manual reconstruction
-			\item spreadsheet rebuilding
-			\item human interpretation
-		\end{itemize}
-
-		\vspace{0.3cm}
-
-		\textbf{Enterprise knowledge exists — but it is not computable.}
+	% --- Slide 2: The Problem ---
+	\begin{frame}{Enterprise Knowledge Was Built for Humans}
+		\begin{columns}[t]
+			\begin{column}{0.5\textwidth}
+				\small Every organization possesses massive amounts of high-value knowledge locked in unstructured silos.
+				\vspace{0.4cm}
+				\begin{itemize}
+					\item Multi-format legal agreements and binding contracts
+					\item Highly complex audited corporate financial reports
+					\item Multi-tiered technical specification documentation
+					\item Global regulatory filing structures and spreadsheets
+				\end{itemize}
+			\end{column}
+			\begin{column}{0.5\textwidth}
+				\begin{block}{\footnotesize UNSTRUCTURED PIPELINE}
+					\vspace{0.2cm}
+					\raggedright
+					{\large \textbf{Enterprises don't lack data.}}\\[0.3cm]
+					{\large \color{CitadelTextLight}\textbf{The problem is that their knowledge is cannot be computed.}}
+					\vspace{0.2cm}
+				\end{block}
+			\end{column}
+		\end{columns}
+		\vfill
+		\hfill{\tiny\color{CitadelTextLight}THE GAP}
 	\end{frame}
 
-	% ---------------- SLIDE 2 ----------------
-	\begin{frame}{Why Existing AI Systems Fail}
-		Modern AI pipelines:
-
-		\begin{itemize}
-			\item OCR → text
-			\item chunking → embeddings
-			\item LLM → reasoning
-		\end{itemize}
-
-		\vspace{0.4cm}
-
-		But one thing is lost permanently:
-
-		\vspace{0.2cm}
-		\textbf{structure}
-
-		\vspace{0.3cm}
-
-		Tables become text. Layout disappears. Relationships break.
-
-		\vspace{0.3cm}
-
-		So AI is forced to guess.
-
-		\vspace{0.2cm}
-
-		\textbf{Guessing breaks financial, legal, and audit-grade workflows.}
+	% --- Slide 3: AI Bottleneck ---
+	\begin{frame}{AI Isn't the Bottleneck}
+		\small Today's enterprise AI systems begin by immediately flattening documents into searchable text strings. In doing so, documents lose the primary information that gives them semantic meaning:
+		\vspace{0.6cm}
+		\begin{columns}[t]
+			\begin{column}{0.48\textwidth}
+				\begin{block}{\small STRUCTURAL LOSS}
+					\footnotesize Hierarchy, document structure, and tables are flattened and stripped away.
+				\end{block}
+			\end{column}
+			\begin{column}{0.48\textwidth}
+				\begin{block}{\small CONTEXTUAL LOSS}
+					\footnotesize Semantic relationship trees are broken down into isolated raw text chunks.
+				\end{block}
+			\end{column}
+		\end{columns}
+		\vfill
+		\hfill{\tiny\color{CitadelTextLight}THE BOTTLENECK}
 	\end{frame}
 
-	% ---------------- SLIDE 3 ----------------
-	\begin{frame}{The Real Problem}
-		Enterprise workflows today are not search problems.
-
-		They are reconstruction problems:
-
-		\begin{itemize}
-			\item re-reading documents
-			\item rebuilding tables manually
-			\item re-validating numbers repeatedly
-		\end{itemize}
-
-		\vspace{0.4cm}
-
-		\textbf{Result:}
-		\begin{itemize}
-			\item days to answer simple questions
-			\item inconsistent outputs across teams
-			\item high operational risk
-		\end{itemize}
-
-		\vspace{0.3cm}
-
-		\textbf{The bottleneck is reconstruction, not access.}
+	% --- Slide 4: Missing Architecture Layer ---
+	\begin{frame}{The Missing Architecture Layer}
+		\begin{description}
+			\item[Databases] Structured tabular systems transformed transaction execution and relational storage integrity.
+			\item[Data Warehouses] Enterprise analytics layers transformed query processing and aggregate corporate intelligence.
+			\item[\color{CitadelTextLight}Citadel Layer] \textbf{Introducing the world's first persistent, structural layer to anchor all future enterprise AI reasoning.}
+		\end{description}
+		\vfill
+		\hfill{\tiny\color{CitadelTextLight}MISSING INFRASTRUCTURE}
 	\end{frame}
 
-	% ---------------- SLIDE 4 ----------------
-	\begin{frame}{Insight}
-		We don’t need better document understanding.
-
-		\vspace{0.4cm}
-
-		We need a new primitive:
-
-		\vspace{0.3cm}
-
-		\begin{center}
-			\Large
-			\textbf{Documents should behave like databases}
-		\end{center}
-
-		\vspace{0.3cm}
-
-		Not text. Not embeddings. Not summaries.
-
-		\vspace{0.2cm}
-
-		But structured, queryable data.
-	\end{frame}
-
-	% ---------------- SLIDE 5 ----------------
-	\begin{frame}{The Citadel Approach}
-		Citadel converts documents into structured systems of record.
-
-		\vspace{0.3cm}
-
-		We ingest:
-
+	% --- Slide 5: Core Solution ---
+	\begin{frame}{Introducing Citadel}
+		\textbf{Citadel is a stateful infrastructure layer transforming heterogeneous enterprise memory into a persistent, lossless, canonical representation.}
+		\vspace{0.6cm}
 		\begin{itemize}
-			\item PDFs
-			\item Excel files
-			\item Word documents
-			\item scans, CSV, JSON
+			\item \textbf{Hierarchy Preserved:} Header tree relationships remain native.
+			\item \textbf{Relational Integrity:} Complex tables are saved intact.
+			\item \textbf{End-to-End Lineage:} Root links connect directly to source code.
 		\end{itemize}
-
-		\vspace{0.3cm}
-
-		And compile them into:
-
-		\begin{center}
-			\textbf{a relational, queryable enterprise knowledge layer}
-		\end{center}
+		\vfill
+		\hfill{\tiny\color{CitadelTextLight}CORE SOLUTION}
 	\end{frame}
 
-	% ---------------- SLIDE 6 ----------------
-	\begin{frame}{How It Works}
-		\begin{enumerate}
-			\item Ingest any document format
-			\item Extract full structure (tables, layout, text)
-			\item Store as relational data (Postgres)
-			\item AI generates SQL queries
-			\item Database returns exact answers
-		\end{enumerate}
-
-		\vspace{0.4cm}
-
-		\begin{center}
-			\Large
-			\textbf{AI writes queries. Database computes truth.}
-		\end{center}
-	\end{frame}
-
-	% ---------------- SLIDE 7 ----------------
-	\begin{frame}{What This Unlocks}
-		Citadel enables:
-
-		\begin{itemize}
-			\item instant cross-document financial analysis
-			\item contract risk discovery at scale
-			\item audit-ready traceable answers
-			\item enterprise-wide data comparison in seconds
-		\end{itemize}
-
-		\vspace{0.4cm}
-
-		\textbf{What used to take days now takes seconds.}
-	\end{frame}
-
-	% ---------------- SLIDE 8 ----------------
-	\begin{frame}{Why Citadel Wins}
-		Most systems:
-		\begin{itemize}
-			\item improve search
-			\item improve embeddings
-			\item improve summarization
-		\end{itemize}
-
-		\vspace{0.4cm}
-
-		Citadel removes the problem entirely:
-
-		\vspace{0.2cm}
-
-		\begin{center}
-			\Large
-			\textbf{We make documents directly queryable as data}
-		\end{center}
-
-		\vspace{0.3cm}
-
-		No reconstruction. No guessing. No ambiguity.
-	\end{frame}
-
-	% ---------------- SLIDE 9 ----------------
-	\begin{frame}{Why Now}
-		Three shifts:
-
-		\begin{itemize}
-			\item AI is now strong at reasoning and query generation
-			\item enterprises are drowning in document-based data
-			\item demand for secure, on-prem systems is rising
-		\end{itemize}
-
-		\vspace{0.4cm}
-
-		\textbf{The system gap is now large enough to fund a new layer.}
-	\end{frame}
-
-	% ---------------- SLIDE 10 ----------------
-	\begin{frame}{Vision}
-		In the future:
-
-		\begin{itemize}
-			\item documents are not read
-			\item they are queried
-			\item AI operates on structured enterprise knowledge
-		\end{itemize}
-
+	% --- Slide 6: Paradigm Shift Architecture ---
+	\begin{frame}{Transform Once. Reuse Everywhere.}
+		\footnotesize Traditional search strategies re-parse and approximate documents continuously. Citadel executes structural compilation once, creating a robust framework for downstream systems.
 		\vspace{0.5cm}
+		\begin{columns}[t]
+			\begin{column}{0.23\textwidth}
+				\begin{block}{\tiny PHASE 01}
+					\centering\tiny\textbf{Raw Docs}\\ \vspace{0.1cm} Scattered PDFs, multi-tiered spreadsheets, and docs.
+				\end{block}
+			\end{column}
+			\begin{column}{0.23\textwidth}
+				\begin{block}{\tiny PHASE 02}
+					\centering\tiny\textbf{Compilation}\\ \vspace{0.1cm} Lossless parser builds explicit relationship graph.
+				\end{block}
+			\end{column}
+			\begin{column}{0.23\textwidth}
+				\begin{beamercolorbox}[wd=\textwidth, rounded=true, shadow=false]{block title}
+					\vspace{0.1cm}\centering\tiny\textbf{PERSISTENT DB}\\\textbf{Citadel Layer}\\ \tiny The structural canonical engine.\vspace{0.1cm}
+				\end{beamercolorbox}
+			\end{column}
+			\begin{column}{0.23\textwidth}
+				\begin{block}{\tiny DOWNSTREAM}
+					\centering\tiny\textbf{API Ecosystem}\\ \vspace{0.1cm} Powering Search, Auditing, Analytics \& Agents.
+				\end{block}
+			\end{column}
+		\end{columns}
+		\vfill
+		\hfill{\tiny\color{CitadelTextLight}PARADIGM SHIFT}
+	\end{frame}
 
-		\begin{center}
-			\Large
-			\textbf{Citadel makes enterprise knowledge computable.}
-		\end{center}
+	% --- Slide 7: RAG Pipeline Comparison ---
+	\begin{frame}{Precision Through Structural Quality}
+		\begin{columns}[t]
+			\begin{column}{0.48\textwidth}
+				\textbf{STANDARD RAG PIPELINE}\\[0.1cm]
+				{\color{CitadelTextLight}\tiny Probabilistic Framework}
+				\vspace{0.2cm}
+				\begin{itemize}
+					\footnotesize
+					\item Documents parsed into flat, unlinked blocks
+					\item Context approximations are prone to massive hallucinations
+					\item Tables and hierarchies are flattened completely
+				\end{itemize}
+			\end{column}
+			\begin{column}{0.48\textwidth}
+				\textbf{\color{CitadelTextLight}CITADEL CANONICAL LAYER}\\[0.1cm]
+				{\color{CitadelTextLight}\tiny Deterministic Precision}
+				\vspace{0.2cm}
+				\begin{itemize}
+					\footnotesize
+					\item Documents mapped as native structural trees
+					\item Relational integrity fully preserved at ingestion
+					\item Precise grounding guarantees exact tracing data
+				\end{itemize}
+			\end{column}
+		\end{columns}
+		\vfill
+		\hfill{\tiny\color{CitadelTextLight}RETRIEVAL ARCHITECTURE}
+	\end{frame}
 
+	% --- Slide 8: Deterministic Boundaries ---
+	\begin{frame}{Deterministic Integrity Boundaries}
+		\begin{block}{\small THE LLM PLANE (PROBABILISTIC)}
+			\footnotesize We leverage generative AI strictly for natural language synthesis, intent interpretation, and unstructured plan formation.
+			\begin{itemize}
+				\tiny
+				\item Understanding human conversational syntax
+				\item Designing dynamic operational pipelines
+				\item Synthesizing reports from verified source logs
+			\end{itemize}
+		\end{block}
+		\begin{block}{\small THE CITADEL LAYER (DETERMINISTIC)}
+			\footnotesize Factual calculations, structural checks, and database queries are evaluated over a secure, hardened runtime.
+			\begin{itemize}
+				\tiny
+				\item Executing programmatic, transactional logic
+				\item Ensuring exact numerical integrity
+				\item Guaranteeing 100\% trace evidence provenance
+			\end{itemize}
+		\end{block}
+		\vfill
+		\hfill{\tiny\color{CitadelTextLight}DETERMINISTIC BOUNDARIES}
+	\end{frame}
+
+	% --- Slide 9: Competitive Moat ---
+	\begin{frame}{The Architectural Moat}
+		\centering
+		\tiny
+		\begin{tabular}{lll}
+			\toprule
+			\textbf{ARCHITECTURAL DIMENSION} & \textbf{STANDARD RAG INGESTION STACK} & \textbf{CITADEL CANONICAL INFRASTRUCTURE} \\
+			\midrule
+			Primary Core Representation & Vector embeddings & Canonical relational structural trees \\
+			\addlinespace
+			Ingestion Computation & Repetitive empirical dynamic re-parsing & Transform once, query indefinitely \\
+			\addlinespace
+			Information Integrity & Irreversible context fragmentation & Lossless structural invariants \\
+			\addlinespace
+			Source Provenance & Heuristic similarity matching heuristics & End-to-end trace auditing native \\
+			\bottomrule
+		\end{tabular}
+		\vfill
+		\hfill{\tiny\color{CitadelTextLight}COMPETITIVE MOAT}
+	\end{frame}
+
+	% --- Slide 10: Capabilities Extended ---
+	\begin{frame}{One Foundation. Unlimited Capabilities.}
+		\begin{columns}[t]
+			\begin{column}{0.3\textwidth}
+				\textbf{\footnotesize Enterprise Search}\\[0.1cm]
+				\tiny Instant, high-fidelity context queries with deterministic structural grounding.
+			\end{column}
+			\begin{column}{0.3\textwidth}
+				\textbf{\footnotesize Live Analytics}\\[0.1cm]
+				\tiny Run complex SQL computations directly over unstructured business logs natively.
+			\end{column}
+			\begin{column}{0.3\textwidth}
+				\textbf{\footnotesize Audit Compliance}\\[0.1cm]
+				\tiny Complete traceability maps displaying the specific origins for every AI decision.
+			\end{column}
+		\end{columns}
+		\vfill
+		\hfill{\tiny\color{CitadelTextLight}CAPABILITIES EXTENDED}
+	\end{frame}
+
+	% --- Slide 11: Why Now ---
+	\begin{frame}{Systemic Industrial Macro Shifts}
+		\begin{columns}[t]
+			\begin{column}{0.3\textwidth}
+				\textbf{\tiny SHIFT 01}\\[0.1cm]
+				\textbf{\footnotesize Advanced Reasoners}\\[0.1cm]
+				\tiny LLMs have shifted from mere text-predictors to capable agents able to manipulate structural maps.
+			\end{column}
+			\begin{column}{0.3\textwidth}
+				\textbf{\tiny SHIFT 02}\\[0.1cm]
+				\textbf{\footnotesize Zero-Trust Era}\\[0.1cm]
+				\tiny Enterprise buyers are shutting down unstable prompt wrappers, demanding strict auditable correctness.
+			\end{column}
+			\begin{column}{0.3\textwidth}
+				\textbf{\tiny SHIFT 03}\\[0.1cm]
+				\textbf{\footnotesize Data Scale-Out}\\[0.1cm]
+				\tiny The explosion of raw documents demands computational storage that bypasses human manual translation.
+			\end{column}
+		\end{columns}
+		\vfill
+		\hfill{\tiny\color{CitadelTextLight}WHY NOW}
+	\end{frame}
+
+	% --- Slide 12: Mission Statement ---
+	\begin{frame}{The Mission}
+		\centering
+		\vspace{1cm}
+		\begin{quote}
+			\large ``Citadel transforms unstructured data into a persistent, lossless, queryable structured data.''
+		\end{quote}
+		\vspace{0.5cm}
+		\small Enabling future applications, complex analytics, and autonomous systems to compute with absolute certainty, complete lineage, and architectural trust.
+		\vfill
+		\hfill{\tiny\color{CitadelTextLight}THE MISSION}
+	\end{frame}
+
+	% --- Slide 13: Join Us ---
+	\begin{frame}[plain]
+		\centering
+		\vspace{1.5cm}
+		{\usebeamercolor[fg]{structure}\textbf{\Large CITADEL}}\\[0.5cm]
+		{\LARGE \textbf{Build the Next Essential Layer}}\\[0.2cm]
+		{\color{CitadelTextLight}\small The Canonical Foundation for Enterprise Knowledge AI}\\[1cm]
+		{\large \textbf{Masum Billal}}\\[0.1cm]
+		{\footnotesize billalmasum93@gmail.com}\\[1.5cm]
 	\end{frame}
 
 \end{document}
