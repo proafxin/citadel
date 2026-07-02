@@ -13,7 +13,7 @@ that line.
 
 ---
 
-# Part I — Ingestion
+## Part I — Ingestion
 
 ## Goal
 
@@ -188,7 +188,7 @@ stored, its search text is embedded and indexed, so it becomes answerable.
 
 ---
 
-# Part II — Query
+## Part II — Query
 
 Built. Runs over the persisted tree and tables: the model decides what to ask, the database computes the
 numbers. The hard part here is not finding candidates — it is deciding, reliably and at scale, which of a
@@ -197,7 +197,7 @@ ever letting the model invent a figure or miscount what fits.
 
 ## Query pipeline
 
-```
+```bash
 question → reformulate → retrieve ─────────→ filter ──→ compute ──→ unify ──→ fit ──→ synthesize → cited answer
              (model)      text ‖ tables        (model)   (model +    (model)  (exact)          (model)
                           dense + lexical                 database)   essential /
