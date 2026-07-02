@@ -22,5 +22,7 @@ def get_embedder() -> SentenceTransformer:
 def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
-    vectors = get_embedder().encode(texts, batch_size=EMBED_BATCH, normalize_embeddings=True)
+    vectors = get_embedder().encode(
+        texts, batch_size=EMBED_BATCH, normalize_embeddings=True, show_progress_bar=False
+    )
     return [vector.tolist() for vector in vectors]

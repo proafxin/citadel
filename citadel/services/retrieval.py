@@ -1,7 +1,9 @@
 import asyncio
 import functools
+import json
 import operator
 from dataclasses import dataclass
+from uuid import uuid4
 
 from sqlalchemy import ColumnElement, case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,11 +11,36 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from citadel.db import get_sessionmaker
 from citadel.embedding import embed_texts
 from citadel.models.content import ContentNode
+from citadel.models.document import Document
+from citadel.models.table import Table
+from citadel.services.ingestion import STREAM_EMBED, get_redis
 
 RRF_K = 60
 CANDIDATES = 50
 TEXT_TOP = 30
 TABLE_TOP = 30
+EMBED_TIMEOUT = 60
+
+
+async def embed_query(texts: list[str]) -> list[list[float]]:
+    redis = get_redis()
+    reply = uuid4().hex
+    await redis.xadd(STREAM_EMBED, {"texts": json.dumps(texts), "reply": reply})
+    result = await redis.blpop(f"embed:reply:{reply}", timeout=EMBED_TIMEOUT)
+    if result is None:
+        raise TimeoutError("query embedding timed out")
+    return json.loads(result[1])
+
+
+@dataclass
+class TableCand:
+    content_id: str
+    table_id: int
+    filename: str
+    n_rows: int
+    columns: list[dict]
+    description: str
+    metadata: dict
 
 TEXT_CHANNEL = ContentNode.type != "table"
 TABLE_CHANNEL = ContentNode.type == "table"
@@ -101,9 +128,55 @@ async def embed_document(doc_id: int) -> None:
 
 
 async def retrieve(queries: list[str]) -> Retrieval:
-    vectors = await asyncio.to_thread(embed_texts, queries)
+    vectors = await embed_query(queries)
     terms = _terms(queries)
     async with get_sessionmaker()() as session:
         text = await _channel(session, TEXT_CHANNEL, vectors, terms)
         tables = await _channel(session, TABLE_CHANNEL, vectors, terms)
     return Retrieval(text=text[:TEXT_TOP], tables=tables[:TABLE_TOP])
+
+
+async def load_passages(content_ids: list[str]) -> list[str]:
+    if not content_ids:
+        return []
+    async with get_sessionmaker()() as session:
+        rows = list(
+            await session.execute(
+                select(ContentNode.content_id, Document.filename, ContentNode.page_no, ContentNode.search_text)
+                .join(Document, ContentNode.document_id == Document.id)
+                .where(ContentNode.content_id.in_(content_ids))
+            )
+        )
+    lookup = {row.content_id: row for row in rows}
+    passages: list[str] = []
+    for content_id in content_ids:
+        row = lookup.get(content_id)
+        if row is not None and row.search_text:
+            page = f" p{row.page_no}" if row.page_no else ""
+            passages.append(f"[{row.filename}{page}] {row.search_text}")
+    return passages
+
+
+async def load_tables(content_ids: list[str]) -> list[TableCand]:
+    if not content_ids:
+        return []
+    async with get_sessionmaker()() as session:
+        rows = list(
+            await session.execute(
+                select(Table, Document.filename)
+                .join(Document, Table.document_id == Document.id)
+                .where(Table.content_id.in_(content_ids))
+            )
+        )
+    lookup = {table.content_id: (table, filename) for table, filename in rows}
+    out: list[TableCand] = []
+    for content_id in content_ids:
+        found = lookup.get(content_id)
+        if found is not None:
+            table, filename = found
+            out.append(
+                TableCand(
+                    content_id, table.id, filename, table.n_rows, table.columns, table.description, table.table_metadata
+                )
+            )
+    return out

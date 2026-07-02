@@ -46,6 +46,7 @@ def _cell(value: object) -> CellValue:
 
 def read_csv_table(data: bytes, separator: str) -> MaterializedTable:
     frame = pl.read_csv(BytesIO(data), separator=separator, infer_schema_length=10000, truncate_ragged_lines=True)
+    frame = frame.filter(~pl.all_horizontal(pl.all().is_null()))
     columns = [Column(header=name, dtype=_map_dtype(dtype)) for name, dtype in frame.schema.items()]
     rows = [[_cell(value) for value in row] for row in frame.iter_rows()]
     return MaterializedTable(

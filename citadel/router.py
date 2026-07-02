@@ -1,10 +1,11 @@
 from typing import Annotated
 
 from fastapi import APIRouter, File, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from citadel.schemas.document import DocumentStatus, IngestResponse
 from citadel.schemas.library import LibraryCreate, LibraryRead
+from citadel.schemas.query import QueryRequest
 from citadel.services.document import get_result
 from citadel.services.ingestion import get_status, submit_documents
 from citadel.services.library import (
@@ -15,6 +16,7 @@ from citadel.services.library import (
     list_libraries,
     update_library,
 )
+from citadel.services.query import answer
 
 router = APIRouter()
 
@@ -65,3 +67,8 @@ async def get_doc_status(doc_id: int) -> DocumentStatus:
 @router.get("/result/{doc_id}")
 async def get_doc_result(doc_id: int) -> dict:
     return await get_result(doc_id)
+
+
+@router.post("/query")
+async def post_query(body: QueryRequest) -> StreamingResponse:
+    return StreamingResponse(answer(body.question), media_type="text/markdown")
