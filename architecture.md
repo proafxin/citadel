@@ -2,8 +2,14 @@
 
 How Citadel turns an uploaded file of *any* format into a **queryable relational knowledge layer** — a
 lossless content tree plus canonical tables in a relational database — and then answers a question over it
-by having the model **write SQL the database executes**, so figures are computed, never guessed. Part I
-(ingestion) is built; Part II (query) is designed.
+by having the model **write SQL the database executes**, so figures are computed, never guessed. Both
+halves — ingestion and query — are built.
+
+The single idea the whole system is organized around: a document should become **data, not searchable
+text**. Once it is data, the model is only ever asked to do things a language model is good at — read
+layout, judge relevance, write a query — and never the things it is bad at: parsing a messy grid,
+aggregating thousands of rows, or inventing a number. Every design decision below follows from holding
+that line.
 
 ---
 
@@ -64,6 +70,9 @@ Bytes flow through the bus in memory; nothing but the final result is written to
 
 ### Reading pages (ocr)
 
+A page is read differently depending on whether its characters already exist, because re-recognizing text
+that is already present only introduces errors:
+
 - **Digital page** (real text layer) — the vision model produces the layout and reads only the non-text
   regions; text and headings are taken from the page's own text layer at each block's box, so they are
   the document's own characters, not re-recognized. Blank and fill-in fields are then re-read from a close
@@ -87,6 +96,9 @@ Leaf kinds: paragraph, code, equation (LaTeX), list (one leaf, items with nestin
 
 ### Lossless capture
 
+The tree is not a summary of the document; it is the document, restructured. Nothing is dropped to make it
+searchable:
+
 | Concern | Handling |
 |---|---|
 | Math | LaTeX everywhere |
@@ -108,7 +120,9 @@ are **stored as relational rows and queried by SQL — never embedded.**
 The rule that makes it trustworthy: **the model emits structure and descriptions, never data.** It sees
 only anchors — the table's size, its top rows, and a few sampled rows — and returns the shape; every cell
 is copied verbatim from the source and column types are inferred from the values. This is the same
-boundary the query side relies on: the model writes the query, the database computes the values.
+boundary the query side relies on: the model writes the query, the database computes the values. It exists
+because the failure mode of every "AI reads your spreadsheet" system is the model quietly misreading or
+re-adding a number — so the model is never in a position to touch a value.
 
 Tables are separated **by schema**: a run of rows with consistent columns is one table; a schema change
 starts a new one, so a single source table yields **one or more** canonical tables — a stacked invoice
@@ -119,8 +133,8 @@ By source:
 
 - **Spreadsheets** — every cell, merge, table object and frozen pane is captured; contiguous regions are
   found and their structure resolved from anchors.
-- **CSV/TSV** — types inferred deterministically; blank headers named from the column's own values. No
-  model for structure.
+- **CSV/TSV** — types inferred deterministically; blank headers named from the column's position. No model
+  for structure.
 - **JSON** — shredded deterministically into normalized, joinable tables: nested objects flattened by
   dotted key, lists of objects into child tables keyed back to their parent.
 - **Embedded HTML/PDF tables** — the grid is built deterministically (spans expanded), then the same
@@ -130,7 +144,9 @@ By source:
   headers dropped, page furniture skipped — so a forty-page table is structured as one.
 
 Every table gets a description written for retrieval — its subject, what a row represents, and the
-entities and vocabulary a user would search for.
+entities and vocabulary a user would search for. This description is what makes a table *findable*: a grid
+of numbers and terse headers has almost no natural-language surface to match a question against, so without
+a written description a search for the table's subject would miss it.
 
 ## Search representation
 
@@ -140,16 +156,18 @@ Unicode, rejoins hyphen-split words, collapses whitespace, and turns machine nam
 search text is richer: library, file, sheet, title, caption, notes, its column headers, and its
 description. Rows stay off the text path.
 
-Search text is indexed two ways (**designed**): dense multilingual vectors for meaning, and a lexical
-(BM25) index for exact names, identifiers and codes. A table is *found* through its search text and
-*answered* by SQL over its rows.
+Search text is indexed two ways: dense multilingual vectors for meaning, and exact lexical matching
+(substring and trigram) for the names, identifiers and codes a meaning vector blurs together. A table is
+*found* through its search text and *answered* by SQL over its rows.
 
 ## Storage
 
 - A **streaming bus** holds the pipeline's in-flight state (bytes, page images, per-page blocks) —
   ephemeral, cleared after merge.
 - A **relational database** holds the durable content tree, the tables and their rows, and the search
-  indexes — this is what queries run against.
+  indexes — this is what queries run against. The rows of every table are stored together and projected
+  into typed columns on demand, rather than materialized as one physical table each: a real corpus has far
+  too many tables for a physical table apiece.
 - An **object store** holds the assembled per-document tree for download.
 
 ## Reliability
@@ -165,71 +183,118 @@ Search text is indexed two ways (**designed**): dense multilingual vectors for m
 
 The result of ingestion is the materialized tree — sections and leaves with their content, and full
 canonical table representations. Progress is a state per document:
-`queued → normalizing → paginating → reading → done / partial / failed`.
+`queued → normalizing → paginating → reading → done / partial / failed`. Once a document's content is
+stored, its search text is embedded and indexed, so it becomes answerable.
 
 ---
 
 # Part II — Query
 
-**Designed, not yet built.** Runs over the persisted tree and tables: the model decides what to ask, the
-database computes the numbers.
+Built. Runs over the persisted tree and tables: the model decides what to ask, the database computes the
+numbers. The hard part here is not finding candidates — it is deciding, reliably and at scale, which of a
+large body of evidence actually bears on the question, and fitting exactly that into one answer without
+ever letting the model invent a figure or miscount what fits.
 
 ## Query pipeline
 
 ```
-question → understand → retrieve ───────────→ filter → resolve ───────────────→ synthesize → cited report / chat
-            (model)      text ‖ tables         (model)  model writes SQL,         (model)
-                         dense + lexical → fused        database executes it
+question → reformulate → retrieve ─────────→ filter ──→ compute ──→ unify ──→ fit ──→ synthesize → cited answer
+             (model)      text ‖ tables        (model)   (model +    (model)  (exact)          (model)
+                          dense + lexical                 database)   essential /
+                          → fused wide net                            supporting
 ```
 
 | Stage | Work |
 |---|---|
-| understand | reformulate for recall, translate to the corpus language, split into textual vs tabular parts |
-| retrieve | search text and tables as separate channels, each dense + lexical, and fuse the rankings |
-| filter | keep the candidate tables (columns + description, no rows) that can answer |
-| resolve | the model writes one read-only query per table; the database executes it and returns exact values |
-| synthesize | compose one cited answer from the text passages and the query results |
+| reformulate | rewrite the question for recall; translate into the corpus language |
+| retrieve | search text and tables as separate channels, each dense + lexical, fuse each channel into one **wide net** |
+| filter | keep only the evidence that bears on the question — the model judges, over the net, in batches, stopping when the ranking goes dry |
+| compute | the model writes one read-only query per kept table; the database executes it and returns exact values |
+| unify | across both kinds of evidence, mark each item essential or supporting; drop the rest |
+| fit | pack the kept evidence into the answer's budget: essential before supporting, large tables shrunk not dropped |
+| synthesize | compose one cited answer from the passages and the computed results |
 
-### Understand
+### Retrieve — a wide net, not a short list
 
-One model call → the question plus one or two reformulations for recall, an optional translation into the
-corpus language, and a split into the parts answered by text and the parts answered by tables.
+Two channels — text and tables — each searched by meaning (dense) and by exact match (lexical) for every
+reformulation, then fused by reciprocal-rank fusion (rank-based, so text and tables need no comparable
+scores). Rows are never searched; a table is found through its description and columns and answered by SQL.
 
-### Retrieve
+Each channel returns a **wide net, not a fixed top-K**. The reason is that a fused rank is an *ordering*,
+not a relevance judgment: it can say one candidate matched more strongly than another, but not whether the
+top one actually answers the question. A short top-K would stake the answer on that ordering. Instead the
+net is deliberately broad and the relevance decision is handed to a model that reads the candidates. The
+ordering is not thrown away — it is used only to decide how deep to look.
 
-Two channels, each fused by reciprocal-rank fusion (rank-based, so text and tables need no comparable
-scores):
+### Filter — the model judges relevance; the rank only bounds the search
 
-- **Text** — each reformulation searched by meaning and lexically over leaf search text → fused → top
-  leaves.
-- **Tables** — each reformulation searched over table search text (description + columns + title/caption/
-  notes) → fused → top candidate tables. Rows are never searched.
+The model reads the candidates and keeps the ones that bear on the question: for a passage, its text; for
+a table, its columns and sample rows — **not** its description, which the model itself wrote, so it would
+be grading its own summary. It is allowed to keep nothing.
 
-### Filter
+This stage is where three otherwise-tempting shortcuts are deliberately refused:
 
-The candidate tables' columns and descriptions, without any rows, go to the model, which keeps the ones
-that can answer. This replaces a reranker, which can score how well a passage matches a query but not a
-value a query has not yet produced. Skipped when retrieval already yields one or two clear tables.
+- **No score threshold.** A cutoff on the retrieval score would throw away relevant evidence that happened
+  to score low — and low-scoring evidence is often still relevant. Relevance is the model's call, not a
+  number's.
+- **No reranker.** A cross-encoder can score how well a passage matches a question, but it cannot score a
+  value a query has not produced yet — and once the model reads the whole net, a reranker adds nothing it
+  isn't already doing.
+- **No arbitrary cap on how much to read.** The net is judged in batches, best-first, and the search stops
+  after the ranking goes dry for a few batches in a row. Relevant evidence clusters near the top of the
+  ranking, so once it stops appearing, the tail is almost always empty. This is how a net of hundreds or
+  thousands is filtered while the model reads only the part that carries signal — the ranking is trusted
+  to *bound the search*, never to *make the selection*.
 
-### Resolve
+### Compute — the model writes the query, the database runs it
 
 For each kept table the model writes **one read-only query** against that table's columns, referring to
-columns by position from a map of index to header, type, role and unit, and kept simple so it can't be
-expensive. It runs against the table's rows through a typed projection that turns stored cells into typed,
-named columns, inside a **read-only sandbox**: only SELECT, no other tables, a time limit and a row cap.
-The model writes the query; the database computes the values.
+columns by position from a map of index to header, type, role and unit. The query runs through a typed
+projection that turns the stored cells into typed, named columns, inside a **read-only sandbox**: SELECT
+only, no other tables, a time limit. The model writes the logic; the database computes every value — the
+same integrity boundary as ingestion, so no figure is ever aggregated or invented by the model.
+
+Queries are run *before* the final selection, on purpose: the next stage then judges tables by their
+actual computed results and true sizes, not by a guess at what they might contain.
+
+### Unify — essential vs supporting
+
+The passages that survived and the computed results go back to the model together. It makes the final
+cross-modal selection — dropping anything that, read against the computed answer, turns out not to be
+needed — and marks each remaining item **essential** (the answer is wrong or incomplete without it) or
+**supporting** (it corroborates or adds context, but the answer stands without it). This priority is the
+input to fitting.
+
+### Fit — keep what matters, never miscount
+
+The kept evidence is packed into the answer's budget, and this is done **deterministically, by the system,
+not the model** — because a model cannot reliably count tokens, so the hard size limit can never be its
+job. The rules:
+
+- **Essential before supporting.** Priority, not size, decides what survives contention; a large
+  supporting item can never displace an essential one.
+- **A large table is shrunk, not dropped.** A table result too big to fit keeps a fair share of its rows
+  — distributed round-robin across the kept tables so no one table starves the others — and is marked as
+  showing part of a larger result. Because a table is divisible, "essential but large" resolves to
+  "essential, represented by its top rows," never to "gone."
+- **Passages are atomic, kept by rank.** They can't be trimmed without mangling prose, so they're included
+  whole in priority order until the budget is spent.
+
+The division of labor is the point: the model decides *what matters*, the system decides *what fits*.
 
 ### Synthesize
 
-One model call merges the retrieved text passages, each with its document and page, and the query results,
-each with its table and the query that produced it, into a single cited report or chat reply. Query
-results are the authority for figures; text supplies context; there is no single numeric ranking across
-modalities — the model is where the two reconcile. For a search interface that wants a ranked list of hits
-instead of prose, the channel rankings are fused the same rank-based way.
+One model call merges the passages, each carrying its document and page, and the computed results, each
+carrying its table, into a single cited answer. Computed results are the authority for figures and totals;
+passages supply narrative and context; there is no single numeric ranking across the two — the model is
+where they reconcile. If the evidence does not answer the question, it says so plainly. For a search
+interface that wants a ranked list of hits instead of prose, the channel rankings are fused the same
+rank-based way.
 
 ## Models
 
 One general model, run without a separate reasoning pass, performs every model step across ingestion and
-query — table structuring and description, column naming, reformulation, filtering, query writing, and
-synthesis. A vision model reads documents that exist only as pixels. A multilingual dense representation
-carries meaning for search.
+query — table structuring and description, column naming, reformulation, filtering, query writing,
+priority, and synthesis. A vision model reads documents that exist only as pixels. A multilingual dense
+representation carries meaning for search. Nothing in the pipeline asks a model to hold data in its head:
+it reads, judges, and writes queries; the database keeps the numbers.
