@@ -9,7 +9,7 @@ from fastapi import FastAPI
 
 from citadel.router import router
 from citadel.services.retrieval import embed_all_pending, embed_library
-from config import configure_logging, get_embedder, get_settings
+from config import configure_logging, get_embedder, get_reranker, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ async def _catchup() -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     await asyncio.to_thread(get_embedder)
+    await asyncio.to_thread(get_reranker)
     queue: asyncio.Queue[int] = asyncio.Queue()
     conn = await asyncpg.connect(get_settings().pg_dsn)
     await conn.add_listener("embed", lambda _conn, _pid, _channel, payload: queue.put_nowait(int(payload)))

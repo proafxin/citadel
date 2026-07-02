@@ -5,11 +5,16 @@ from pathlib import Path
 
 from loguru import logger as loguru_logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import CrossEncoder, SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
 CPU_THIRD = max((os.cpu_count() or 3) // 3, 1)  # per-worker CPU stages: a third of the cores, at least 1
+
+QWEN_MODEL = "qwen3.5:4b"
+EMBED_MODEL = "BAAI/bge-m3"
+RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
+EMBED_DEVICE = "cuda"
 
 
 def configure_logging() -> None:
@@ -26,10 +31,6 @@ class Settings(BaseSettings):
 
     qwen_host: str = "localhost"
     qwen_port: int = 11434  # ollama OpenAI-compatible endpoint (vLLM hung on Blackwell sm_120 FlashInfer kernels)
-    qwen_model: str = "qwen3.5:4b"  # exact ollama tag (`ollama list`)
-
-    embed_model: str = "BAAI/bge-m3"
-    embed_device: str = "cuda"
 
     redis_url: str = "redis://localhost:6379/0"
 
@@ -73,8 +74,15 @@ def get_settings() -> Settings:
 
 @lru_cache
 def get_embedder() -> SentenceTransformer:
-    settings = get_settings()
-    logger.info("loading embedder model=%s device=%s", settings.embed_model, settings.embed_device)
-    model = SentenceTransformer(settings.embed_model, device=settings.embed_device)
-    logger.info("embedder loaded model=%s", settings.embed_model)
+    logger.info("loading embedder model=%s device=%s", EMBED_MODEL, EMBED_DEVICE)
+    model = SentenceTransformer(EMBED_MODEL, device=EMBED_DEVICE)
+    logger.info("embedder loaded model=%s", EMBED_MODEL)
+    return model
+
+
+@lru_cache
+def get_reranker() -> CrossEncoder:
+    logger.info("loading reranker model=%s device=%s", RERANKER_MODEL, EMBED_DEVICE)
+    model = CrossEncoder(RERANKER_MODEL, device=EMBED_DEVICE)
+    logger.info("reranker loaded model=%s", RERANKER_MODEL)
     return model

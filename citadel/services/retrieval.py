@@ -11,7 +11,7 @@ from citadel.db import get_sessionmaker
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
 from citadel.models.table import Table
-from config import get_embedder
+from config import get_embedder, get_reranker
 
 RRF_K = 60
 CANDIDATES = 50
@@ -43,6 +43,18 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 async def _embed(texts: list[str]) -> list[list[float]]:
     async with _EMBED_LOCK:
         return await asyncio.to_thread(embed_texts, texts)
+
+
+def rerank_scores(query: str, texts: list[str]) -> list[float]:
+    if not texts:
+        return []
+    scores = get_reranker().predict([(query, text) for text in texts])
+    return [float(score) for score in scores]
+
+
+async def rerank(query: str, texts: list[str]) -> list[float]:
+    async with _EMBED_LOCK:
+        return await asyncio.to_thread(rerank_scores, query, texts)
 
 
 @dataclass
