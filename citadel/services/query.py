@@ -33,6 +33,7 @@ CTX_TOKENS = 32768
 OUT_TOKENS = SLM_MAX_TOKENS
 BUDGET = CTX_TOKENS - OUT_TOKENS - 2048
 EARLY_STOP_N = 3
+UNIFY_MAX_ITEMS = 64
 SCHEMA_SAMPLES = 3
 _PG = postgresql.dialect()
 _DTYPE_SA: dict[str, type[TypeEngine[Any]]] = {
@@ -233,7 +234,13 @@ async def _unify(
     question: str, passages: list[str], results: list[SqlResult]
 ) -> tuple[list[tuple[str, int]], list[tuple[SqlResult, int]]]:
     items = passages + [_result_summary(result) for result in results]
-    tiers = await unify_evidence(question, items)
+    tiers: list[tuple[int, int]] = []
+    start = 0
+    while start < len(items):
+        size = min(max(1, _fit(items[start:], BUDGET)), UNIFY_MAX_ITEMS)
+        batch = await unify_evidence(question, items[start : start + size])
+        tiers.extend((start + index, tier) for index, tier in batch)
+        start += size
     passages_t = [(passages[index], tier) for index, tier in tiers if index < len(passages)]
     results_t = [(results[index - len(passages)], tier) for index, tier in tiers if index >= len(passages)]
     return passages_t, results_t
