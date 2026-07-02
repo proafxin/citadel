@@ -3,7 +3,7 @@ import json
 
 import zstandard
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
@@ -23,7 +23,7 @@ from citadel.services.tree import (
     make_content_id,
     split_paratext,
 )
-from citadel.storage import get_object, put_object
+from citadel.storage import delete_object, get_object, put_object
 
 
 async def create_document(library_id: int, filename: str) -> int:
@@ -32,6 +32,11 @@ async def create_document(library_id: int, filename: str) -> int:
         session.add(document)
         await session.flush()
         return document.id
+
+
+async def notify_embed(library_id: int) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        await session.execute(text("SELECT pg_notify('embed', :library)"), {"library": str(library_id)})
 
 
 def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:
@@ -295,6 +300,10 @@ async def persist_document_tree(doc_id: int) -> None:
         tree = await build_document_tree(session, document)
     payload = await asyncio.to_thread(compress_tree, tree)
     await asyncio.to_thread(put_object, _tree_key(doc_id), payload)
+
+
+def delete_document_tree(doc_id: int) -> None:
+    delete_object(_tree_key(doc_id))
 
 
 def load_document_tree(doc_id: int) -> dict | None:

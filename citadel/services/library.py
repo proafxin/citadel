@@ -7,7 +7,7 @@ from citadel.db import get_sessionmaker
 from citadel.models.document import Document
 from citadel.models.library import Library
 from citadel.schemas.library import LibraryRead
-from citadel.services.document import compress_tree, load_document_tree
+from citadel.services.document import compress_tree, delete_document_tree, load_document_tree
 
 
 async def create_library(name: str) -> LibraryRead:
@@ -46,7 +46,10 @@ async def delete_library(library_id: int) -> None:
         library = await session.get(Library, library_id)
         if library is None:
             raise HTTPException(status_code=404, detail="unknown library")
+        doc_ids = list(await session.scalars(select(Document.id).where(Document.library_id == library_id)))
         await session.delete(library)
+    for doc_id in doc_ids:
+        await asyncio.to_thread(delete_document_tree, doc_id)
 
 
 async def library_exists(library_id: int) -> bool:

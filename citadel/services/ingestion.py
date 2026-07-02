@@ -25,6 +25,7 @@ from citadel.schemas.document import DocumentStatus, IngestResponse
 from citadel.services.document import (
     create_document,
     finalize_tabular,
+    notify_embed,
     persist_document_tree,
     save_document_tree,
     save_sheet_tables,
@@ -109,7 +110,7 @@ async def submit_document(data: bytes, filename: str, library_id: int) -> int:
     redis = get_redis()
     await redis.hset(
         f"doc:{doc_id}",
-        mapping={"state": "queued", "filename": filename, "done_count": 0, "t0": time.time()},
+        mapping={"state": "queued", "filename": filename, "library_id": library_id, "done_count": 0, "t0": time.time()},
     )
     await redis.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": filename, "data": data})
     logger.info("ingest file=%s doc_id=%s", filename, doc_id)
@@ -119,8 +120,20 @@ async def submit_document(data: bytes, filename: str, library_id: int) -> int:
 async def submit_documents(files: list[UploadFile], library_id: int) -> IngestResponse:
     if not await library_exists(library_id):
         raise HTTPException(status_code=404, detail="unknown library")
+    await get_redis().incrby(f"inflight:{library_id}", len(files))
     doc_ids = [await submit_document(await file.read(), file.filename or "upload", library_id) for file in files]
     return IngestResponse(doc_ids=doc_ids)
+
+
+async def _finish(doc_id: str) -> None:
+    redis = get_redis()
+    if not await redis.hsetnx(f"doc:{doc_id}", "counted", "1"):
+        return
+    library_id = (await redis.hget(f"doc:{doc_id}", "library_id") or b"").decode()
+    if not library_id:
+        return
+    if await redis.decr(f"inflight:{library_id}") <= 0:
+        await notify_embed(int(library_id))
 
 
 async def get_status(doc_id: int) -> DocumentStatus:
@@ -321,6 +334,7 @@ async def handle_tabular(fields: dict[str, str]) -> None:
 
 async def fail_document(doc_id: str, stage: str) -> None:
     await get_redis().hset(f"doc:{doc_id}", mapping={"state": "failed", "error": f"{stage} failed"})
+    await _finish(doc_id)
     await cleanup(doc_id)  # terminal failure → release the source blobs (no wall-clock TTL to fall back on)
 
 
@@ -466,8 +480,8 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         # born-digital page: VLM does layout + recognizes only non-text; text/title come from the exact text layer
         content_blocks = await client.aio_two_step_extract(img, not_extract_list=list(LAYER_TYPES))
         text_blocks = [cb for cb in content_blocks if cb.type in LAYER_TYPES]
-        if text_blocks:
-            pdf_bytes = await get_redis().get(f"pdf:{doc_id}")
+        pdf_bytes = await get_redis().get(f"pdf:{doc_id}") if text_blocks else None
+        if pdf_bytes:
             loop = asyncio.get_running_loop()
             layer = await loop.run_in_executor(
                 get_paginate_pool(),
@@ -530,6 +544,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
     if (await redis.hget(f"doc:{doc_id}", "mode") or b"").decode() == "tabular":
         await finalize_tabular(int(doc_id))
         await redis.hset(f"doc:{doc_id}", "state", "done")
+        await _finish(doc_id)
         logger.info("merge doc_id=%s state=done tabular", doc_id)
         return
     per_page = await redis.hgetall(f"blocks:{doc_id}")
@@ -541,6 +556,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
     await save_document_tree(int(doc_id), blocks, state)
     await persist_document_tree(int(doc_id))
     await redis.hset(f"doc:{doc_id}", "state", state)
+    await _finish(doc_id)
     t0 = float(await redis.hget(f"doc:{doc_id}", "t0") or 0)
     logger.info("merge file=%s state=%s blocks=%d dur=%.1fs", source, state, len(blocks), time.time() - t0)
 
@@ -553,7 +569,7 @@ async def cleanup(doc_id: str) -> None:
 
 # ---- stage wiring (used by the worker entrypoint) -------------------------------------
 
-STREAMS = (STREAM_INGEST, STREAM_NORMALIZED, STREAM_PAGES, STREAM_MERGE, STREAM_TABLES)
+STREAMS = (STREAM_INGEST, STREAM_NORMALIZED, STREAM_PAGES, STREAM_GAPFILL, STREAM_MERGE, STREAM_TABLES)
 
 
 async def ensure_group(stream: str) -> None:

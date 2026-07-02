@@ -3,6 +3,7 @@ import functools
 import operator
 from dataclasses import dataclass
 
+import torch
 from sqlalchemy import ColumnElement, case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,15 +17,26 @@ RRF_K = 60
 CANDIDATES = 50
 TEXT_TOP = 30
 TABLE_TOP = 30
-EMBED_BATCH = 32
+
+VRAM_HEADROOM = 0.7  # fraction of free VRAM to spend on one embedding batch
+BYTES_PER_ROW = 40_000_000  # BGE-M3 activation per row at typical search_text length; tune with a benchmark
+BATCH_MIN = 8
+BATCH_MAX = 256
 
 _EMBED_LOCK = asyncio.Lock()
+
+
+def _batch_size() -> int:
+    if not torch.cuda.is_available():
+        return BATCH_MIN
+    free, _ = torch.cuda.mem_get_info()
+    return max(BATCH_MIN, min(BATCH_MAX, int(free * VRAM_HEADROOM / BYTES_PER_ROW)))
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
-    vectors = get_embedder().encode(texts, batch_size=EMBED_BATCH, normalize_embeddings=True, show_progress_bar=False)
+    vectors = get_embedder().encode(texts, batch_size=_batch_size(), normalize_embeddings=True, show_progress_bar=False)
     return [vector.tolist() for vector in vectors]
 
 
@@ -42,6 +54,7 @@ class TableCand:
     columns: list[dict]
     description: str
     metadata: dict
+
 
 TEXT_CHANNEL = ContentNode.type != "table"
 TABLE_CHANNEL = ContentNode.type == "table"
@@ -110,21 +123,39 @@ async def _channel(
     return _rrf(lists)
 
 
-async def embed_pending() -> int:
+async def _embed_nodes(session: AsyncSession, nodes: list[ContentNode]) -> int:
+    if not nodes:
+        return 0
+    vectors = await _embed([node.search_text or "" for node in nodes])
+    for node, vector in zip(nodes, vectors, strict=True):
+        node.embedding = vector
+    return len(nodes)
+
+
+async def embed_library(library_id: int) -> int:
     async with get_sessionmaker()() as session, session.begin():
         nodes = list(
             await session.scalars(
                 select(ContentNode)
-                .where(ContentNode.search_text.isnot(None), ContentNode.embedding.is_(None))
-                .limit(EMBED_BATCH)
+                .join(Document, ContentNode.document_id == Document.id)
+                .where(
+                    Document.library_id == library_id,
+                    ContentNode.search_text.isnot(None),
+                    ContentNode.embedding.is_(None),
+                )
             )
         )
-        if not nodes:
-            return 0
-        vectors = await _embed([node.search_text or "" for node in nodes])
-        for node, vector in zip(nodes, vectors, strict=True):
-            node.embedding = vector
-        return len(nodes)
+        return await _embed_nodes(session, nodes)
+
+
+async def embed_all_pending() -> int:
+    async with get_sessionmaker()() as session, session.begin():
+        nodes = list(
+            await session.scalars(
+                select(ContentNode).where(ContentNode.search_text.isnot(None), ContentNode.embedding.is_(None))
+            )
+        )
+        return await _embed_nodes(session, nodes)
 
 
 async def retrieve(queries: list[str]) -> Retrieval:

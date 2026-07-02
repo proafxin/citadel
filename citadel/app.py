@@ -1,36 +1,48 @@
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import asyncpg
 from fastapi import FastAPI
 
 from citadel.router import router
-from citadel.services.ingestion import STREAMS, ensure_group
-from citadel.services.retrieval import embed_pending
-from config import configure_logging, get_embedder
+from citadel.services.retrieval import embed_all_pending, embed_library
+from config import configure_logging, get_embedder, get_settings
 
-EMBED_POLL_SECONDS = 5
+logger = logging.getLogger(__name__)
 
 
-async def _embed_loop() -> None:
+async def _drain_embeds(queue: asyncio.Queue[int]) -> None:
     while True:
-        embedded = await embed_pending()
-        if not embedded:
-            await asyncio.sleep(EMBED_POLL_SECONDS)
+        library_id = await queue.get()
+        logger.info("embedding library=%d", library_id)
+        embedded = await embed_library(library_id)
+        logger.info("embedded library=%d nodes=%d", library_id, embedded)
+
+
+async def _catchup() -> None:
+    embedded = await embed_all_pending()
+    if embedded:
+        logger.info("startup catch-up embedded nodes=%d", embedded)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
-    for stream in STREAMS:
-        await ensure_group(stream)
     await asyncio.to_thread(get_embedder)
-    task = asyncio.create_task(_embed_loop())
+    queue: asyncio.Queue[int] = asyncio.Queue()
+    conn = await asyncpg.connect(get_settings().pg_dsn)
+    await conn.add_listener("embed", lambda _conn, _pid, _channel, payload: queue.put_nowait(int(payload)))
+    tasks = [asyncio.create_task(_drain_embeds(queue)), asyncio.create_task(_catchup())]
     yield
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    await conn.close()
 
 
 app = FastAPI(lifespan=lifespan)

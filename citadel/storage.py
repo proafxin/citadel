@@ -18,3 +18,7 @@ def get_object(key: str) -> bytes | None:
     if not path.exists():
         return None
     return path.read_bytes()
+
+
+def delete_object(key: str) -> None:
+    _object_path(key).unlink(missing_ok=True)
