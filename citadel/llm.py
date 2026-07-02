@@ -10,7 +10,7 @@ from citadel.schemas.table import Column
 from config import QWEN_MODEL, get_settings
 
 SLM_TIMEOUT = 180
-SLM_CONCURRENCY = 16  # concurrent SLM calls; keep <= qwen --max-num-seqs (bounded by GDN Mamba cache blocks)
+SLM_CONCURRENCY = 32  # concurrent SLM calls; keep <= qwen --max-num-seqs (bounded by GDN Mamba cache blocks)
 SLM_MAX_TOKENS = 4096
 
 
@@ -35,7 +35,7 @@ async def _chat(prompt: str, schema: dict) -> str:
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "max_tokens": SLM_MAX_TOKENS,
-        "guided_json": schema,
+        "response_format": {"type": "json_schema", "json_schema": {"name": "output", "schema": schema}},
         "chat_template_kwargs": {"enable_thinking": False},
     }
     async with _slm_semaphore(), httpx.AsyncClient(timeout=SLM_TIMEOUT) as client:
