@@ -8,7 +8,6 @@ For each table return:
 - col_start, col_end: its column span, inclusive.
 - header_rows: the row offsets that form the column header (often just [0]; several rows or merged ranges mean a multi-level header). [] if there is no header row.
 - data_start, data_end: the first and last data-row offsets (data begins after the header; exclude title/notes rows).
-- columns: one HEADER NAME per column from col_start to col_end, in order (null for a column with no header). Just the names — nothing else.
 - title: the table's title if present (from text above the region or a spanning top row), else null.
 - caption: a caption if present, else null.
 - notes: EVERY other piece of surrounding text as a list of strings — footnotes, source lines, totals/subtotal labels, section notes, stray annotations. Capture anything that is neither a column header nor part of the data, even if it looks like noise. [] if there is none.
@@ -17,6 +16,6 @@ For each table return:
 Return a JSON object of the form {"tables": [ ... ]} — a LIST, even for a single table. If the region holds no table, return {"tables": []}.
 
 Example:
-{"tables": [{"col_start": 0, "col_end": 2, "header_rows": [0], "data_start": 1, "data_end": 8, "columns": ["Product", "Quantity", "Amount"], "title": "Q1 Sales", "caption": null, "notes": ["Figures in RM", "Total: 12,400"], "description": "Quarterly sales by product with quantity and amount."}]}
+{"tables": [{"col_start": 0, "col_end": 2, "header_rows": [0], "data_start": 1, "data_end": 8, "title": "Q1 Sales", "caption": null, "notes": ["Figures in RM", "Total: 12,400"], "description": "Quarterly sales by product with quantity and amount."}]}
 
 Region contents:

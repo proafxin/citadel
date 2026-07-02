@@ -184,8 +184,14 @@ def _grid_cell(grid: list[list[str]], row: int, col: int) -> str:
     return grid[row][col] if 0 <= row < len(grid) and 0 <= col < len(grid[row]) else ""
 
 
+def _grid_header(grid: list[list[str]], header_rows: list[int], col: int) -> str | None:
+    parts = dict.fromkeys(cell for row in header_rows if (cell := _grid_cell(grid, row, col)))
+    return " ".join(parts) or None
+
+
 def apply_grid_structure(grid: list[list[str]], structure: TableStructure) -> MaterializedTable:
-    count = len(structure.columns)
+    count = structure.col_end - structure.col_start + 1
+    header_rows = structure.header_rows or []
     collected: list[list[str]] = []
     for offset in range(structure.data_start, structure.data_end + 1):
         raw = [_grid_cell(grid, offset, structure.col_start + index) for index in range(count)]
@@ -193,7 +199,8 @@ def apply_grid_structure(grid: list[list[str]], structure: TableStructure) -> Ma
             continue
         collected.append(raw)
     dtypes = [_dtype([raw[index] for raw in collected]) for index in range(count)]
-    columns = [Column(header=structure.columns[index] or f"col{index}", dtype=dtypes[index]) for index in range(count)]
+    headers = [_grid_header(grid, header_rows, structure.col_start + index) for index in range(count)]
+    columns = [Column(header=headers[index] or f"col{index}", dtype=dtypes[index]) for index in range(count)]
     rows = [[_cast(raw[index], dtypes[index]) for index in range(count)] for raw in collected]
     return MaterializedTable(
         sheet_no=0,

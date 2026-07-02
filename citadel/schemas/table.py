@@ -26,7 +26,6 @@ class TableStructure(BaseModel):
     header_rows: list[int] | None = None
     data_start: int
     data_end: int
-    columns: list[str | None]
     title: str | None = None
     caption: str | None = None
     notes: list[str] | None = None

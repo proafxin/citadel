@@ -403,9 +403,19 @@ def _anchor_range(region: Region, structure: TableStructure) -> dict:
     }
 
 
+def _header_at(values: dict[tuple[int, int], RawCellValue], header_rows: list[int], col: int) -> str | None:
+    parts: dict[str, None] = {}
+    for row in header_rows:
+        raw = values.get((row, col))
+        if raw is not None and (text := str(raw).strip()):
+            parts[text] = None
+    return " ".join(parts) or None
+
+
 def apply_structure(region: Region, structure: TableStructure, sheet_no: int) -> MaterializedTable:
     values = _value_map(region.cells)
-    count = len(structure.columns)
+    count = structure.col_end - structure.col_start + 1
+    header_rows = [region.min_row + offset for offset in (structure.header_rows or [])]
     raw_rows: list[list[RawCellValue]] = []
     for offset in range(structure.data_start, structure.data_end + 1):
         abs_row = region.min_row + offset
@@ -414,7 +424,8 @@ def apply_structure(region: Region, structure: TableStructure, sheet_no: int) ->
             continue
         raw_rows.append(raw)
     dtypes = [_infer_dtype([raw[index] for raw in raw_rows]) for index in range(count)]
-    columns = [Column(header=structure.columns[index] or f"col{index}", dtype=dtypes[index]) for index in range(count)]
+    headers = [_header_at(values, header_rows, region.min_col + structure.col_start + index) for index in range(count)]
+    columns = [Column(header=headers[index] or f"col{index}", dtype=dtypes[index]) for index in range(count)]
     rows = [[_cast(raw[index], dtypes[index]) for index in range(count)] for raw in raw_rows]
     return MaterializedTable(
         sheet_no=sheet_no,
