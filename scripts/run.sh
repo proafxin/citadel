@@ -14,7 +14,14 @@ done
 
 docker compose exec -T postgres psql -U "${CITADEL_POSTGRES_USER:-postgres}" -d "${CITADEL_POSTGRES_DB:-citadel}" -c "CREATE EXTENSION IF NOT EXISTS vector" >/dev/null
 
-until curl -sf "http://localhost:${CITADEL_MINERU_PORT:-8099}/v1/models" >/dev/null 2>&1; do
+until curl -sf "http://localhost:${CITADEL_MINERU_PORT:-8099}/v1/models" >/dev/null 2>&1 \
+    && curl -sf "http://localhost:${CITADEL_QWEN_PORT:-8100}/v1/models" >/dev/null 2>&1; do
+    for name in citadel-mineru citadel-qwen; do
+        if [ "$(docker inspect -f '{{.RestartCount}}' "$name" 2>/dev/null || echo 99)" -ge 3 ]; then
+            echo "ERROR: $name is crash-looping or missing — check: docker compose logs $name" >&2
+            exit 1
+        fi
+    done
     sleep 2
 done
 
@@ -27,5 +34,3 @@ uv run fastapi dev citadel/app.py &
 uv run python citadel/worker.py
 #curl -s -X POST localhost:8000/libraries/1/documents  -F 'files=@/home/masterkenway/Downloads/ocr_input/sales_test.csv' -F 'files=@/home/masterkenway/Downloads/ocr_input/hearing_iconix.docx'
 #for file in /home/masterkenway/Downloads/ocr_input/*; do  [ -f "$file" ] || continue curl -s -X POST -F "files=@$file" localhost:8000/libraries/1/documents done
-
-

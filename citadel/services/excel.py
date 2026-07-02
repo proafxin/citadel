@@ -106,7 +106,9 @@ def _style_flags(cell: OpenpyxlCell) -> tuple[bool, bool, bool]:
     fill = cell.fill
     filled = bool(fill and fill.patternType and fill.patternType != "none")
     border = cell.border
-    bordered = bool(border and any(side and side.style for side in (border.left, border.right, border.top, border.bottom)))
+    bordered = bool(
+        border and any(side and side.style for side in (border.left, border.right, border.top, border.bottom))
+    )
     return bold, filled, bordered
 
 

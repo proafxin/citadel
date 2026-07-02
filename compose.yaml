@@ -52,6 +52,53 @@ services:
               count: all
               capabilities: [gpu]
 
+  # Qwen3.5-4B (Gated DeltaNet hybrid) served by vLLM with strict guided decoding (xgrammar) so structured
+  # output (table structure, filters) is grammar-enforced, not best-effort. fp8 online-quantized; multimodal
+  # model served text-only (no images sent). gpu-mem 0.25 co-locates with mineru (0.5) + the BGE-M3 embedder.
+  qwen:
+    image: vllm/vllm-openai:latest
+    container_name: citadel-qwen
+    restart: always
+    ipc: host
+    command:
+      - --model
+      - Qwen/Qwen3.5-4B
+      - --served-model-name
+      - qwen
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8100"
+      - --quantization
+      - fp8
+      - --gpu-memory-utilization
+      - "0.4"
+      - --max-num-seqs
+      - "32"
+      - --max-model-len
+      - "32768"
+      - --language-model-only
+      - --uvicorn-log-level
+      - warning
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    ports:
+      - "8100:8100"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes:
+      # HF model cache on a HOST dir (bind mount) so `docker compose down -v` never wipes the ~8GB download.
+      - ${HOME}/.cache/citadel-qwen:/root/.cache/huggingface
+      - qwen-vllm-cache:/root/.cache/vllm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   redis:
     image: redis:7-alpine
     container_name: citadel-redis
@@ -82,3 +129,4 @@ volumes:
   redis-data:
   postgres-data:
   vllm-cache:
+  qwen-vllm-cache:

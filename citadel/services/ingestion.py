@@ -35,7 +35,7 @@ from citadel.services.html import parse_html
 from citadel.services.library import library_exists
 from citadel.services.tabular import extract_json_tables, read_csv_table
 from citadel.utils import normalize_file
-from config import CPU_THIRD, get_settings
+from config import CPU_HALF, CPU_THIRD, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ LAYER_TYPES = ("text", "title")  # filled from the PDF text layer on born-digita
 MINERU_MAX_CONNECTIONS = 256  # hard cap on the shared httpx pool → bounds VLM sockets (match server max-num-seqs)
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
 DIGITAL_RENDER_DPI = 110  # office→pdf ONLY (provably born-digital): image is layout-only, text from the PDF layer → render small. validate layout still holds; regular pdf stays at RENDER_DPI
-PAGINATE_CONCURRENCY = CPU_THIRD  # pdfium process-pool workers, one dedicated pdfium per process
+PAGINATE_CONCURRENCY = CPU_HALF  # pdfium process-pool workers, one dedicated pdfium per process
 RAPIDOCR_CONCURRENCY = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
 GAP_FILL = True  # RapidOCR scanned gap-fill; set to False for clean-image benchmarks (pure VLM)
 

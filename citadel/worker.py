@@ -32,11 +32,11 @@ from citadel.services.ingestion import (
     handle_tabular,
     make_profile_pool,
 )
-from config import CPU_THIRD, configure_logging, get_settings
+from config import CPU_HALF, configure_logging, get_settings
 
 logger = logging.getLogger(__name__)
 
-NORMALIZE_CONCURRENCY = CPU_THIRD  # one isolated libreoffice profile per worker (per-job soffice)
+NORMALIZE_CONCURRENCY = CPU_HALF  # one isolated libreoffice profile per worker (per-job soffice)
 OCR_CONCURRENCY = 128  # pages in flight; sockets are capped by MINERU_MAX_CONNECTIONS, so keep this high to feed the server (born-digital makes few requests/page → needs many concurrent pages)
 MERGE_CONCURRENCY = 4  # light assembly
 

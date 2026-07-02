@@ -10,15 +10,13 @@ from citadel.schemas.table import Column
 from config import QWEN_MODEL, get_settings
 
 SLM_TIMEOUT = 180
-SLM_CONCURRENCY = 2  # concurrent ollama SLM calls (heading-leveling); keep <= OLLAMA_NUM_PARALLEL, low so it doesn't starve MinerU OCR
-SLM_NUM_CTX = 32768
+SLM_CONCURRENCY = 16  # concurrent SLM calls; keep <= qwen --max-num-seqs (bounded by GDN Mamba cache blocks)
 SLM_MAX_TOKENS = 4096
 
 
 @functools.lru_cache
-def _ollama_chat_url() -> str:
-    settings = get_settings()
-    return f"http://{settings.qwen_host}:{settings.qwen_port}/api/chat"
+def _chat_url() -> str:
+    return f"{get_settings().qwen_base_url}/chat/completions"
 
 
 @functools.lru_cache
@@ -31,19 +29,19 @@ def _extract_json(text: str) -> str:
     return text[start : end + 1] if start != -1 and end != -1 else text
 
 
-async def _chat(prompt: str, fmt: dict | str) -> str:
+async def _chat(prompt: str, schema: dict) -> str:
     payload = {
         "model": QWEN_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "think": False,
-        "stream": False,
-        "format": fmt,
-        "options": {"temperature": 0, "num_ctx": SLM_NUM_CTX, "num_predict": SLM_MAX_TOKENS},
+        "temperature": 0,
+        "max_tokens": SLM_MAX_TOKENS,
+        "guided_json": schema,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     async with _slm_semaphore(), httpx.AsyncClient(timeout=SLM_TIMEOUT) as client:
-        response = await client.post(_ollama_chat_url(), json=payload)
+        response = await client.post(_chat_url(), json=payload)
         response.raise_for_status()
-        return response.json()["message"]["content"]
+        return response.json()["choices"][0]["message"]["content"]
 
 
 def _resolve_ref(node: object, defs: dict) -> object:
@@ -87,22 +85,26 @@ async def _chat_stream(prompt: str) -> AsyncIterator[str]:
     payload = {
         "model": QWEN_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "think": False,
+        "temperature": 0.3,
+        "max_tokens": SLM_MAX_TOKENS,
         "stream": True,
-        "options": {"temperature": 0.3, "num_ctx": SLM_NUM_CTX, "num_predict": SLM_MAX_TOKENS},
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     async with (
         _slm_semaphore(),
         httpx.AsyncClient(timeout=SLM_TIMEOUT) as client,
-        client.stream("POST", _ollama_chat_url(), json=payload) as response,
+        client.stream("POST", _chat_url(), json=payload) as response,
     ):
         response.raise_for_status()
         async for line in response.aiter_lines():
-            if not line:
+            if not line.startswith("data: "):
                 continue
-            token = json.loads(line).get("message", {}).get("content", "")
-            if token:
-                yield token
+            data = line[len("data: ") :]
+            if data == "[DONE]":
+                break
+            delta = json.loads(data)["choices"][0]["delta"].get("content")
+            if delta:
+                yield delta
 
 
 _REFORMULATE_SCHEMA = {

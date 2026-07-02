@@ -10,8 +10,9 @@ from sentence_transformers import SentenceTransformer
 logger = logging.getLogger(__name__)
 
 CPU_THIRD = max((os.cpu_count() or 3) // 3, 1)  # per-worker CPU stages: a third of the cores, at least 1
+CPU_HALF = max((os.cpu_count() or 2) // 2, 1)  # heavier CPU stages (normalize, paginate): half the cores
 
-QWEN_MODEL = "qwen3.5:4b"
+QWEN_MODEL = "qwen"
 EMBED_MODEL = "BAAI/bge-m3"
 EMBED_DEVICE = "cuda"
 
@@ -29,7 +30,7 @@ class Settings(BaseSettings):
     mineru_port: int = 8099
 
     qwen_host: str = "localhost"
-    qwen_port: int = 11434  # ollama OpenAI-compatible endpoint (vLLM hung on Blackwell sm_120 FlashInfer kernels)
+    qwen_port: int = 8100  # vLLM OpenAI-compatible server (Qwen3.5-4B, guided decoding)
 
     redis_url: str = "redis://localhost:6379/0"
 
@@ -74,6 +75,6 @@ def get_settings() -> Settings:
 @lru_cache
 def get_embedder() -> SentenceTransformer:
     logger.info("loading embedder model=%s device=%s", EMBED_MODEL, EMBED_DEVICE)
-    model = SentenceTransformer(EMBED_MODEL, device=EMBED_DEVICE)
+    model = SentenceTransformer(EMBED_MODEL, device=EMBED_DEVICE, model_kwargs={"torch_dtype": "bfloat16"})
     logger.info("embedder loaded model=%s", EMBED_MODEL)
     return model
