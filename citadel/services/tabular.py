@@ -10,7 +10,7 @@ from bs4.element import Tag
 from citadel.llm import call_slm
 from citadel.prompts import load_prompt
 from citadel.schemas.content import Block
-from citadel.schemas.table import CellValue, Column, ColumnDType, ColumnRole, RegionStructure, TableStructure
+from citadel.schemas.table import CellValue, Column, ColumnDType, RegionStructure, TableStructure
 from citadel.services.excel import SAMPLE_TABLE_ROWS, MaterializedTable
 
 _DTYPE_BY_PREFIX = {
@@ -140,7 +140,7 @@ def extract_html_table(html: str) -> MaterializedTable:
     for col in range(width):
         values = [row[col] for row in body]
         dtype = _dtype(values)
-        columns.append(Column(header=headers[col] or None, dtype=dtype))
+        columns.append(Column(header=headers[col] or f"col{col}", dtype=dtype))
         for index, value in enumerate(values):
             rows[index][col] = _cast(value, dtype)
     return MaterializedTable(
@@ -158,7 +158,7 @@ def extract_html_table(html: str) -> MaterializedTable:
 
 
 _GRID_HEAD_ROWS = 4
-_GRID_SAMPLE_ROWS = 6
+_GRID_SAMPLE_CAP = 50
 
 
 def _render_grid(grid: list[list[str]], context: str) -> str:
@@ -173,9 +173,10 @@ def _render_grid(grid: list[list[str]], context: str) -> str:
     ]
     body = list(range(head_end, height))
     if body:
-        step = max(len(body) // _GRID_SAMPLE_ROWS, 1)
+        stride = max(1, (len(body) + _GRID_SAMPLE_CAP - 1) // _GRID_SAMPLE_CAP)
+        picked = sorted(set(body[::stride]) | {body[0], body[-1]})
         lines.append("Sample data rows:")
-        lines.extend(f"  r{offset}: {' | '.join(grid[offset])}" for offset in body[::step][:_GRID_SAMPLE_ROWS])
+        lines.extend(f"  r{offset}: {' | '.join(grid[offset])}" for offset in picked)
     return "\n".join(lines)
 
 
@@ -185,30 +186,15 @@ def _grid_cell(grid: list[list[str]], row: int, col: int) -> str:
 
 def apply_grid_structure(grid: list[list[str]], structure: TableStructure) -> MaterializedTable:
     count = len(structure.columns)
-    relative = structure.section_label_col - structure.col_start if structure.section_label_col is not None else -1
-    section_i = relative if 0 <= relative < count else None
-    collected: list[tuple[CellValue, list[str]]] = []
-    section: CellValue = None
+    collected: list[list[str]] = []
     for offset in range(structure.data_start, structure.data_end + 1):
         raw = [_grid_cell(grid, offset, structure.col_start + index) for index in range(count)]
         if all(value == "" for value in raw):
             continue
-        if section_i is not None and raw[section_i] and all(v == "" for i, v in enumerate(raw) if i != section_i):
-            section = raw[section_i]
-            continue
-        collected.append((section, raw))
-    dtypes = [_dtype([raw[index] for _, raw in collected]) for index in range(count)]
-    data_columns = [
-        Column(header=col.header or None, dtype=dtypes[index], role=col.role, unit=col.unit)
-        for index, col in enumerate(structure.columns)
-    ]
-    columns = (
-        [Column(header="section", role=ColumnRole.SECTION), *data_columns] if section_i is not None else data_columns
-    )
-    rows: list[list[CellValue]] = []
-    for sect, raw in collected:
-        cast = [_cast(value, dtypes[index]) for index, value in enumerate(raw)]
-        rows.append([sect, *cast] if section_i is not None else cast)
+        collected.append(raw)
+    dtypes = [_dtype([raw[index] for raw in collected]) for index in range(count)]
+    columns = [Column(header=structure.columns[index] or f"col{index}", dtype=dtypes[index]) for index in range(count)]
+    rows = [[_cast(raw[index], dtypes[index]) for index in range(count)] for raw in collected]
     return MaterializedTable(
         sheet_no=0,
         columns=columns,
@@ -217,8 +203,8 @@ def apply_grid_structure(grid: list[list[str]], structure: TableStructure) -> Ma
         n_rows=len(rows),
         title=structure.title,
         caption=structure.caption,
-        notes=structure.notes,
-        description=structure.description,
+        notes=structure.notes or [],
+        description=structure.description or "",
         anchors=None,
     )
 

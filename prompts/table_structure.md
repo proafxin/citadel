@@ -1,28 +1,22 @@
-You are given the CONTENTS of one rectangular region of a spreadsheet (a contiguous block of non-empty cells). Identify the logical table(s) it contains and return their structure. Do NOT transcribe or compute any data values — describe structure only.
+You are given the contents of one rectangular region of a spreadsheet (a contiguous block of non-empty cells), together with any surrounding text, merged ranges, and comments. Identify the logical table(s) in the region and describe their structure. Do NOT transcribe or compute any data values — describe structure only.
 
 All row/col offsets are 0-based WITHIN the region (row 0 = the region's first row, col 0 = its first column).
 
-A region may contain: one table; several tables stacked or side-by-side that have DIFFERENT column schemas (return each separately); or one table with a title above and/or notes below.
+A region may hold one table, several tables stacked or side-by-side that have DIFFERENT columns (return each separately), or a table with a title above and/or notes below.
 
-For each table determine:
-- col_start, col_end: its column span, inclusive, region-relative.
-- header_rows: the row offsets forming the column header (often just row 0; multiple rows or merged ranges mean a multi-level header). Trust an Excel table object's boundary and the freeze header hint when present.
-- data_start, data_end: the first and last data-row offsets (data begins after the header; exclude trailing notes rows).
-- columns: one entry PER column from col_start to col_end, in order:
-  - header: the column name (resolve a multi-level header into one label; null if blank).
-  - dtype: one of string, integer, decimal, float, boolean, date, datetime (infer from the sample values).
-  - role: "data" normally, or "section" if the column's values GROUP the rows (a category/section key) rather than being a measurement.
-  - unit: a unit implied by the header or values (e.g. %, RM, kg), else null.
-- section_label_col: if the table has interspersed SECTION-LABEL ROWS (a row carrying only a group label with the other columns blank), give the column offset where that label sits; otherwise null.
-- title: a title for the table (from the text above the region or a spanning merged top row), else null.
-- caption, notes: a caption and any footnote/source/notes lines (from text below the region or comments), else null/empty.
-- description: a one-paragraph summary of what this table contains (its subject and what the rows/columns represent) that someone searching in natural language for this table would recognize.
+For each table return:
+- col_start, col_end: its column span, inclusive.
+- header_rows: the row offsets that form the column header (often just [0]; several rows or merged ranges mean a multi-level header). [] if there is no header row.
+- data_start, data_end: the first and last data-row offsets (data begins after the header; exclude title/notes rows).
+- columns: one HEADER NAME per column from col_start to col_end, in order (null for a column with no header). Just the names — nothing else.
+- title: the table's title if present (from text above the region or a spanning top row), else null.
+- caption: a caption if present, else null.
+- notes: EVERY other piece of surrounding text as a list of strings — footnotes, source lines, totals/subtotal labels, section notes, stray annotations. Capture anything that is neither a column header nor part of the data, even if it looks like noise. [] if there is none.
+- description: a short natural-language summary of what the table contains (its subject and what the rows and columns represent).
 
-Always return a JSON object of the form {"tables": [ ... ]} — a LIST, even when the region holds exactly one table (wrap the single table in the list). Every list field (header_rows, notes, columns) must be an array — use [] when empty, NEVER null. section_label_col, title, and caption are null when absent.
+Return a JSON object of the form {"tables": [ ... ]} — a LIST, even for a single table. If the region holds no table, return {"tables": []}.
 
-Example output for a region holding one two-column table:
-{"tables": [{"col_start": 0, "col_end": 1, "header_rows": [0], "data_start": 1, "data_end": 4, "columns": [{"header": "product", "dtype": "string", "role": "data", "unit": null}, {"header": "price", "dtype": "decimal", "role": "data", "unit": "RM"}], "section_label_col": null, "title": null, "caption": null, "notes": [], "description": "Products and their unit prices in ringgit; one row per product."}]}
-
-Respond ONLY with the JSON object.
+Example:
+{"tables": [{"col_start": 0, "col_end": 2, "header_rows": [0], "data_start": 1, "data_end": 8, "columns": ["Product", "Quantity", "Amount"], "title": "Q1 Sales", "caption": null, "notes": ["Figures in RM", "Total: 12,400"], "description": "Quarterly sales by product with quantity and amount."}]}
 
 Region contents:

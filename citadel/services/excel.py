@@ -9,12 +9,12 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from citadel.llm import call_slm
 from citadel.prompts import load_prompt
-from citadel.schemas.table import CellValue, Column, ColumnDType, ColumnRole, RegionStructure, TableStructure
+from citadel.schemas.table import CellValue, Column, ColumnDType, RegionStructure, TableStructure
 
 type RawCellValue = str | int | float | bool | datetime | None
 
 HEAD_ROWS = 4
-SAMPLE_ROWS = 6
+SAMPLE_CAP = 50
 SAMPLE_TABLE_ROWS = 10
 CONTEXT_ROWS = 2
 
@@ -106,7 +106,7 @@ def _style_flags(cell: OpenpyxlCell) -> tuple[bool, bool, bool]:
     fill = cell.fill
     filled = bool(fill and fill.patternType and fill.patternType != "none")
     border = cell.border
-    bordered = bool(border and any(side.style for side in (border.left, border.right, border.top, border.bottom)))
+    bordered = bool(border and any(side and side.style for side in (border.left, border.right, border.top, border.bottom)))
     return bold, filled, bordered
 
 
@@ -238,21 +238,29 @@ def _row_values(
     return [values.get((row, col)) for col in range(min_col, max_col + 1)]
 
 
-def _signature(row_values: list[RawCellValue]) -> tuple[bool, ...]:
-    return tuple(value is not None for value in row_values)
+def _infer_dtype(values: list[RawCellValue]) -> ColumnDType:
+    present = [value for value in values if value is not None]
+    if not present:
+        return ColumnDType.STRING
+    if all(isinstance(value, bool) for value in present):
+        return ColumnDType.BOOLEAN
+    if all(isinstance(value, int) and not isinstance(value, bool) for value in present):
+        return ColumnDType.INTEGER
+    if all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in present):
+        return ColumnDType.FLOAT
+    if all(isinstance(value, datetime) for value in present):
+        return ColumnDType.DATETIME
+    return ColumnDType.STRING
 
 
-def _sample_rows(region: Region, values: dict[tuple[int, int], RawCellValue], head_end: int) -> list[int]:
+def _sample_rows(region: Region, head_end: int) -> list[int]:
     body = list(range(head_end + 1, region.max_row + 1))
     if not body:
         return []
-    groups: dict[tuple[bool, ...], list[int]] = {}
-    for row in body:
-        groups.setdefault(_signature(_row_values(values, row, region.min_col, region.max_col)), []).append(row)
-    picked: set[int] = set()
-    for rows in groups.values():
-        picked.update({rows[0], rows[len(rows) // 2], rows[-1]})
-    return sorted(picked)[:SAMPLE_ROWS]
+    stride = max(1, (len(body) + SAMPLE_CAP - 1) // SAMPLE_CAP)
+    picked = set(body[::stride])
+    picked.update({body[0], body[-1]})
+    return sorted(picked)
 
 
 def _overlaps(min_row: int, min_col: int, max_row: int, max_col: int, region: Region) -> bool:
@@ -275,7 +283,7 @@ def build_anchors(sheet: SheetExtraction, region: Region) -> RegionAnchors:
     head = [_row_values(values, row, region.min_col, region.max_col) for row in range(region.min_row, head_end + 1)]
     samples = [
         (row - region.min_row, _row_values(values, row, region.min_col, region.max_col))
-        for row in _sample_rows(region, values, head_end)
+        for row in _sample_rows(region, head_end)
     ]
     freeze = sheet.freeze_row
     return RegionAnchors(
@@ -396,30 +404,16 @@ def _anchor_range(region: Region, structure: TableStructure) -> dict:
 def apply_structure(region: Region, structure: TableStructure, sheet_no: int) -> MaterializedTable:
     values = _value_map(region.cells)
     count = len(structure.columns)
-    relative = structure.section_label_col - structure.col_start if structure.section_label_col is not None else -1
-    section_i = relative if 0 <= relative < count else None
-    data_columns = [
-        Column(header=col.header, dtype=col.dtype, role=col.role, unit=col.unit) for col in structure.columns
-    ]
-    columns = (
-        [Column(header="section", role=ColumnRole.SECTION), *data_columns] if section_i is not None else data_columns
-    )
-    rows: list[list[CellValue]] = []
-    section: CellValue = None
+    raw_rows: list[list[RawCellValue]] = []
     for offset in range(structure.data_start, structure.data_end + 1):
         abs_row = region.min_row + offset
         raw = [values.get((abs_row, region.min_col + structure.col_start + index)) for index in range(count)]
         if all(value is None for value in raw):
             continue
-        if (
-            section_i is not None
-            and raw[section_i] is not None
-            and all(value is None for index, value in enumerate(raw) if index != section_i)
-        ):
-            section = str(raw[section_i])
-            continue
-        cast = [_cast(value, column.dtype) for value, column in zip(raw, structure.columns, strict=False)]
-        rows.append([section, *cast] if section_i is not None else cast)
+        raw_rows.append(raw)
+    dtypes = [_infer_dtype([raw[index] for raw in raw_rows]) for index in range(count)]
+    columns = [Column(header=structure.columns[index] or f"col{index}", dtype=dtypes[index]) for index in range(count)]
+    rows = [[_cast(raw[index], dtypes[index]) for index in range(count)] for raw in raw_rows]
     return MaterializedTable(
         sheet_no=sheet_no,
         columns=columns,
@@ -428,8 +422,8 @@ def apply_structure(region: Region, structure: TableStructure, sheet_no: int) ->
         n_rows=len(rows),
         title=structure.title,
         caption=structure.caption,
-        notes=structure.notes,
-        description=structure.description,
+        notes=structure.notes or [],
+        description=structure.description or "",
         anchors=_anchor_range(region, structure),
     )
 

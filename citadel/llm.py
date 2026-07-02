@@ -46,8 +46,26 @@ async def _chat(prompt: str, fmt: dict | str) -> str:
         return response.json()["message"]["content"]
 
 
+def _resolve_ref(node: object, defs: dict) -> object:
+    if isinstance(node, dict):
+        if "$ref" in node:
+            return _resolve_ref(defs[node["$ref"].split("/")[-1]], defs)
+        return {key: _resolve_ref(value, defs) for key, value in node.items() if key != "$defs"}
+    if isinstance(node, list):
+        return [_resolve_ref(item, defs) for item in node]
+    return node
+
+
+def _inline_refs(schema: dict) -> dict:
+    defs = schema.get("$defs")
+    if not defs:
+        return schema
+    resolved = _resolve_ref(schema, defs)
+    return resolved if isinstance(resolved, dict) else schema
+
+
 async def call_slm(prompt: str, schema: dict) -> dict:
-    return json.loads(_extract_json(await _chat(prompt, schema)))
+    return json.loads(_extract_json(await _chat(prompt, _inline_refs(schema))))
 
 
 _DESCRIPTION_SCHEMA = {

@@ -73,8 +73,7 @@ def _samples(sample_rows: list[list], index: int) -> str:
 def _schema(columns: list[dict], sample_rows: list[list]) -> str:
     lines: list[str] = []
     for index, column in enumerate(columns):
-        unit = f" {column['unit']}" if column.get("unit") else ""
-        label = f"c{index}: {column.get('header') or '?'} ({column.get('dtype', 'string')}{unit})"
+        label = f"c{index}: {column.get('header') or '?'} ({column.get('dtype', 'string')})"
         lines.append(label + _samples(sample_rows, index))
     return "\n".join(lines)
 

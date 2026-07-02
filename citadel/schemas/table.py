@@ -1,6 +1,6 @@
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 type CellValue = str | int | float | bool | None
 
@@ -15,37 +15,22 @@ class ColumnDType(StrEnum):
     DATETIME = "datetime"
 
 
-class ColumnRole(StrEnum):
-    DATA = "data"
-    SECTION = "section"
-
-
 class Column(BaseModel):
     header: str | None = None
     dtype: ColumnDType = ColumnDType.STRING
-    role: ColumnRole = ColumnRole.DATA
-    unit: str | None = None
-
-
-class StructureColumn(BaseModel):
-    header: str | None = None
-    dtype: ColumnDType = ColumnDType.STRING
-    role: ColumnRole = ColumnRole.DATA
-    unit: str | None = None
 
 
 class TableStructure(BaseModel):
     col_start: int
     col_end: int
-    header_rows: list[int] = Field(default_factory=list)
+    header_rows: list[int] | None = None
     data_start: int
     data_end: int
-    columns: list[StructureColumn]
-    section_label_col: int | None = None
+    columns: list[str | None]
     title: str | None = None
     caption: str | None = None
-    notes: list[str] = Field(default_factory=list)
-    description: str = ""
+    notes: list[str] | None = None
+    description: str | None = None
 
 
 class RegionStructure(BaseModel):
