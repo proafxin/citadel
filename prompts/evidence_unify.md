@@ -1,3 +1,5 @@
+# Evidence Unifier
+
 You are given a question and a numbered list of items. Each item is either a text passage or a table result (shown as its columns, row count, and a few sample rows). Choose the items actually needed to answer the question, and mark each as either essential or supporting.
 
 Leave out any item that, on closer reading, is not needed at all.

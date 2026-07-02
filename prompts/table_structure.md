@@ -1,3 +1,5 @@
+# Table Structure Extractor
+
 You are given the contents of one rectangular region of a spreadsheet (a contiguous block of non-empty cells), together with any surrounding text, merged ranges, and comments. Identify the logical table(s) in the region and describe their structure. Do NOT transcribe or compute any data values — describe structure only.
 
 All row/col offsets are 0-based WITHIN the region (row 0 = the region's first row, col 0 = its first column).
@@ -5,6 +7,7 @@ All row/col offsets are 0-based WITHIN the region (row 0 = the region's first ro
 A region may hold one table, several tables stacked or side-by-side that have DIFFERENT columns (return each separately), or a table with a title above and/or notes below.
 
 For each table return:
+
 - col_start, col_end: its column span, inclusive.
 - header_rows: the row offsets that form the column header (often just [0]; several rows or merged ranges mean a multi-level header). [] if there is no header row.
 - data_start, data_end: the first and last data-row offsets (data begins after the header; exclude title/notes rows).
