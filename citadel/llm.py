@@ -121,6 +121,35 @@ async def select_evidence(query: str, items: list[str]) -> list[int]:
     return [index for index in data.get("relevant", []) if isinstance(index, int) and 0 <= index < len(items)]
 
 
+_UNIFY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "selected": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "integer"}, "tier": {"type": "integer"}},
+                "required": ["id", "tier"],
+            },
+        }
+    },
+    "required": ["selected"],
+}
+
+
+async def unify_evidence(query: str, items: list[str]) -> list[tuple[int, int]]:
+    if not items:
+        return []
+    listing = "\n\n".join(f"[{index}] {item}" for index, item in enumerate(items))
+    data = await call_slm(f"{load_prompt('evidence_unify')}\nquestion: {query}\nevidence:\n{listing}", _UNIFY_SCHEMA)
+    out: list[tuple[int, int]] = []
+    for entry in data.get("selected", []):
+        index, tier = entry.get("id"), entry.get("tier")
+        if isinstance(index, int) and 0 <= index < len(items) and tier in {1, 2}:
+            out.append((index, tier))
+    return out
+
+
 _QUERIES_SCHEMA = {
     "type": "object",
     "properties": {"queries": {"type": "array", "items": {"type": "string"}}},

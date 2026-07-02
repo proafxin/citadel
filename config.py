@@ -5,7 +5,7 @@ from pathlib import Path
 
 from loguru import logger as loguru_logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sentence_transformers import CrossEncoder, SentenceTransformer
+from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +13,6 @@ CPU_THIRD = max((os.cpu_count() or 3) // 3, 1)  # per-worker CPU stages: a third
 
 QWEN_MODEL = "qwen3.5:4b"
 EMBED_MODEL = "BAAI/bge-m3"
-RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 EMBED_DEVICE = "cuda"
 
 
@@ -77,12 +76,4 @@ def get_embedder() -> SentenceTransformer:
     logger.info("loading embedder model=%s device=%s", EMBED_MODEL, EMBED_DEVICE)
     model = SentenceTransformer(EMBED_MODEL, device=EMBED_DEVICE)
     logger.info("embedder loaded model=%s", EMBED_MODEL)
-    return model
-
-
-@lru_cache
-def get_reranker() -> CrossEncoder:
-    logger.info("loading reranker model=%s device=%s", RERANKER_MODEL, EMBED_DEVICE)
-    model = CrossEncoder(RERANKER_MODEL, device=EMBED_DEVICE)
-    logger.info("reranker loaded model=%s", RERANKER_MODEL)
     return model

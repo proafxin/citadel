@@ -11,12 +11,10 @@ from citadel.db import get_sessionmaker
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
 from citadel.models.table import Table
-from config import get_embedder, get_reranker
+from config import get_embedder
 
 RRF_K = 60
-CANDIDATES = 50
-TEXT_TOP = 30
-TABLE_TOP = 30
+CANDIDATES = 1000
 
 VRAM_HEADROOM = 0.7  # fraction of free VRAM to spend on one embedding batch
 BYTES_PER_ROW = 40_000_000  # BGE-M3 activation per row at typical search_text length; tune with a benchmark
@@ -43,18 +41,6 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 async def _embed(texts: list[str]) -> list[list[float]]:
     async with _EMBED_LOCK:
         return await asyncio.to_thread(embed_texts, texts)
-
-
-def rerank_scores(query: str, texts: list[str]) -> list[float]:
-    if not texts:
-        return []
-    scores = get_reranker().predict([(query, text) for text in texts])
-    return [float(score) for score in scores]
-
-
-async def rerank(query: str, texts: list[str]) -> list[float]:
-    async with _EMBED_LOCK:
-        return await asyncio.to_thread(rerank_scores, query, texts)
 
 
 @dataclass
@@ -177,7 +163,7 @@ async def retrieve(queries: list[str]) -> Retrieval:
     async with get_sessionmaker()() as session:
         text = await _channel(session, TEXT_CHANNEL, vectors, terms)
         tables = await _channel(session, TABLE_CHANNEL, vectors, terms)
-    return Retrieval(text=text[:TEXT_TOP], tables=tables[:TABLE_TOP])
+    return Retrieval(text=text[:CANDIDATES], tables=tables[:CANDIDATES])
 
 
 async def load_passages(content_ids: list[str]) -> list[str]:

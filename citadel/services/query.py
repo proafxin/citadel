@@ -14,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import TypeEngine
 
 from citadel.db import get_sessionmaker
-from citadel.llm import reformulate, select_evidence, synthesize, write_queries
+from citadel.llm import reformulate, select_evidence, synthesize, unify_evidence, write_queries
 from citadel.models.table import TableRow
-from citadel.services.retrieval import TableCand, load_passages, load_tables, rerank, retrieve
+from citadel.services.retrieval import TableCand, load_passages, load_tables, retrieve
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,9 @@ STATEMENT_TIMEOUT_MS = 3000
 CTX_TOKENS = 32768
 OUT_TOKENS = 4096
 CHARS_PER_TOKEN = 4
-EVIDENCE_BUDGET = (CTX_TOKENS - OUT_TOKENS - 2048) * CHARS_PER_TOKEN
+BUDGET = (CTX_TOKENS - OUT_TOKENS - 2048) * CHARS_PER_TOKEN
+EARLY_STOP_N = 3
+SCHEMA_SAMPLES = 3
 _PG = postgresql.dialect()
 _DTYPE_SA: dict[str, type[TypeEngine[Any]]] = {
     "integer": BigInteger,
@@ -36,6 +38,14 @@ _DTYPE_SA: dict[str, type[TypeEngine[Any]]] = {
     "string": Text,
 }
 _TABLE_REF = re.compile(r"\bt(\d+)\b")
+
+
+@dataclass
+class SqlResult:
+    label: str
+    columns: list[str]
+    rows: list[list]
+    total: int
 
 
 def _safe_sql(sql: str) -> bool:
@@ -55,9 +65,6 @@ def _view_cte(index: int, table: TableCand) -> str:
     return "t" + str(index) + " AS (" + str(compiled) + ")"
 
 
-SCHEMA_SAMPLES = 3
-
-
 def _samples(sample_rows: list[list], index: int) -> str:
     values = [row[index] for row in sample_rows[:SCHEMA_SAMPLES] if index < len(row) and row[index] is not None]
     return f"  e.g. {', '.join(str(value) for value in values)}" if values else ""
@@ -72,14 +79,15 @@ def _schema(columns: list[dict], sample_rows: list[list]) -> str:
     return "\n".join(lines)
 
 
-def _render(table: TableCand) -> str:
-    headers = [column.get("header") or "?" for column in table.columns]
-    return f"{table.description} | columns: {headers}"
+def _table_rep(table: TableCand) -> str:
+    meta = table.metadata
+    head = " | ".join(f"{key}: {meta[key]}" for key in ("title", "caption", "sheet") if meta.get(key))
+    header = table.filename + (f" ({head})" if head else "")
+    return f"{header}\n{_schema(table.columns, table.sample_rows)}"
 
 
 def _schema_block(index: int, table: TableCand) -> str:
-    title = table.metadata.get("title") or table.description[:60]
-    return f"t{index} ({table.filename} — {title}) rows={table.n_rows}\n{_schema(table.columns, table.sample_rows)}"
+    return f"t{index} ({table.filename}) rows={table.n_rows}\n{_schema(table.columns, table.sample_rows)}"
 
 
 def _cte(tables: list[TableCand]) -> str:
@@ -100,7 +108,7 @@ async def _run_sql(session: AsyncSession, tables: list[TableCand], sql: str) -> 
     return list(result.keys()), [list(row) for row in result.fetchall()]
 
 
-async def _execute(tables: list[TableCand], sql: str) -> str | None:
+async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
     sql = sql.strip().rstrip(";").strip()
     if not _safe_sql(sql):
         return None
@@ -112,56 +120,15 @@ async def _execute(tables: list[TableCand], sql: str) -> str | None:
         return None
     sources = _sources(tables, sql)
     logger.info("resolve sources=%s rows=%d sql=%s", sources, len(rows), sql)
-    body = "\n".join([" | ".join(columns), *(" | ".join(str(value) for value in row) for row in rows)])
-    label = ", ".join(sources) or "computed result"
-    return f"[{label}]\n{body}"
+    return SqlResult(", ".join(sources) or "computed result", columns, rows, len(rows))
 
 
-@dataclass
-class _Ranked:
-    kind: str
-    render: str
-    passage: str | None
-    table: TableCand | None
-    score: float
-
-
-def _fit(renders: list[str], budget: int) -> int:
-    used = 0
-    for count, render in enumerate(renders):
-        used += len(render)
-        if used > budget:
-            return count
-    return len(renders)
-
-
-async def _rank(question: str, passages: list[str], candidates: list[TableCand]) -> list[_Ranked]:
-    table_renders = [_render(candidate) for candidate in candidates]
-    scores = await rerank(question, passages + table_renders) if (passages or candidates) else []
-    ranked = [
-        _Ranked("text", passage, passage, None, score)
-        for passage, score in zip(passages, scores[: len(passages)], strict=True)
-    ]
-    ranked += [
-        _Ranked("table", render, None, candidate, score)
-        for candidate, render, score in zip(candidates, table_renders, scores[len(passages) :], strict=True)
-    ]
-    ranked.sort(key=lambda item: item.score, reverse=True)
-    return ranked
-
-
-async def _select(question: str, passages: list[str], candidates: list[TableCand]) -> tuple[list[str], list[TableCand]]:
-    ranked = await _rank(question, passages, candidates)
-    fitted = ranked[: _fit([item.render for item in ranked], EVIDENCE_BUDGET)]
-    chosen = set(await select_evidence(question, [item.render for item in fitted]))
-    selected = [item for index, item in enumerate(fitted) if index in chosen]
-    sel_passages = [item.passage for item in selected if item.kind == "text" and item.passage is not None]
-    sel_tables = [item.table for item in selected if item.kind == "table" and item.table is not None]
-    return sel_passages, sel_tables
-
-
-async def _run_all(tables: list[TableCand], sqls: list[str]) -> list[str]:
-    results: list[str] = []
+async def _aggregate(question: str, tables: list[TableCand]) -> list[SqlResult]:
+    blocks = list(starmap(_schema_block, enumerate(tables)))
+    logger.info("schema blocks passed to slm:\n%s", "\n\n".join(blocks))
+    sqls = await write_queries(question, blocks) if tables else []
+    logger.info("slm sqls=%s", sqls)
+    results: list[SqlResult] = []
     for sql in sqls:
         resolved = await _execute(tables, sql)
         if resolved is not None:
@@ -169,31 +136,129 @@ async def _run_all(tables: list[TableCand], sqls: list[str]) -> list[str]:
     return results
 
 
+def _fit(items: list[str], budget: int) -> int:
+    used = 0
+    for count, item in enumerate(items):
+        used += len(item)
+        if used > budget:
+            return count
+    return len(items)
+
+
+async def _filter(question: str, items: list[str]) -> list[int]:
+    kept: list[int] = []
+    start = 0
+    empty = 0
+    while start < len(items):
+        size = max(1, _fit(items[start:], BUDGET))
+        chosen = await select_evidence(question, items[start : start + size])
+        if chosen:
+            kept.extend(start + index for index in chosen)
+            empty = 0
+        else:
+            empty += 1
+            if empty >= EARLY_STOP_N:
+                break
+        start += size
+    return kept
+
+
+def _row_text(row: list) -> str:
+    return " | ".join("" if value is None else str(value) for value in row)
+
+
+def _result_render(result: SqlResult) -> str:
+    shown = len(result.rows)
+    head = f"[{result.label}]" if shown >= result.total else f"[{result.label}] showing {shown} of {result.total} rows"
+    return "\n".join([head, " | ".join(result.columns), *(_row_text(row) for row in result.rows)])
+
+
+def _result_summary(result: SqlResult) -> str:
+    sample = result.rows[:SCHEMA_SAMPLES]
+    header = f"[{result.label}] {result.total} rows"
+    return "\n".join([header, " | ".join(result.columns), *(_row_text(row) for row in sample)])
+
+
+def _fit_results(results: list[SqlResult], budget: int) -> list[SqlResult]:
+    if not results or budget <= 0:
+        return []
+    kept: list[list[list]] = [[] for _ in results]
+    used = sum(len(f"[{result.label}]\n" + " | ".join(result.columns)) for result in results)
+    pointer = [0] * len(results)
+    added = True
+    while added:
+        added = False
+        for index, result in enumerate(results):
+            cursor = pointer[index]
+            if cursor >= len(result.rows):
+                continue
+            cost = len(_row_text(result.rows[cursor])) + 1
+            if used + cost > budget:
+                continue
+            kept[index].append(result.rows[cursor])
+            used += cost
+            pointer[index] += 1
+            added = True
+    return [SqlResult(r.label, r.columns, kept[index], r.total) for index, r in enumerate(results) if kept[index]]
+
+
+def _fit_evidence(
+    passages: list[tuple[str, int]], results: list[tuple[SqlResult, int]], budget: int
+) -> tuple[list[str], list[SqlResult]]:
+    final_passages: list[str] = []
+    final_results: list[SqlResult] = []
+    used = 0
+    for tier in (1, 2):
+        fitted = _fit_results([result for result, rank in results if rank == tier], budget - used)
+        final_results.extend(fitted)
+        used += sum(len(_result_render(result)) for result in fitted)
+        for passage, rank in passages:
+            if rank != tier:
+                continue
+            if used + len(passage) > budget:
+                break
+            final_passages.append(passage)
+            used += len(passage)
+    return final_passages, final_results
+
+
+async def _unify(
+    question: str, passages: list[str], results: list[SqlResult]
+) -> tuple[list[tuple[str, int]], list[tuple[SqlResult, int]]]:
+    items = passages + [_result_summary(result) for result in results]
+    tiers = await unify_evidence(question, items)
+    passages_t = [(passages[index], tier) for index, tier in tiers if index < len(passages)]
+    results_t = [(results[index - len(passages)], tier) for index, tier in tiers if index >= len(passages)]
+    return passages_t, results_t
+
+
 async def answer(question: str) -> AsyncIterator[str]:
     queries = await reformulate(question)
     hits = await retrieve(queries)
-    sel_passages, sel_tables = await _select(question, await load_passages(hits.text), await load_tables(hits.tables))
-    blocks = list(starmap(_schema_block, enumerate(sel_tables)))
-    logger.info("schema blocks passed to slm:\n%s", "\n\n".join(blocks))
-    sqls = await write_queries(question, blocks) if sel_tables else []
+    passages = await load_passages(hits.text)
+    candidates = await load_tables(hits.tables)
+    kept_passages = [passages[index] for index in await _filter(question, passages)]
+    kept_tables = [candidates[index] for index in await _filter(question, [_table_rep(table) for table in candidates])]
+    results = await _aggregate(question, kept_tables)
     logger.info(
-        "query %r variants=%d text_hits=%d kept_passages=%d kept_tables=%d queries=%d",
+        "query %r variants=%d text_hits=%d table_hits=%d kept_passages=%d kept_tables=%d results=%d",
         question[:80],
         len(queries),
         len(hits.text),
-        len(sel_passages),
-        len(sel_tables),
-        len(sqls),
+        len(hits.tables),
+        len(kept_passages),
+        len(kept_tables),
+        len(results),
     )
-    logger.info("slm sqls=%s", sqls)
-    results = await _run_all(sel_tables, sqls)
-    passage_budget = max(0, EVIDENCE_BUDGET - sum(len(result) for result in results))
-    final_passages = sel_passages[: _fit(sel_passages, passage_budget)]
+    passages_t, results_t = await _unify(question, kept_passages, results)
+    final_passages, final_results = _fit_evidence(passages_t, results_t, BUDGET)
+    rendered = [_result_render(result) for result in final_results]
     logger.info(
-        "synthesis passages=%d\npassages:\n%s\nresults:\n%s",
+        "synthesis passages=%d results=%d\npassages:\n%s\nresults:\n%s",
         len(final_passages),
+        len(final_results),
         "\n".join(final_passages),
-        "\n---\n".join(results),
+        "\n---\n".join(rendered),
     )
-    async for token in synthesize(question, final_passages, results):
+    async for token in synthesize(question, final_passages, rendered):
         yield token
