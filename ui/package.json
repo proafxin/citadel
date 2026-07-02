@@ -1,0 +1,35 @@
+{
+  "name": "citadel-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "lint": "biome check .",
+    "format": "biome format --write ."
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "^1.1.6",
+    "@tanstack/react-query": "^5.66.0",
+    "@tanstack/react-router": "^1.100.0",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.475.0",
+    "motion": "^12.4.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^9.0.3",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.0.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@tailwindcss/vite": "^4.0.6",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.0.6",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0"
+  }
+}

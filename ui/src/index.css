@@ -1,0 +1,156 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@font-face {
+  font-family: "New Computer Modern";
+  src: local("New Computer Modern"), url("/fonts/NewCMSerif-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "New Computer Modern";
+  src: local("New Computer Modern"), url("/fonts/NewCMSerif-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "New Computer Modern Mono";
+  src: local("New Computer Modern Mono"), url("/fonts/NewCMMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: local("Inter"), url("/fonts/Inter-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --canvas: #f4f7fa;
+  --surface: #ffffff;
+  --surface-2: #e9eff5;
+  --ink: #0a1622;
+  --ink-muted: #51637a;
+  --border: rgba(6, 17, 28, 0.1);
+  --accent: #142841;
+  --accent-hover: #1d3a5c;
+  --accent-ink: #f4f7fa;
+  --ring: rgba(20, 40, 65, 0.35);
+}
+
+.dark {
+  --canvas: #06111c;
+  --surface: #0e1f31;
+  --surface-2: #142841;
+  --ink: #f0f4f8;
+  --ink-muted: #93a6bc;
+  --border: rgba(240, 244, 248, 0.1);
+  --accent: #4c86c6;
+  --accent-hover: #5f96d2;
+  --accent-ink: #06111c;
+  --ring: rgba(76, 134, 198, 0.45);
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-ink: var(--accent-ink);
+  --font-display: "New Computer Modern", "Latin Modern Roman", Cambria, Georgia, serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "New Computer Modern Mono", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  html {
+    color-scheme: light dark;
+  }
+  body {
+    @apply bg-canvas text-ink font-sans antialiased;
+    font-feature-settings: "cv05", "ss01";
+  }
+  ::selection {
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: 9999px;
+  }
+}
+
+.eyebrow {
+  @apply text-[0.68rem] font-medium uppercase tracking-[0.2em] text-ink-muted;
+}
+
+.md {
+  @apply text-sm leading-relaxed text-ink-muted;
+}
+.md > * + * {
+  margin-top: 0.7rem;
+}
+.md h1,
+.md h2,
+.md h3 {
+  @apply font-display text-ink;
+}
+.md h1 {
+  @apply text-xl;
+}
+.md h2 {
+  @apply text-lg;
+}
+.md h3 {
+  @apply text-base;
+}
+.md strong {
+  @apply font-semibold text-ink;
+}
+.md a {
+  @apply text-accent underline underline-offset-2;
+}
+.md ul {
+  @apply list-disc pl-5;
+}
+.md ol {
+  @apply list-decimal pl-5;
+}
+.md code {
+  @apply rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.85em] text-ink;
+}
+.md pre {
+  @apply overflow-x-auto rounded-lg border border-border bg-surface p-3;
+}
+.md pre code {
+  @apply bg-transparent p-0;
+}
+.md table {
+  @apply w-full border-collapse text-sm;
+}
+.md th {
+  @apply border-y border-ink/25 px-3 py-2 text-left font-medium text-ink;
+}
+.md td {
+  @apply border-b border-border px-3 py-2;
+}
+.md blockquote {
+  @apply border-l-2 border-border pl-3 italic;
+}

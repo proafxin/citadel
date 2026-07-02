@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Citadel</title>
+    <script>
+      (() => {
+        try {
+          const stored = localStorage.getItem("citadel-theme");
+          const dark = stored ? stored === "dark" : !window.matchMedia("(prefers-color-scheme: light)").matches;
+          if (dark) document.documentElement.classList.add("dark");
+        } catch {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
