@@ -72,9 +72,9 @@ services:
       - --quantization
       - fp8
       - --gpu-memory-utilization
-      - "0.55"
+      - "0.42"
       - --max-num-seqs
-      - "64"
+      - "48"
       - --max-model-len
       - "32768"
       - --language-model-only
