@@ -10,6 +10,7 @@ from citadel.schemas.table import Column
 from config import get_settings
 
 SLM_TIMEOUT = 180
+SLM_CONCURRENCY = 2  # concurrent ollama SLM calls (heading-leveling); keep <= OLLAMA_NUM_PARALLEL, low so it doesn't starve MinerU OCR
 
 
 @functools.lru_cache
@@ -20,7 +21,7 @@ def _ollama_chat_url() -> str:
 
 @functools.lru_cache
 def _slm_semaphore() -> asyncio.Semaphore:
-    return asyncio.Semaphore(get_settings().slm_concurrency)
+    return asyncio.Semaphore(SLM_CONCURRENCY)
 
 
 def _extract_json(text: str) -> str:

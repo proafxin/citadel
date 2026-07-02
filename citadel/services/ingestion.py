@@ -34,7 +34,7 @@ from citadel.services.html import parse_html
 from citadel.services.library import library_exists
 from citadel.services.tabular import extract_json_tables, read_csv_table
 from citadel.utils import normalize_file
-from config import get_settings
+from config import CPU_THIRD, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +45,17 @@ STREAM_PAGES = "pages"
 STREAM_MERGE = "merge"
 STREAM_TABLES = "tables"
 STREAM_GAPFILL = "gapfill"  # decoupled CPU stage: scanned pages do RapidOCR gap-fill here, off the GPU OCR slot
-STREAM_EMBED = "embed"  # post-ingestion: the dedicated embedding worker (concurrency 1) fills leaf/table vectors
 
 
 MAX_ATTEMPTS = 3
 LAYER_TYPES = ("text", "title")  # filled from the PDF text layer on born-digital pages (skip VLM recognition)
+
+MINERU_MAX_CONNECTIONS = 256  # hard cap on the shared httpx pool → bounds VLM sockets (match server max-num-seqs)
+RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
+DIGITAL_RENDER_DPI = 110  # office→pdf ONLY (provably born-digital): image is layout-only, text from the PDF layer → render small. validate layout still holds; regular pdf stays at RENDER_DPI
+PAGINATE_CONCURRENCY = CPU_THIRD  # pdfium process-pool workers, one dedicated pdfium per process
+RAPIDOCR_CONCURRENCY = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
+GAP_FILL = True  # RapidOCR scanned gap-fill; set to False for clean-image benchmarks (pure VLM)
 
 
 @lru_cache
@@ -66,7 +72,7 @@ def get_mineru_client() -> MinerUClient:
         backend="http-client",
         server_url=get_settings().mineru_base_url,
         use_tqdm=False,
-        max_connections=get_settings().mineru_max_connections,
+        max_connections=MINERU_MAX_CONNECTIONS,
     )
 
 
@@ -79,13 +85,13 @@ def get_rapidocr() -> RapidOCR:
 @lru_cache
 def get_rapidocr_pool() -> ThreadPoolExecutor:
     # bound how many scanned pages run RapidOCR at once so it can't starve the born-digital CPU stages
-    return ThreadPoolExecutor(max_workers=get_settings().rapidocr_concurrency)
+    return ThreadPoolExecutor(max_workers=RAPIDOCR_CONCURRENCY)
 
 
 @lru_cache
 def get_paginate_pool() -> ProcessPoolExecutor:
     # one process per worker → each gets its own pdfium (pdfium is not thread-safe; isolate by process)
-    return ProcessPoolExecutor(max_workers=get_settings().paginate_concurrency)
+    return ProcessPoolExecutor(max_workers=PAGINATE_CONCURRENCY)
 
 
 def make_profile_pool(n: int) -> asyncio.Queue[str]:
@@ -236,8 +242,7 @@ async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
             logger.info("paginate file=%s kind=%s", fields["filename"], kind)
         return
     await redis.set(f"pdf:{doc_id}", data)  # no TTL: the source must outlive OCR; cleaned by cleanup()
-    settings = get_settings()
-    dpi = settings.digital_render_dpi if kind == "office-pdf" else settings.render_dpi
+    dpi = DIGITAL_RENDER_DPI if kind == "office-pdf" else RENDER_DPI
     loop = asyncio.get_running_loop()
     pages = await loop.run_in_executor(get_paginate_pool(), render_pdf_pages, data, dpi)
     await redis.hset(f"doc:{doc_id}", "page_count", len(pages))
@@ -482,7 +487,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         content_blocks = await client.aio_two_step_extract(img)  # VLM reads the scanned text (primary, good quality)
     await ocr_empty_blocks(client, img, content_blocks)  # image blocks (seals/stamps/figures) → VLM-crop, both branches
     blocks = [map_content_block(cb, page_idx) for cb in content_blocks]
-    if not digital and get_settings().gap_fill:
+    if not digital and GAP_FILL:
         # hand the page to the bounded CPU gapfill stage and free the GPU OCR slot now, instead of blocking on RapidOCR
         await get_redis().xadd(
             STREAM_GAPFILL, {"doc_id": doc_id, "page_idx": page_idx, "image": image, "blocks": _dump_blocks(blocks)}
@@ -525,7 +530,6 @@ async def handle_merge(fields: dict[str, str]) -> None:
     if (await redis.hget(f"doc:{doc_id}", "mode") or b"").decode() == "tabular":
         await finalize_tabular(int(doc_id))
         await redis.hset(f"doc:{doc_id}", "state", "done")
-        await redis.xadd(STREAM_EMBED, {"doc_id": doc_id})
         logger.info("merge doc_id=%s state=done tabular", doc_id)
         return
     per_page = await redis.hgetall(f"blocks:{doc_id}")
@@ -537,7 +541,6 @@ async def handle_merge(fields: dict[str, str]) -> None:
     await save_document_tree(int(doc_id), blocks, state)
     await persist_document_tree(int(doc_id))
     await redis.hset(f"doc:{doc_id}", "state", state)
-    await redis.xadd(STREAM_EMBED, {"doc_id": doc_id})
     t0 = float(await redis.hget(f"doc:{doc_id}", "t0") or 0)
     logger.info("merge file=%s state=%s blocks=%d dur=%.1fs", source, state, len(blocks), time.time() - t0)
 

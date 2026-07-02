@@ -5,9 +5,12 @@ from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+from citadel.llm import SLM_CONCURRENCY
 from citadel.services.ingestion import (
     GROUP,
     MAX_ATTEMPTS,
+    PAGINATE_CONCURRENCY,
+    RAPIDOCR_CONCURRENCY,
     STREAM_GAPFILL,
     STREAM_INGEST,
     STREAM_MERGE,
@@ -29,9 +32,13 @@ from citadel.services.ingestion import (
     handle_tabular,
     make_profile_pool,
 )
-from config import configure_logging, get_settings
+from config import CPU_THIRD, configure_logging, get_settings
 
 logger = logging.getLogger(__name__)
+
+NORMALIZE_CONCURRENCY = CPU_THIRD  # one isolated libreoffice profile per worker (per-job soffice)
+OCR_CONCURRENCY = 128  # pages in flight; sockets are capped by MINERU_MAX_CONNECTIONS, so keep this high to feed the server (born-digital makes few requests/page → needs many concurrent pages)
+MERGE_CONCURRENCY = 4  # light assembly
 
 BLOCK_MS = 5000
 RECLAIM_BATCH = 64
@@ -237,39 +244,39 @@ async def _tabular_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> 
 
 # ---- normalize: read `ingest`, convert, write `normalized`. one dedicated libreoffice profile per job
 async def normalize() -> None:
-    cap = _Capacity(get_settings().normalize_concurrency)
+    cap = _Capacity(NORMALIZE_CONCURRENCY)
     profiles = make_profile_pool(cap.limit)
     await _drive(STREAM_INGEST, cap, lambda mid, raw: _spawn(_normalize_job(cap, profiles, mid, raw)))
 
 
 # ---- paginate: read `normalized`, render pages, write `pages`. dedicated pdfium per process-pool worker
 async def paginate() -> None:
-    cap = _Capacity(get_settings().paginate_concurrency)
+    cap = _Capacity(PAGINATE_CONCURRENCY)
     await _drive(STREAM_NORMALIZED, cap, lambda mid, raw: _spawn(_paginate_job(cap, mid, raw)))
 
 
 # ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. one global concurrency bound ----------
 async def ocr() -> None:
     await asyncio.to_thread(get_mineru_client)  # build the http client once now, not lazily mid-OCR
-    cap = _Capacity(get_settings().ocr_concurrency)
+    cap = _Capacity(OCR_CONCURRENCY)
     await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)))
 
 
 # ---- gapfill: read `gapfill`, RapidOCR the lines the VLM dropped, finalize the page. CPU-bound, bounded low ----
 async def gapfill() -> None:
-    cap = _Capacity(get_settings().rapidocr_concurrency)
+    cap = _Capacity(RAPIDOCR_CONCURRENCY)
     await _drive(STREAM_GAPFILL, cap, lambda mid, raw: _spawn(_gapfill_job(cap, mid, raw)))
 
 
 # ---- merge: read `merge`, assemble result.json, clean up. light concurrency ----------------------------
 async def merge() -> None:
-    cap = _Capacity(get_settings().merge_concurrency)
+    cap = _Capacity(MERGE_CONCURRENCY)
     await _drive(STREAM_MERGE, cap, lambda mid, raw: _spawn(_merge_job(cap, mid, raw)))
 
 
 # ---- tabular: read `tables`, SLM structure + describe, write tables. bounded by the SLM slot ------------
 async def tabular() -> None:
-    cap = _Capacity(get_settings().slm_concurrency)
+    cap = _Capacity(SLM_CONCURRENCY)
     await _drive(STREAM_TABLES, cap, lambda mid, raw: _spawn(_tabular_job(cap, mid, raw)))
 
 

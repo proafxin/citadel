@@ -1,35 +1,36 @@
 import asyncio
 import functools
-import json
 import operator
 from dataclasses import dataclass
-from uuid import uuid4
 
 from sqlalchemy import ColumnElement, case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
-from citadel.embedding import embed_texts
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
 from citadel.models.table import Table
-from citadel.services.ingestion import STREAM_EMBED, get_redis
+from config import get_embedder
 
 RRF_K = 60
 CANDIDATES = 50
 TEXT_TOP = 30
 TABLE_TOP = 30
-EMBED_TIMEOUT = 60
+EMBED_BATCH = 32
+
+_EMBED_LOCK = asyncio.Lock()
 
 
-async def embed_query(texts: list[str]) -> list[list[float]]:
-    redis = get_redis()
-    reply = uuid4().hex
-    await redis.xadd(STREAM_EMBED, {"texts": json.dumps(texts), "reply": reply})
-    result = await redis.blpop(f"embed:reply:{reply}", timeout=EMBED_TIMEOUT)
-    if result is None:
-        raise TimeoutError("query embedding timed out")
-    return json.loads(result[1])
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
+    vectors = get_embedder().encode(texts, batch_size=EMBED_BATCH, normalize_embeddings=True, show_progress_bar=False)
+    return [vector.tolist() for vector in vectors]
+
+
+async def _embed(texts: list[str]) -> list[list[float]]:
+    async with _EMBED_LOCK:
+        return await asyncio.to_thread(embed_texts, texts)
 
 
 @dataclass
@@ -109,26 +110,25 @@ async def _channel(
     return _rrf(lists)
 
 
-async def embed_document(doc_id: int) -> None:
+async def embed_pending() -> int:
     async with get_sessionmaker()() as session, session.begin():
         nodes = list(
             await session.scalars(
-                select(ContentNode).where(
-                    ContentNode.document_id == doc_id,
-                    ContentNode.search_text.isnot(None),
-                    ContentNode.embedding.is_(None),
-                )
+                select(ContentNode)
+                .where(ContentNode.search_text.isnot(None), ContentNode.embedding.is_(None))
+                .limit(EMBED_BATCH)
             )
         )
         if not nodes:
-            return
-        vectors = await asyncio.to_thread(embed_texts, [node.search_text or "" for node in nodes])
+            return 0
+        vectors = await _embed([node.search_text or "" for node in nodes])
         for node, vector in zip(nodes, vectors, strict=True):
             node.embedding = vector
+        return len(nodes)
 
 
 async def retrieve(queries: list[str]) -> Retrieval:
-    vectors = await embed_query(queries)
+    vectors = await _embed(queries)
     terms = _terms(queries)
     async with get_sessionmaker()() as session:
         text = await _channel(session, TEXT_CHANNEL, vectors, terms)

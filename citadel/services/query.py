@@ -5,11 +5,12 @@ from collections.abc import AsyncIterator
 from itertools import starmap
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Numeric, Select, Text, TypeEngine, cast, select
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Numeric, Select, Text, cast, select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.types import TypeEngine
 
 from citadel.db import get_sessionmaker
 from citadel.llm import filter_tables, reformulate, synthesize, write_queries
