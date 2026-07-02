@@ -26,3 +26,5 @@ trap 'kill 0' EXIT
 uv run fastapi dev citadel/app.py &
 uv run python citadel/worker.py
 #curl -s -X POST localhost:8000/libraries/1/documents  -F 'files=@/home/masterkenway/Downloads/ocr_input/sales_test.csv' -F 'files=@/home/masterkenway/Downloads/ocr_input/hearing_iconix.docx'
+#args=(); for f in /home/masterkenway/Downloads/ocr_input/*; do [ -f "$f" ] && args+=(-F "files=@$f"); done curl -sS -w '\nHTTP %{http_code}\n' -X POST localhost:8000/libraries/3/documents "${args[@]}"
+

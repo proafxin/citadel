@@ -18,6 +18,11 @@ For each table determine:
 - caption, notes: a caption and any footnote/source/notes lines (from text below the region or comments), else null/empty.
 - description: a one-paragraph summary of what this table contains (its subject and what the rows/columns represent) that someone searching in natural language for this table would recognize.
 
-Respond ONLY with the structured object.
+Always return a JSON object of the form {"tables": [ ... ]} — a LIST, even when the region holds exactly one table (wrap the single table in the list). Every list field (header_rows, notes, columns) must be an array — use [] when empty, NEVER null. section_label_col, title, and caption are null when absent.
+
+Example output for a region holding one two-column table:
+{"tables": [{"col_start": 0, "col_end": 1, "header_rows": [0], "data_start": 1, "data_end": 4, "columns": [{"header": "product", "dtype": "string", "role": "data", "unit": null}, {"header": "price", "dtype": "decimal", "role": "data", "unit": "RM"}], "section_label_col": null, "title": null, "caption": null, "notes": [], "description": "Products and their unit prices in ringgit; one row per product."}]}
+
+Respond ONLY with the JSON object.
 
 Region contents:
