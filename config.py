@@ -10,7 +10,6 @@ from sentence_transformers import SentenceTransformer
 logger = logging.getLogger(__name__)
 
 CPU_THIRD = max((os.cpu_count() or 3) // 3, 1)  # per-worker CPU stages: a third of the cores, at least 1
-CPU_HALF = max((os.cpu_count() or 2) // 2, 1)  # heavier CPU stages (normalize, paginate): half the cores
 
 QWEN_MODEL = "qwen"
 EMBED_MODEL = "BAAI/bge-m3"
