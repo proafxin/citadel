@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from itertools import starmap
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Numeric, Select, Text, cast, select
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Numeric, Select, Text, cast, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION
 from sqlalchemy.exc import SQLAlchemyError
@@ -79,9 +79,9 @@ def _sources(tables: list[TableCand], sql: str) -> list[str]:
 
 async def _run_sql(session: AsyncSession, tables: list[TableCand], sql: str) -> tuple[list[str], list[list]]:
     cte = _cte(tables)
+    await session.execute(text("SET TRANSACTION READ ONLY"))
+    await session.execute(text("SELECT set_config('statement_timeout', :ms, true)"), {"ms": str(STATEMENT_TIMEOUT_MS)})
     connection = await session.connection()
-    await connection.exec_driver_sql("SET TRANSACTION READ ONLY")
-    await connection.exec_driver_sql("SELECT set_config('statement_timeout', %s, true)", (str(STATEMENT_TIMEOUT_MS),))
     result = await connection.exec_driver_sql(cte + " " + sql)
     return list(result.keys()), [list(row) for row in result.fetchall()]
 
