@@ -113,8 +113,8 @@ searchable:
 ## Tables: the integrity boundary
 
 Every table — spreadsheet cells, CSV, JSON, an HTML table, or a table on a scanned page — becomes one
-canonical shape: typed columns (each a header, a type, a role of *data* or *section*, and a unit where one
-applies), the full rows, a sample, a description, its title/caption/notes, and provenance. The full rows
+canonical shape: typed columns (each a header and a type), the full rows, a sample, a description, its
+title/caption/notes, and provenance. The full rows
 are **stored as relational rows and queried by SQL — never embedded.**
 
 The rule that makes it trustworthy: **the model emits structure and descriptions, never data.** It sees
@@ -126,20 +126,20 @@ re-adding a number — so the model is never in a position to touch a value.
 
 Tables are separated **by schema**: a run of rows with consistent columns is one table; a schema change
 starts a new one, so a single source table yields **one or more** canonical tables — a stacked invoice
-splits into its summary block and its line-items. A column whose values group the rows becomes a *section*
-column instead of a new table.
+splits into its summary block and its line-items.
 
 By source:
 
 - **Spreadsheets** — every cell, merge, table object and frozen pane is captured; contiguous regions are
-  found and their structure resolved from anchors.
+  found and their structure resolved from anchors; column names are read from the header rows, not written
+  by the model.
 - **CSV/TSV** — types inferred deterministically; blank headers named from the column's position. No model
   for structure.
 - **JSON** — shredded deterministically into normalized, joinable tables: nested objects flattened by
   dotted key, lists of objects into child tables keyed back to their parent.
 - **Embedded HTML/PDF tables** — the grid is built deterministically (spans expanded), then the same
-  structure step the spreadsheets use resolves multi-row headers, the section column, and schema splits
-  into one or more tables; types inferred from the cells. Tables continuing across consecutive pages are
+  structure step the spreadsheets use resolves multi-row headers and schema splits into one or more
+  tables; types inferred from the cells and column names read from the header rows. Tables continuing across consecutive pages are
   stitched into one first — fragments with a matching column count across a page boundary merged, repeated
   headers dropped, page furniture skipped — so a forty-page table is structured as one.
 
@@ -249,7 +249,7 @@ This stage is where three otherwise-tempting shortcuts are deliberately refused:
 ### Compute — the model writes the query, the database runs it
 
 For each kept table the model writes **one read-only query** against that table's columns, referring to
-columns by position from a map of index to header, type, role and unit. The query runs through a typed
+columns by position from a map of index to header and type. The query runs through a typed
 projection that turns the stored cells into typed, named columns, inside a **read-only sandbox**: SELECT
 only, no other tables, a time limit. The model writes the logic; the database computes every value — the
 same integrity boundary as ingestion, so no figure is ever aggregated or invented by the model.
@@ -294,7 +294,35 @@ rank-based way.
 ## Models
 
 One general model, run without a separate reasoning pass, performs every model step across ingestion and
-query — table structuring and description, column naming, reformulation, filtering, query writing,
+query — table structuring and description, reformulation, filtering, query writing,
 priority, and synthesis. A vision model reads documents that exist only as pixels. A multilingual dense
 representation carries meaning for search. Nothing in the pipeline asks a model to hold data in its head:
 it reads, judges, and writes queries; the database keeps the numbers.
+
+---
+
+## Known limitations
+
+Open gaps in the current build. None corrupts an answer — each is a place the system is weaker than the
+design intends.
+
+- **Key-value forms mis-structured as tables.** The table-structure step assumes a grid: a header band
+  over data rows. A form or invoice laid out as label/value pairs (an applicant form, a cash-sale invoice)
+  has no such band, so header-row detection latches onto the wrong rows — a date, a reference number, or a
+  name becomes a "column header" while the real fields sit in the cells. The table still materializes and
+  never blocks ingestion; it is simply a poor representation of a document that was never really a table.
+  The filter ignores these when they don't bear on a question, so the effect is confined to queries
+  actually about such a form.
+
+- **Stray query on a prose question.** A purely narrative question ("what is this dispute about")
+  sometimes still draws a single read-only query against a loosely related table. It is harmless — the
+  query is single-table and its result is dropped at unify when it turns out not to answer the question —
+  but it spends a model call and a database round-trip it did not need.
+
+- **Filter breadth on broad questions.** The relevance filter is tuned to be precise, which serves pointed
+  questions well but can keep too little for an open "summarize everything about X": the answer is correct
+  but thinner than the corpus could support. This is a prompt-tuning axis, not a structural limit.
+
+- **Host memory bounds CPU-stage concurrency.** The GPU budget is comfortable, but the CPU conversion
+  stages — normalization and pagination — are memory-hungry, and on a 16 GB host they, not the GPU, cap
+  how many documents convert at once. Raising per-stage concurrency needs more host RAM, not more VRAM.

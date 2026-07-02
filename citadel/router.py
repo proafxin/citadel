@@ -3,11 +3,11 @@ from typing import Annotated
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import Response, StreamingResponse
 
-from citadel.schemas.document import DocumentStatus, IngestResponse
+from citadel.schemas.document import DocumentRead, DocumentStatus, IngestResponse
 from citadel.schemas.library import LibraryCreate, LibraryRead
 from citadel.schemas.query import QueryRequest
 from citadel.services.document import get_result
-from citadel.services.ingestion import get_status, submit_documents
+from citadel.services.ingestion import get_status, list_documents, submit_documents
 from citadel.services.library import (
     create_library,
     delete_library,
@@ -52,6 +52,11 @@ async def post_documents(
     files: Annotated[list[UploadFile], File(description="Select multiple files to upload")],
 ) -> IngestResponse:
     return await submit_documents(files, library_id)
+
+
+@router.get("/libraries/{library_id}/documents")
+async def get_documents(library_id: int) -> list[DocumentRead]:
+    return await list_documents(library_id)
 
 
 @router.get("/libraries/{library_id}/tree")

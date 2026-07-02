@@ -18,10 +18,13 @@ from mineru_vl_utils.structs import ContentBlock, ExtractResult
 from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
 from redis.exceptions import ResponseError
+from sqlalchemy import select
 
+from citadel.db import get_sessionmaker
 from citadel.llm import describe_table
+from citadel.models.document import Document
 from citadel.schemas.content import Block
-from citadel.schemas.document import DocumentStatus, IngestResponse
+from citadel.schemas.document import DocumentRead, DocumentStatus, IngestResponse
 from citadel.services.document import (
     create_document,
     finalize_tabular,
@@ -147,6 +150,38 @@ async def get_status(doc_id: int) -> DocumentStatus:
         page_count=int(data["page_count"]) if "page_count" in data else None,
         done_count=int(data["done_count"]) if "done_count" in data else None,
     )
+
+
+async def list_documents(library_id: int) -> list[DocumentRead]:
+    if not await library_exists(library_id):
+        raise HTTPException(status_code=404, detail="unknown library")
+    async with get_sessionmaker()() as session:
+        rows = list(
+            await session.execute(
+                select(Document.id, Document.filename, Document.status)
+                .where(Document.library_id == library_id)
+                .order_by(Document.id)
+            )
+        )
+    redis = get_redis()
+    pipe = redis.pipeline()
+    for doc_id, _filename, _status in rows:
+        pipe.hgetall(f"doc:{doc_id}")
+    live = await pipe.execute()
+    documents: list[DocumentRead] = []
+    for (doc_id, filename, status), raw in zip(rows, live, strict=True):
+        data = {key.decode(): value.decode() for key, value in raw.items()}
+        documents.append(
+            DocumentRead(
+                id=doc_id,
+                filename=filename,
+                status=status,
+                state=data.get("state"),
+                page_count=int(data["page_count"]) if "page_count" in data else None,
+                done_count=int(data["done_count"]) if "done_count" in data else None,
+            )
+        )
+    return documents
 
 
 # ---- normalize stage (CPU / process pool) ---------------------------------------------

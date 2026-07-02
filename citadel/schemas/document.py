@@ -10,3 +10,12 @@ class DocumentStatus(BaseModel):
     filename: str | None = None
     page_count: int | None = None
     done_count: int | None = None
+
+
+class DocumentRead(BaseModel):
+    id: int
+    filename: str
+    status: str
+    state: str | None = None
+    page_count: int | None = None
+    done_count: int | None = None
