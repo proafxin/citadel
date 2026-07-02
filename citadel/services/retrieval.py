@@ -54,6 +54,7 @@ class TableCand:
     columns: list[dict]
     description: str
     metadata: dict
+    sample_rows: list[list]
 
 
 TEXT_CHANNEL = ContentNode.type != "table"
@@ -207,7 +208,14 @@ async def load_tables(content_ids: list[str]) -> list[TableCand]:
             table, filename = found
             out.append(
                 TableCand(
-                    content_id, table.id, filename, table.n_rows, table.columns, table.description, table.table_metadata
+                    content_id,
+                    table.id,
+                    filename,
+                    table.n_rows,
+                    table.columns,
+                    table.description,
+                    table.table_metadata,
+                    table.sample_rows,
                 )
             )
     return out

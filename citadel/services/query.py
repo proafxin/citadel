@@ -50,11 +50,20 @@ def _view_cte(index: int, table: TableCand) -> str:
     return "t" + str(index) + " AS (" + str(compiled) + ")"
 
 
-def _schema(columns: list[dict]) -> str:
+SCHEMA_SAMPLES = 3
+
+
+def _samples(sample_rows: list[list], index: int) -> str:
+    values = [row[index] for row in sample_rows[:SCHEMA_SAMPLES] if index < len(row) and row[index] is not None]
+    return f"  e.g. {', '.join(str(value) for value in values)}" if values else ""
+
+
+def _schema(columns: list[dict], sample_rows: list[list]) -> str:
     lines: list[str] = []
     for index, column in enumerate(columns):
         unit = f" {column['unit']}" if column.get("unit") else ""
-        lines.append(f"c{index}: {column.get('header') or '?'} ({column.get('dtype', 'string')}{unit})")
+        label = f"c{index}: {column.get('header') or '?'} ({column.get('dtype', 'string')}{unit})"
+        lines.append(label + _samples(sample_rows, index))
     return "\n".join(lines)
 
 
@@ -65,7 +74,7 @@ def _render(table: TableCand) -> str:
 
 def _schema_block(index: int, table: TableCand) -> str:
     title = table.metadata.get("title") or table.description[:60]
-    return f"t{index} ({table.filename} — {title}) rows={table.n_rows}\n{_schema(table.columns)}"
+    return f"t{index} ({table.filename} — {title}) rows={table.n_rows}\n{_schema(table.columns, table.sample_rows)}"
 
 
 def _cte(tables: list[TableCand]) -> str:
@@ -111,6 +120,7 @@ async def answer(question: str) -> AsyncIterator[str]:
     keep = await filter_tables(question, [_render(candidate) for candidate in candidates])
     kept = [candidates[index] for index in keep]
     blocks = list(starmap(_schema_block, enumerate(kept)))
+    logger.info("schema blocks passed to slm:\n%s", "\n\n".join(blocks))
     sqls = await write_queries(question, blocks)
     logger.info(
         "query %r variants=%d text_hits=%d table_cands=%d kept=%d queries=%d",
@@ -121,10 +131,17 @@ async def answer(question: str) -> AsyncIterator[str]:
         len(kept),
         len(sqls),
     )
+    logger.info("slm sqls=%s", sqls)
     results: list[str] = []
     for sql in sqls:
         resolved = await _execute(kept, sql)
         if resolved is not None:
             results.append(resolved)
+    logger.info(
+        "synthesis passages=%d\npassages:\n%s\nresults:\n%s",
+        len(passages),
+        "\n".join(passages),
+        "\n---\n".join(results),
+    )
     async for token in synthesize(question, passages, results):
         yield token
