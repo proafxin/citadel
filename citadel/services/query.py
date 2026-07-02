@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import TypeEngine
 
 from citadel.db import get_sessionmaker
-from citadel.llm import reformulate, select_evidence, synthesize, unify_evidence, write_queries
+from citadel.llm import SLM_MAX_TOKENS, reformulate, select_evidence, synthesize, unify_evidence, write_queries
 from citadel.models.table import TableRow
 from citadel.services.retrieval import TableCand, load_passages, load_tables, retrieve
 
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 STATEMENT_TIMEOUT_MS = 3000
 CTX_TOKENS = 32768
-OUT_TOKENS = 4096
+OUT_TOKENS = SLM_MAX_TOKENS
 CHARS_PER_TOKEN = 4
 BUDGET = (CTX_TOKENS - OUT_TOKENS - 2048) * CHARS_PER_TOKEN
 EARLY_STOP_N = 3

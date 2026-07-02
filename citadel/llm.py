@@ -11,7 +11,7 @@ from config import QWEN_MODEL, get_settings
 
 SLM_TIMEOUT = 180
 SLM_CONCURRENCY = 32  # concurrent SLM calls; keep <= qwen --max-num-seqs (bounded by GDN Mamba cache blocks)
-SLM_MAX_TOKENS = 8192
+SLM_MAX_TOKENS = 4096
 
 
 @functools.lru_cache
