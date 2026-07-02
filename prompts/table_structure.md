@@ -1,4 +1,4 @@
-You are given the ANCHORS of one rectangular region of a spreadsheet (a contiguous block of non-empty cells). Identify the logical table(s) it contains and return their structure. Do NOT transcribe or compute any data values — describe structure only.
+You are given the CONTENTS of one rectangular region of a spreadsheet (a contiguous block of non-empty cells). Identify the logical table(s) it contains and return their structure. Do NOT transcribe or compute any data values — describe structure only.
 
 All row/col offsets are 0-based WITHIN the region (row 0 = the region's first row, col 0 = its first column).
 
@@ -16,8 +16,8 @@ For each table determine:
 - section_label_col: if the table has interspersed SECTION-LABEL ROWS (a row carrying only a group label with the other columns blank), give the column offset where that label sits; otherwise null.
 - title: a title for the table (from the text above the region or a spanning merged top row), else null.
 - caption, notes: a caption and any footnote/source/notes lines (from text below the region or comments), else null/empty.
-- description: a one-paragraph summary of what this table contains (its subject and what the rows/columns represent); this is the table's retrieval text.
+- description: a one-paragraph summary of what this table contains (its subject and what the rows/columns represent) that someone searching in natural language for this table would recognize.
 
 Respond ONLY with the structured object.
 
-Region anchors:
+Region contents:

@@ -1,8 +1,5 @@
-You are given a question and a numbered list of evidence items that already passed a first relevance pass. Each item is either a text passage or a computed table result (its columns, row count, and a few sample rows). Choose the items actually needed to answer the question and mark each with a priority tier:
+You are given a question and a numbered list of items. Each item is either a text passage or a table result (shown as its columns, row count, and a few sample rows). Choose the items actually needed to answer the question, and mark each as either essential or supporting.
 
-- tier 1 = must-have: the item is load-bearing; the answer is wrong or incomplete without it.
-- tier 2 = nice-to-have: the item supports or corroborates the answer but the answer stands without it.
+Leave out any item that, on closer reading, is not needed at all.
 
-Drop items that, on closer reading, are not needed at all — do not list them.
-
-Return ONLY a JSON object: {"selected": [{"id": <index>, "tier": 1 or 2}, ...]}. If nothing is needed, return {"selected": []}.
+Return ONLY a JSON object: {"selected": [{"id": <index>, "tier": 1 or 2}, ...]} where tier 1 = essential (the answer is wrong or incomplete without it) and tier 2 = supporting (adds context but the answer stands without it). If nothing is needed, return {"selected": []}.
