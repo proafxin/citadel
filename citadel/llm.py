@@ -4,14 +4,24 @@ import json
 from collections.abc import AsyncIterator
 
 import httpx
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from citadel.prompts import load_prompt
 from citadel.schemas.table import Column
-from config import QWEN_MODEL, get_settings
+from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL, get_settings
 
 SLM_TIMEOUT = 180
 SLM_CONCURRENCY = 32  # concurrent SLM calls; keep <= qwen --max-num-seqs (bounded by GDN Mamba cache blocks)
 SLM_MAX_TOKENS = 4096
+
+
+@functools.lru_cache
+def get_tokenizer() -> PreTrainedTokenizerBase:
+    return AutoTokenizer.from_pretrained(QWEN_HF_REPO, cache_dir=str(QWEN_CACHE_DIR))
+
+
+def count_tokens(text: str) -> int:
+    return len(get_tokenizer().encode(text, add_special_tokens=False))
 
 
 @functools.lru_cache

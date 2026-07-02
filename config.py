@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 CPU_THIRD = max((os.cpu_count() or 3) // 3, 1)  # per-worker CPU stages: a third of the cores, at least 1
 
 QWEN_MODEL = "qwen"
+QWEN_HF_REPO = "Qwen/Qwen3.5-4B"
+QWEN_CACHE_DIR = Path.home() / ".cache" / "citadel-qwen" / "hub"
 EMBED_MODEL = "BAAI/bge-m3"
 EMBED_DEVICE = "cuda"
 

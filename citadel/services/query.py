@@ -14,7 +14,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import TypeEngine
 
 from citadel.db import get_sessionmaker
-from citadel.llm import SLM_MAX_TOKENS, reformulate, select_evidence, synthesize, unify_evidence, write_queries
+from citadel.llm import (
+    SLM_MAX_TOKENS,
+    count_tokens,
+    reformulate,
+    select_evidence,
+    synthesize,
+    unify_evidence,
+    write_queries,
+)
 from citadel.models.table import TableRow
 from citadel.services.retrieval import TableCand, load_passages, load_tables, retrieve
 
@@ -23,8 +31,7 @@ logger = logging.getLogger(__name__)
 STATEMENT_TIMEOUT_MS = 3000
 CTX_TOKENS = 32768
 OUT_TOKENS = SLM_MAX_TOKENS
-CHARS_PER_TOKEN = 4
-BUDGET = (CTX_TOKENS - OUT_TOKENS - 2048) * CHARS_PER_TOKEN
+BUDGET = CTX_TOKENS - OUT_TOKENS - 2048
 EARLY_STOP_N = 3
 SCHEMA_SAMPLES = 3
 _PG = postgresql.dialect()
@@ -138,7 +145,7 @@ async def _aggregate(question: str, tables: list[TableCand]) -> list[SqlResult]:
 def _fit(items: list[str], budget: int) -> int:
     used = 0
     for count, item in enumerate(items):
-        used += len(item)
+        used += count_tokens(item)
         if used > budget:
             return count
     return len(items)
@@ -182,7 +189,7 @@ def _fit_results(results: list[SqlResult], budget: int) -> list[SqlResult]:
     if not results or budget <= 0:
         return []
     kept: list[list[list]] = [[] for _ in results]
-    used = sum(len(f"[{result.label}]\n" + " | ".join(result.columns)) for result in results)
+    used = sum(count_tokens(f"[{result.label}]\n" + " | ".join(result.columns)) for result in results)
     pointer = [0] * len(results)
     added = True
     while added:
@@ -191,7 +198,7 @@ def _fit_results(results: list[SqlResult], budget: int) -> list[SqlResult]:
             cursor = pointer[index]
             if cursor >= len(result.rows):
                 continue
-            cost = len(_row_text(result.rows[cursor])) + 1
+            cost = count_tokens(_row_text(result.rows[cursor])) + 1
             if used + cost > budget:
                 continue
             kept[index].append(result.rows[cursor])
@@ -210,14 +217,15 @@ def _fit_evidence(
     for tier in (1, 2):
         fitted = _fit_results([result for result, rank in results if rank == tier], budget - used)
         final_results.extend(fitted)
-        used += sum(len(_result_render(result)) for result in fitted)
+        used += sum(count_tokens(_result_render(result)) for result in fitted)
         for passage, rank in passages:
             if rank != tier:
                 continue
-            if used + len(passage) > budget:
+            cost = count_tokens(passage)
+            if used + cost > budget:
                 break
             final_passages.append(passage)
-            used += len(passage)
+            used += cost
     return final_passages, final_results
 
 
