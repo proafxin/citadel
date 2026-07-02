@@ -6,22 +6,26 @@ from sqlalchemy import select
 from citadel.db import get_sessionmaker
 from citadel.models.document import Document
 from citadel.models.library import Library
-from citadel.schemas.library import LibraryRead
+from citadel.schemas.library import LibraryRead, Tier
 from citadel.services.document import compress_tree, delete_document_tree, load_document_tree
 
 
-async def create_library(name: str) -> LibraryRead:
+def _to_read(library: Library) -> LibraryRead:
+    return LibraryRead(id=library.id, name=library.name, tier=library.tier)
+
+
+async def create_library(name: str, tier: Tier) -> LibraryRead:
     async with get_sessionmaker()() as session, session.begin():
-        library = Library(name=name)
+        library = Library(name=name, tier=tier)
         session.add(library)
         await session.flush()
-        return LibraryRead(id=library.id, name=library.name)
+        return _to_read(library)
 
 
 async def list_libraries() -> list[LibraryRead]:
     async with get_sessionmaker()() as session:
         rows = await session.scalars(select(Library).order_by(Library.id))
-        return [LibraryRead(id=row.id, name=row.name) for row in rows]
+        return [_to_read(row) for row in rows]
 
 
 async def get_library(library_id: int) -> LibraryRead:
@@ -29,16 +33,17 @@ async def get_library(library_id: int) -> LibraryRead:
         library = await session.get(Library, library_id)
         if library is None:
             raise HTTPException(status_code=404, detail="unknown library")
-        return LibraryRead(id=library.id, name=library.name)
+        return _to_read(library)
 
 
-async def update_library(library_id: int, name: str) -> LibraryRead:
+async def update_library(library_id: int, name: str, tier: Tier) -> LibraryRead:
     async with get_sessionmaker()() as session, session.begin():
         library = await session.get(Library, library_id)
         if library is None:
             raise HTTPException(status_code=404, detail="unknown library")
         library.name = name
-        return LibraryRead(id=library.id, name=library.name)
+        library.tier = tier
+        return _to_read(library)
 
 
 async def delete_library(library_id: int) -> None:

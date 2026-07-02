@@ -23,7 +23,7 @@ router = APIRouter()
 
 @router.post("/libraries")
 async def post_library(body: LibraryCreate) -> LibraryRead:
-    return await create_library(body.name)
+    return await create_library(body.name, body.tier)
 
 
 @router.get("/libraries")
@@ -38,7 +38,7 @@ async def get_one_library(library_id: int) -> LibraryRead:
 
 @router.put("/libraries/{library_id}")
 async def put_library(library_id: int, body: LibraryCreate) -> LibraryRead:
-    return await update_library(library_id, body.name)
+    return await update_library(library_id, body.name, body.tier)
 
 
 @router.delete("/libraries/{library_id}")
@@ -76,4 +76,4 @@ async def get_doc_result(doc_id: int) -> dict:
 
 @router.post("/query")
 async def post_query(body: QueryRequest) -> StreamingResponse:
-    return StreamingResponse(answer(body.question), media_type="text/markdown")
+    return StreamingResponse(answer(body.question, body.library_id), media_type="text/markdown")

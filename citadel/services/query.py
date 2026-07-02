@@ -246,9 +246,9 @@ async def _unify(
     return passages_t, results_t
 
 
-async def answer(question: str) -> AsyncIterator[str]:
+async def answer(question: str, library_id: int) -> AsyncIterator[str]:
     queries = await reformulate(question)
-    hits = await retrieve(queries)
+    hits = await retrieve(queries, library_id)
     passages = await load_passages(hits.text)
     candidates = await load_tables(hits.tables)
     kept_passages = [passages[index] for index in await _filter(question, passages)]

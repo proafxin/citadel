@@ -82,24 +82,30 @@ def _like(term: str) -> str:
     return f"%{escaped}%"
 
 
-async def _dense(session: AsyncSession, channel: ColumnElement[bool], vector: list[float]) -> list[str]:
+async def _dense(
+    session: AsyncSession, channel: ColumnElement[bool], vector: list[float], library_id: int
+) -> list[str]:
     stmt = (
         select(ContentNode.content_id)
-        .where(channel, ContentNode.embedding.isnot(None))
+        .join(Document, ContentNode.document_id == Document.id)
+        .where(channel, Document.library_id == library_id, ContentNode.embedding.isnot(None))
         .order_by(ContentNode.embedding.cosine_distance(vector))
         .limit(CANDIDATES)
     )
     return list(await session.scalars(stmt))
 
 
-async def _sparse(session: AsyncSession, channel: ColumnElement[bool], terms: list[str]) -> list[str]:
+async def _sparse(
+    session: AsyncSession, channel: ColumnElement[bool], terms: list[str], library_id: int
+) -> list[str]:
     if not terms:
         return []
     conditions = [ContentNode.search_text.ilike(_like(term), escape="\\") for term in terms]
     hits = functools.reduce(operator.add, (case((cond, 1), else_=0) for cond in conditions))
     stmt = (
         select(ContentNode.content_id)
-        .where(channel, ContentNode.search_text.isnot(None), or_(*conditions))
+        .join(Document, ContentNode.document_id == Document.id)
+        .where(channel, Document.library_id == library_id, ContentNode.search_text.isnot(None), or_(*conditions))
         .order_by(hits.desc())
         .limit(CANDIDATES)
     )
@@ -115,10 +121,10 @@ def _rrf(rankings: list[list[str]]) -> list[str]:
 
 
 async def _channel(
-    session: AsyncSession, channel: ColumnElement[bool], vectors: list[list[float]], terms: list[str]
+    session: AsyncSession, channel: ColumnElement[bool], vectors: list[list[float]], terms: list[str], library_id: int
 ) -> list[str]:
-    lists = [await _dense(session, channel, vector) for vector in vectors]
-    lists.append(await _sparse(session, channel, terms))
+    lists = [await _dense(session, channel, vector, library_id) for vector in vectors]
+    lists.append(await _sparse(session, channel, terms, library_id))
     return _rrf(lists)
 
 
@@ -157,12 +163,12 @@ async def embed_all_pending() -> int:
         return await _embed_nodes(session, nodes)
 
 
-async def retrieve(queries: list[str]) -> Retrieval:
+async def retrieve(queries: list[str], library_id: int) -> Retrieval:
     vectors = await _embed(queries)
     terms = _terms(queries)
     async with get_sessionmaker()() as session:
-        text = await _channel(session, TEXT_CHANNEL, vectors, terms)
-        tables = await _channel(session, TABLE_CHANNEL, vectors, terms)
+        text = await _channel(session, TEXT_CHANNEL, vectors, terms, library_id)
+        tables = await _channel(session, TABLE_CHANNEL, vectors, terms, library_id)
     return Retrieval(text=text[:CANDIDATES], tables=tables[:CANDIDATES])
 
 
