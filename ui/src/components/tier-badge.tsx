@@ -12,7 +12,7 @@ export function TierBadge({ tier, className }: { tier: string; className?: strin
       )}
     >
       <span className={cn("size-1.5 rounded-full", meta.searchable ? "bg-accent" : "bg-ink-muted")} />
-      {meta.label}
+      {meta.badge}
     </span>
   );
 }

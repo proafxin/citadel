@@ -7,7 +7,7 @@
     <script>
       (() => {
         try {
-          const stored = localStorage.getItem("citadel-theme");
+          const stored = localStorage.getItem("citadel-theme-mode");
           const system = window.matchMedia("(prefers-color-scheme: dark)").matches;
           const dark = stored === "dark" || (stored !== "light" && system);
           if (dark) document.documentElement.classList.add("dark");
