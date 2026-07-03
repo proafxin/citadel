@@ -6,24 +6,10 @@ cd "$(dirname "$0")/.."
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
-docker compose up -d
-
-until docker compose exec -T postgres pg_isready -U "${CITADEL_POSTGRES_USER:-postgres}" >/dev/null 2>&1; do
-    sleep 1
-done
-
-docker compose exec -T postgres psql -U "${CITADEL_POSTGRES_USER:-postgres}" -d "${CITADEL_POSTGRES_DB:-citadel}" -c "CREATE EXTENSION IF NOT EXISTS vector" >/dev/null
-
-until curl -sf "http://localhost:${CITADEL_MINERU_PORT:-8099}/v1/models" >/dev/null 2>&1 \
-    && curl -sf "http://localhost:${CITADEL_QWEN_PORT:-8100}/v1/models" >/dev/null 2>&1; do
-    for name in citadel-mineru citadel-qwen; do
-        if [ "$(docker inspect -f '{{.RestartCount}}' "$name" 2>/dev/null || echo 99)" -ge 3 ]; then
-            echo "ERROR: $name is crash-looping or missing — check: docker compose logs $name" >&2
-            exit 1
-        fi
-    done
-    sleep 2
-done
+if ! docker compose exec -T postgres pg_isready -U "${CITADEL_POSTGRES_USER:-postgres}" >/dev/null 2>&1; then
+    echo "infra not up — run: bash scripts/infra.sh" >&2
+    exit 1
+fi
 
 uv run alembic upgrade head
 
@@ -36,6 +22,6 @@ if [ ! -d ui/node_modules ]; then
 fi
 (cd ui && bun run dev) &
 
-echo "citadel up — UI: http://localhost:5173   API: http://localhost:8000"
+echo "app up — UI: http://localhost:5173   API: http://localhost:8000   (Ctrl+C stops app/worker/UI; infra stays up)"
 
 uv run python citadel/worker.py
