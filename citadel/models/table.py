@@ -8,8 +8,8 @@ from citadel.models.base import Base
 class Table(Base):
     __tablename__ = "tables"
 
-    content_id: Mapped[str] = mapped_column(ForeignKey("content.content_id"), unique=True)
-    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
+    content_id: Mapped[str] = mapped_column(ForeignKey("content.content_id", ondelete="CASCADE"), unique=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
     columns: Mapped[list[dict]] = mapped_column(JSONB)
     table_metadata: Mapped[dict] = mapped_column(JSONB)
     description: Mapped[str] = mapped_column(Text)
@@ -21,6 +21,6 @@ class Table(Base):
 class TableRow(Base):
     __tablename__ = "table_rows"
 
-    table_id: Mapped[int] = mapped_column(ForeignKey("tables.id"), index=True)
+    table_id: Mapped[int] = mapped_column(ForeignKey("tables.id", ondelete="CASCADE"), index=True)
     row_idx: Mapped[int]
     values: Mapped[list] = mapped_column(JSONB)

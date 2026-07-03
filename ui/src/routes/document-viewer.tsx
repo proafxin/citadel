@@ -142,7 +142,7 @@ export function DocumentViewerPage() {
       </Link>
 
       <div className="mt-4">
-        <Eyebrow>Extracted document</Eyebrow>
+        <Eyebrow>Document</Eyebrow>
         <h1 className="mt-2 font-display text-3xl tracking-tight text-ink">{tree?.filename ?? "…"}</h1>
       </div>
 

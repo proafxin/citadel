@@ -26,7 +26,7 @@ from citadel.models.document import Document
 from citadel.schemas.content import Block
 from citadel.schemas.document import DocumentRead, DocumentStatus, IngestResponse
 from citadel.services.document import (
-    create_document,
+    create_documents,
     finalize_tabular,
     notify_embed,
     persist_document_tree,
@@ -108,23 +108,22 @@ def make_profile_pool(n: int) -> asyncio.Queue[str]:
 # ---- orchestrator side ----------------------------------------------------------------
 
 
-async def submit_document(data: bytes, filename: str, library_id: int) -> int:
-    doc_id = await create_document(library_id, filename)
-    redis = get_redis()
-    await redis.hset(
-        f"doc:{doc_id}",
-        mapping={"state": "queued", "filename": filename, "library_id": library_id, "done_count": 0, "t0": time.time()},
-    )
-    await redis.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": filename, "data": data})
-    logger.info("ingest file=%s doc_id=%s", filename, doc_id)
-    return doc_id
-
-
 async def submit_documents(files: list[UploadFile], library_id: int) -> IngestResponse:
     if not await library_exists(library_id):
         raise HTTPException(status_code=404, detail="unknown library")
-    await get_redis().incrby(f"inflight:{library_id}", len(files))
-    doc_ids = [await submit_document(await file.read(), file.filename or "upload", library_id) for file in files]
+    payloads = [(await file.read(), file.filename or "upload") for file in files]
+    doc_ids = await create_documents(library_id, [name for _data, name in payloads])
+    now = time.time()
+    pipe = get_redis().pipeline(transaction=False)
+    pipe.incrby(f"inflight:{library_id}", len(files))
+    for doc_id, (data, name) in zip(doc_ids, payloads, strict=True):
+        pipe.hset(
+            f"doc:{doc_id}",
+            mapping={"state": "queued", "filename": name, "library_id": library_id, "done_count": 0, "t0": now},
+        )
+        pipe.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": name, "data": data})
+    await pipe.execute()
+    logger.info("ingest library=%s files=%d doc_ids=%s", library_id, len(files), doc_ids)
     return IngestResponse(doc_ids=doc_ids)
 
 

@@ -34,6 +34,14 @@ async def create_document(library_id: int, filename: str) -> int:
         return document.id
 
 
+async def create_documents(library_id: int, filenames: list[str]) -> list[int]:
+    async with get_sessionmaker()() as session, session.begin():
+        documents = [Document(library_id=library_id, filename=name, status="pending") for name in filenames]
+        session.add_all(documents)
+        await session.flush()
+        return [document.id for document in documents]
+
+
 async def notify_embed(library_id: int) -> None:
     async with get_sessionmaker()() as session, session.begin():
         await session.execute(text("SELECT pg_notify('embed', :library)"), {"library": str(library_id)})

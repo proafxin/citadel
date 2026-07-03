@@ -1,23 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { ArrowLeft, Download, MessageSquare } from "lucide-react";
-import { DocumentRow, isInFlight } from "@/components/document-row";
-import { DocumentUpload } from "@/components/document-upload";
+import { DocumentsPanel } from "@/components/documents-panel";
 import { Eyebrow } from "@/components/eyebrow";
 import { TierBadge } from "@/components/tier-badge";
 import { Card } from "@/components/ui/card";
-import { getLibrary, listDocuments, treeDownloadUrl } from "@/lib/api";
+import { getLibrary, treeDownloadUrl } from "@/lib/api";
 import { tierMeta } from "@/lib/tiers";
 
 export function LibraryDetailPage() {
   const { libraryId } = useParams({ from: "/library/$libraryId" });
   const id = Number(libraryId);
   const libQ = useQuery({ queryKey: ["library", id], queryFn: () => getLibrary(id) });
-  const docsQ = useQuery({
-    queryKey: ["documents", id],
-    queryFn: () => listDocuments(id),
-    refetchInterval: (query) => (query.state.data?.some(isInFlight) ? 1_500 : false),
-  });
   const meta = libQ.data ? tierMeta(libQ.data.tier) : null;
 
   return (
@@ -39,29 +33,12 @@ export function LibraryDetailPage() {
           href={treeDownloadUrl(id)}
           className="inline-flex h-10 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium text-ink transition-colors hover:bg-surface-2"
         >
-          <Download size={16} /> Export tree
+          <Download size={16} /> Export
         </a>
       </div>
 
       <div className="mt-8 grid gap-6 lg:grid-cols-[1.6fr_1fr]">
-        <section>
-          <Eyebrow>Documents</Eyebrow>
-          <div className="mt-3">
-            <DocumentUpload libraryId={id} />
-          </div>
-          <div className="mt-3 space-y-2">
-            {docsQ.isLoading ? <p className="text-sm text-ink-muted">Loading…</p> : null}
-            {docsQ.isError ? (
-              <Card className="border-red-500/30 p-5 text-sm text-red-400">{(docsQ.error as Error).message}</Card>
-            ) : null}
-            {docsQ.data && docsQ.data.length === 0 ? (
-              <Card className="p-6 text-sm text-ink-muted">No documents yet.</Card>
-            ) : null}
-            {docsQ.data?.map((doc) => (
-              <DocumentRow key={doc.id} doc={doc} libraryId={id} />
-            ))}
-          </div>
-        </section>
+        <DocumentsPanel libraryId={id} />
 
         <aside>
           <Eyebrow>Ask</Eyebrow>

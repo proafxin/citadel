@@ -1,12 +1,21 @@
 import type { DocumentItem } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
+const STATE_LABEL: Record<string, string> = {
+  queued: "Queued",
+  pending: "Queued",
+  normalizing: "Processing",
+  paginating: "Processing",
+  done: "Ready",
+  failed: "Failed",
+};
+
 export function StatusBadge({ doc }: { doc: DocumentItem }) {
-  const label = doc.state ?? doc.status ?? "unknown";
-  const raw = label.toLowerCase();
+  const raw = (doc.state ?? doc.status ?? "").toLowerCase();
   const done = raw === "done";
   const failed = raw.includes("fail");
-  const progress =
+  const label = done ? "Ready" : failed ? "Failed" : (STATE_LABEL[raw] ?? "Processing");
+  const count =
     !done && !failed && doc.page_count && doc.page_count > 0 ? `${doc.done_count ?? 0}/${doc.page_count}` : null;
 
   return (
@@ -27,7 +36,7 @@ export function StatusBadge({ doc }: { doc: DocumentItem }) {
         )}
       />
       {label}
-      {progress ? ` · ${progress}` : ""}
+      {count ? ` · ${count}` : ""}
     </span>
   );
 }

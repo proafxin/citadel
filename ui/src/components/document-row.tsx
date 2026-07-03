@@ -13,6 +13,10 @@ export function isInFlight(doc: DocumentItem): boolean {
   return s !== "done" && !s.includes("fail");
 }
 
+export function isDone(doc: DocumentItem): boolean {
+  return state(doc) === "done";
+}
+
 export function DocumentRow({ doc, libraryId }: { doc: DocumentItem; libraryId: number }) {
   const active = isInFlight(doc);
   const done = state(doc) === "done";
@@ -25,14 +29,18 @@ export function DocumentRow({ doc, libraryId }: { doc: DocumentItem; libraryId: 
         <span className="truncate font-mono text-sm text-ink">{doc.filename}</span>
         <StatusBadge doc={doc} />
       </div>
-      {active && total > 0 ? (
+      {active ? (
         <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-surface-2">
-          <motion.div
-            className="h-full rounded-full bg-accent"
-            initial={false}
-            animate={{ width: `${fraction * 100}%` }}
-            transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-          />
+          {total > 0 ? (
+            <motion.div
+              className="h-full rounded-full bg-accent"
+              initial={false}
+              animate={{ width: `${fraction * 100}%` }}
+              transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+            />
+          ) : (
+            <div className="h-full w-1/3 animate-pulse rounded-full bg-accent/60" />
+          )}
         </div>
       ) : null}
     </>
