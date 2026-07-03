@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 
 import torch
-from sqlalchemy import ColumnElement, case, or_, select
+from sqlalchemy import ColumnElement, case, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
@@ -157,6 +157,11 @@ async def embed_library(library_id: int) -> int:
             )
         )
         embedded = await _embed_nodes(session, nodes)
+        await session.execute(
+            update(Document)
+            .where(Document.library_id == library_id, Document.status == "ingested")
+            .values(status="embedded")
+        )
     await redis.hset(f"embed:{library_id}", mapping={"t_done": time.time(), "nodes": embedded})
     return embedded
 

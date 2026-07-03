@@ -588,15 +588,15 @@ async def handle_merge(fields: dict[str, str]) -> None:
     elapsed = now - float(await redis.hget(f"doc:{doc_id}", "t_proc") or now)
     if (await redis.hget(f"doc:{doc_id}", "mode") or b"").decode() == "tabular":
         await finalize_tabular(int(doc_id), elapsed)
-        await redis.hset(f"doc:{doc_id}", mapping={"state": "done", "t_done": now})
-        logger.info("merge doc_id=%s state=done tabular", doc_id)
+        await redis.hset(f"doc:{doc_id}", mapping={"state": "ingested", "t_done": now})
+        logger.info("merge doc_id=%s state=ingested tabular", doc_id)
         return
     per_page = await redis.hgetall(f"blocks:{doc_id}")
     blocks: list[Block] = []
     for page_idx in sorted(int(k) for k in per_page):
         blocks.extend(Block(**raw) for raw in json.loads(per_page[str(page_idx).encode()]))
     source = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
-    state = "partial" if any(b.type == "error" for b in blocks) else "done"
+    state = "partial" if any(b.type == "error" for b in blocks) else "ingested"
     await save_document_tree(int(doc_id), blocks, state, elapsed)
     await persist_document_tree(int(doc_id))
     await redis.hset(f"doc:{doc_id}", mapping={"state": state, "t_done": now})

@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { ArrowLeft, Download, MessageSquare } from "lucide-react";
-import { isInFlight } from "@/components/document-row";
+import { isIngested, isPending } from "@/components/document-row";
 import { DocumentsPanel } from "@/components/documents-panel";
 import { Eyebrow } from "@/components/eyebrow";
 import { TierBadge } from "@/components/tier-badge";
@@ -15,8 +15,10 @@ export function LibraryDetailPage() {
   const libQ = useQuery({ queryKey: ["library", id], queryFn: () => getLibrary(id) });
   const docsQ = useQuery({ queryKey: ["documents", id], queryFn: () => listDocuments(id) });
   const meta = libQ.data ? tierMeta(libQ.data.tier) : null;
+  const searchable = meta?.searchable ?? false;
   const docs = docsQ.data ?? [];
-  const ingested = docs.length > 0 && !docs.some(isInFlight);
+  const ingested = docs.length > 0 && !docs.some(isPending);
+  const ready = searchable && docs.length > 0 && !docs.some((doc) => isPending(doc) || isIngested(doc));
 
   return (
     <div>
@@ -50,7 +52,7 @@ export function LibraryDetailPage() {
         <div>
           <div className="flex h-6 items-center">{libQ.data ? <TierBadge tier={libQ.data.tier} /> : null}</div>
           <div className="mt-4">
-            <DocumentsPanel libraryId={id} />
+            <DocumentsPanel libraryId={id} searchable={searchable} />
           </div>
         </div>
 
@@ -61,7 +63,7 @@ export function LibraryDetailPage() {
           <Card className="mt-4 p-6 text-sm text-ink-muted">
             {!meta?.searchable ? (
               <p>Search is a Tier 2 feature. Upgrade to enable chat.</p>
-            ) : ingested ? (
+            ) : ready ? (
               <Link
                 to="/library/$libraryId/ask"
                 params={{ libraryId: String(id) }}

@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "motion/react";
 import { useState } from "react";
-import { DocumentRow, isInFlight } from "@/components/document-row";
+import { DocumentRow, isPending } from "@/components/document-row";
 import { DocumentUpload } from "@/components/document-upload";
 import { Eyebrow } from "@/components/eyebrow";
 import { Card } from "@/components/ui/card";
@@ -9,7 +9,7 @@ import { type DocumentItem, listDocuments } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatDuration } from "@/lib/format";
 
-type Bucket = "processing" | "queued" | "ready" | "failed";
+type Bucket = "processing" | "ready" | "failed" | "skipped";
 type Filter = "all" | Bucket;
 
 const PAGE_SIZE = 10;
@@ -18,37 +18,48 @@ const LIVE_CAP = 5;
 const PILLS: { key: Filter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "processing", label: "Processing" },
-  { key: "queued", label: "Queued" },
   { key: "ready", label: "Ready" },
   { key: "failed", label: "Failed" },
+  { key: "skipped", label: "Skipped" },
 ];
 
 function bucketOf(doc: DocumentItem): Bucket {
-  const s = (doc.state ?? doc.status ?? "").toLowerCase();
-  if (s === "done") return "ready";
-  if (s.includes("fail")) return "failed";
-  if (s === "queued" || s === "pending" || s === "") return "queued";
-  return "processing";
+  switch (doc.status) {
+    case "failed":
+      return "failed";
+    case "skipped":
+      return "skipped";
+    case "ingested":
+    case "embedded":
+    case "partial":
+      return "ready";
+    default:
+      return "processing";
+  }
 }
 
-export function DocumentsPanel({ libraryId }: { libraryId: number }) {
+function hasActive(docs: DocumentItem[], searchable: boolean): boolean {
+  return docs.some((doc) => doc.status === "pending" || (searchable && doc.status === "ingested"));
+}
+
+export function DocumentsPanel({ libraryId, searchable }: { libraryId: number; searchable: boolean }) {
   const [filter, setFilter] = useState<Filter>("all");
   const [page, setPage] = useState(0);
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["documents", libraryId],
     queryFn: () => listDocuments(libraryId),
-    refetchInterval: (query) => (query.state.data?.some(isInFlight) ? 2_000 : false),
+    refetchInterval: (query) => (hasActive(query.state.data ?? [], searchable) ? 2_000 : false),
   });
 
   const docs = data ?? [];
-  const counts: Record<Bucket, number> = { processing: 0, queued: 0, ready: 0, failed: 0 };
+  const counts: Record<Bucket, number> = { processing: 0, ready: 0, failed: 0, skipped: 0 };
   for (const doc of docs) counts[bucketOf(doc)] += 1;
   const totalPages = docs.reduce((sum, doc) => sum + (doc.page_count ?? 0), 0);
   const donePages = docs.reduce((sum, doc) => sum + (doc.done_count ?? 0), 0);
   const overall = totalPages > 0 ? donePages / totalPages : docs.length > 0 ? counts.ready / docs.length : 0;
   const totalElapsed = docs.reduce((sum, doc) => sum + (doc.elapsed ?? 0), 0);
 
-  const live = docs.filter((doc) => bucketOf(doc) === "processing").slice(0, LIVE_CAP);
+  const live = docs.filter(isPending).slice(0, LIVE_CAP);
   const showStrip = live.length > 0 && filter !== "processing";
   const filtered = filter === "all" ? docs : docs.filter((doc) => bucketOf(doc) === filter);
   const lastPage = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));

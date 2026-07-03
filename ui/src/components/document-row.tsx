@@ -5,22 +5,19 @@ import { Card } from "@/components/ui/card";
 import type { DocumentItem } from "@/lib/api";
 import { formatDuration } from "@/lib/format";
 
-function state(doc: DocumentItem): string {
-  return (doc.state ?? doc.status ?? "").toLowerCase();
+const VIEWABLE = new Set(["ingested", "embedded", "partial"]);
+
+export function isPending(doc: DocumentItem): boolean {
+  return doc.status === "pending";
 }
 
-export function isInFlight(doc: DocumentItem): boolean {
-  const s = state(doc);
-  return s !== "done" && !s.includes("fail");
-}
-
-export function isDone(doc: DocumentItem): boolean {
-  return state(doc) === "done";
+export function isIngested(doc: DocumentItem): boolean {
+  return doc.status === "ingested";
 }
 
 export function DocumentRow({ doc, libraryId }: { doc: DocumentItem; libraryId: number }) {
-  const active = isInFlight(doc);
-  const done = state(doc) === "done";
+  const active = isPending(doc);
+  const viewable = VIEWABLE.has(doc.status);
   const total = doc.page_count ?? 0;
   const fraction = active && total > 0 ? Math.min(1, (doc.done_count ?? 0) / total) : 0;
 
@@ -52,7 +49,7 @@ export function DocumentRow({ doc, libraryId }: { doc: DocumentItem; libraryId: 
     </>
   );
 
-  if (done) {
+  if (viewable) {
     return (
       <Link
         to="/library/$libraryId/document/$docId"

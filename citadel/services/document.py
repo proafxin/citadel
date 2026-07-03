@@ -231,7 +231,7 @@ async def save_sheet_tables(
 async def finalize_tabular(doc_id: int, ingest_seconds: float | None) -> None:
     async with get_sessionmaker()() as session, session.begin():
         document = await session.get_one(Document, doc_id)
-        document.status = "done"
+        document.status = "ingested"
         document.ingest_seconds = ingest_seconds
         await _maybe_notify_embed(session, document.library_id)
     await persist_document_tree(doc_id)
