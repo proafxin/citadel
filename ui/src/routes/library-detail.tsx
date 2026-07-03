@@ -1,19 +1,27 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { ArrowLeft, Download, MessageSquare } from "lucide-react";
+import { ArrowLeft, ArrowUp, Download, MessageSquare } from "lucide-react";
 import { isIngested, isPending } from "@/components/document-row";
 import { DocumentsPanel } from "@/components/documents-panel";
 import { Eyebrow } from "@/components/eyebrow";
 import { TierBadge } from "@/components/tier-badge";
 import { Card } from "@/components/ui/card";
-import { getLibrary, listDocuments, treeDownloadUrl } from "@/lib/api";
+import { getLibrary, listDocuments, treeDownloadUrl, updateLibrary } from "@/lib/api";
 import { tierMeta } from "@/lib/tiers";
 
 export function LibraryDetailPage() {
   const { libraryId } = useParams({ from: "/library/$libraryId" });
   const id = Number(libraryId);
+  const qc = useQueryClient();
   const libQ = useQuery({ queryKey: ["library", id], queryFn: () => getLibrary(id) });
   const docsQ = useQuery({ queryKey: ["documents", id], queryFn: () => listDocuments(id) });
+  const upgrade = useMutation({
+    mutationFn: () => updateLibrary(id, libQ.data?.name ?? "", "tier_2"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["library", id] });
+      qc.invalidateQueries({ queryKey: ["documents", id] });
+    },
+  });
   const meta = libQ.data ? tierMeta(libQ.data.tier) : null;
   const searchable = meta?.searchable ?? false;
   const docs = docsQ.data ?? [];
@@ -62,7 +70,17 @@ export function LibraryDetailPage() {
           </div>
           <Card className="mt-4 p-6 text-sm text-ink-muted">
             {!meta?.searchable ? (
-              <p>Search is a Tier 2 feature. Upgrade to enable chat.</p>
+              <div>
+                <p>Search is a Tier 2 feature.</p>
+                <button
+                  type="button"
+                  onClick={() => upgrade.mutate()}
+                  disabled={upgrade.isPending || !libQ.data}
+                  className="mt-4 inline-flex h-10 items-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-accent-ink transition-colors hover:bg-accent-hover disabled:opacity-50"
+                >
+                  <ArrowUp size={16} /> {upgrade.isPending ? "Upgrading…" : "Upgrade to Search"}
+                </button>
+              </div>
             ) : ready ? (
               <Link
                 to="/library/$libraryId/ask"

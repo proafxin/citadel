@@ -23,6 +23,13 @@ const PILLS: { key: Filter; label: string }[] = [
   { key: "skipped", label: "Skipped" },
 ];
 
+const DOT: Record<Bucket, string> = {
+  processing: "bg-accent",
+  ready: "bg-emerald-500",
+  failed: "bg-red-400",
+  skipped: "bg-ink-muted",
+};
+
 function bucketOf(doc: DocumentItem): Bucket {
   switch (doc.status) {
     case "failed":
@@ -97,10 +104,11 @@ export function DocumentsPanel({ libraryId, searchable }: { libraryId: number; s
                 type="button"
                 onClick={() => pick(pill.key)}
                 className={cn(
-                  "rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
-                  filter === pill.key ? "bg-accent text-accent-ink" : "bg-surface-2 text-ink-muted hover:text-ink",
+                  "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
+                  filter === pill.key ? "bg-surface-2 text-ink" : "text-ink-muted hover:bg-surface-2 hover:text-ink",
                 )}
               >
+                {pill.key !== "all" ? <span className={cn("size-1.5 rounded-full", DOT[pill.key])} /> : null}
                 {pill.label} {pill.key === "all" ? docs.length : counts[pill.key]}
               </button>
             ))}
