@@ -1,15 +1,18 @@
 # Fonts
 
-Drop these self-hosted `.woff2` files here to activate the signature typography.
-Until they exist, the UI falls back gracefully (system serif / sans / mono), so it
-still runs and looks clean without them.
+The whole UI is set in **New Computer Modern** (Book weight — a touch heavier than
+Regular, which reads better on screen). Files here are referenced by `src/index.css`.
+Until they exist the UI falls back to a serif stack (Latin Modern Roman / Cambria / Georgia).
 
-Expected files (referenced by `src/index.css`):
+In use:
 
-- `NewCMSerif-Regular.woff2` — New Computer Modern serif (display / headings), 400
-- `NewCMSerif-Bold.woff2` — New Computer Modern serif, 700
-- `NewCMMono-Regular.woff2` — New Computer Modern mono (tabular data / ids)
-- `Inter-Variable.woff2` — Inter variable (body / UI)
+- `NewCM10-Book.otf` — serif, 400 (body + display)
+- `NewCM10-BookItalic.otf` — serif italic, 400
+- `NewCMMono10-Book.otf` — mono (tabular data / ids)
 
-New Computer Modern is published by GUST under the GUST Font License (free to embed).
-Convert the upstream OTFs to `woff2`, or grab a prebuilt web build, and place them here.
+Optional, for crisp (non-synthesized) bold at weight 700:
+
+- `NewCM10-Bold.otf` — the `700` `@font-face` already points at it; without it, bold is faux-bolded from Book.
+
+`License.txt` (GUST Font License) is kept here to satisfy the redistribution condition.
+OTF works fine for the web; convert to `woff2` later for smaller/faster assets.
