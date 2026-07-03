@@ -1,6 +1,7 @@
 import asyncio
 import functools
 import operator
+import time
 from dataclasses import dataclass
 
 import torch
@@ -10,8 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from citadel.db import get_sessionmaker
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
+from citadel.models.library import Library
 from citadel.models.table import Table
+from citadel.services.ingestion import get_redis
 from config import get_embedder
+
+EMBED_TTL = 86_400
 
 RRF_K = 60
 CANDIDATES = 1000
@@ -136,6 +141,9 @@ async def _embed_nodes(session: AsyncSession, nodes: list[ContentNode]) -> int:
 
 
 async def embed_library(library_id: int) -> int:
+    redis = get_redis()
+    await redis.hset(f"embed:{library_id}", "t_start", time.time())
+    await redis.expire(f"embed:{library_id}", EMBED_TTL)
     async with get_sessionmaker()() as session, session.begin():
         nodes = list(
             await session.scalars(
@@ -148,14 +156,23 @@ async def embed_library(library_id: int) -> int:
                 )
             )
         )
-        return await _embed_nodes(session, nodes)
+        embedded = await _embed_nodes(session, nodes)
+    await redis.hset(f"embed:{library_id}", mapping={"t_done": time.time(), "nodes": embedded})
+    return embedded
 
 
 async def embed_all_pending() -> int:
     async with get_sessionmaker()() as session, session.begin():
         nodes = list(
             await session.scalars(
-                select(ContentNode).where(ContentNode.search_text.isnot(None), ContentNode.embedding.is_(None))
+                select(ContentNode)
+                .join(Document, ContentNode.document_id == Document.id)
+                .join(Library, Document.library_id == Library.id)
+                .where(
+                    ContentNode.search_text.isnot(None),
+                    ContentNode.embedding.is_(None),
+                    Library.tier == "tier_2",
+                )
             )
         )
         return await _embed_nodes(session, nodes)

@@ -7,7 +7,7 @@ from citadel.db import get_sessionmaker
 from citadel.models.document import Document
 from citadel.models.library import Library
 from citadel.schemas.library import LibraryRead, Tier
-from citadel.services.document import compress_tree, delete_document_tree, load_document_tree
+from citadel.services.document import compress_tree, delete_document_tree, load_document_tree, notify_embed
 
 
 def _to_read(library: Library) -> LibraryRead:
@@ -41,9 +41,13 @@ async def update_library(library_id: int, name: str, tier: Tier) -> LibraryRead:
         library = await session.get(Library, library_id)
         if library is None:
             raise HTTPException(status_code=404, detail="unknown library")
+        upgraded = library.tier != "tier_2" and tier == "tier_2"
         library.name = name
         library.tier = tier
-        return _to_read(library)
+        result = _to_read(library)
+    if upgraded:
+        await notify_embed(library_id)
+    return result
 
 
 async def delete_library(library_id: int) -> None:

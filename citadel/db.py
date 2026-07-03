@@ -5,9 +5,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from config import get_settings
 
 
+POOL_SIZE = 20
+MAX_OVERFLOW = 20
+
+
 @lru_cache
 def get_engine() -> AsyncEngine:
-    return create_async_engine(get_settings().database_url)
+    return create_async_engine(get_settings().database_url, pool_size=POOL_SIZE, max_overflow=MAX_OVERFLOW)
 
 
 @lru_cache

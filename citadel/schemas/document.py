@@ -19,3 +19,4 @@ class DocumentRead(BaseModel):
     state: str | None = None
     page_count: int | None = None
     done_count: int | None = None
+    elapsed: float | None = None

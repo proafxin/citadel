@@ -3,7 +3,7 @@ import json
 
 import zstandard
 from fastapi import HTTPException
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
@@ -47,6 +47,17 @@ async def notify_embed(library_id: int) -> None:
         await session.execute(text("SELECT pg_notify('embed', :library)"), {"library": str(library_id)})
 
 
+async def _maybe_notify_embed(session: AsyncSession, library_id: int) -> None:
+    library = await session.get(Library, library_id)
+    if library is None or library.tier != "tier_2":
+        return
+    pending = await session.scalar(
+        select(func.count()).select_from(Document).where(Document.library_id == library_id, Document.status == "pending")
+    )
+    if pending == 0:
+        await session.execute(text("SELECT pg_notify('embed', :library)"), {"library": str(library_id)})
+
+
 def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:
     match spec.kind:
         case "code":
@@ -86,13 +97,16 @@ async def _add_table(session: AsyncSession, content_id: str, doc_id: int, table:
     session.add_all(TableRow(table_id=row.id, row_idx=index, values=values) for index, values in enumerate(table.rows))
 
 
-async def save_document_tree(doc_id: int, blocks: list[Block], status: str) -> None:
+async def save_document_tree(doc_id: int, blocks: list[Block], status: str, ingest_seconds: float | None) -> None:
     async with get_sessionmaker()() as session:
         # idempotent merge: a redelivered/retried merge (worker died after commit, or persist failed post-commit)
         # finds the tree already written and only refreshes status — never re-inserts duplicate content_ids
         if await session.scalar(select(ContentNode.id).where(ContentNode.document_id == doc_id).limit(1)) is not None:
             async with session.begin():
-                (await session.get_one(Document, doc_id)).status = status
+                document = await session.get_one(Document, doc_id)
+                document.status = status
+                document.ingest_seconds = ingest_seconds
+                await _maybe_notify_embed(session, document.library_id)
             return
         document = await session.get_one(Document, doc_id)
         library = await session.get_one(Library, document.library_id)
@@ -106,6 +120,7 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: str) -> N
     async with get_sessionmaker()() as session, session.begin():
         document = await session.get_one(Document, doc_id)
         document.status = status
+        document.ingest_seconds = ingest_seconds
         id_map: dict[str, int] = {}
         for spec in specs:
             parent_id = id_map[spec.parent_content_id] if spec.parent_content_id is not None else None
@@ -143,6 +158,7 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: str) -> N
                 await _add_table(session, spec.content_id, doc_id, table)
             elif spec.kind != "heading":
                 _add_detail(session, spec, doc_id)
+        await _maybe_notify_embed(session, library_id)
 
 
 async def save_sheet_tables(
@@ -212,11 +228,21 @@ async def save_sheet_tables(
             )
 
 
-async def finalize_tabular(doc_id: int) -> None:
+async def finalize_tabular(doc_id: int, ingest_seconds: float | None) -> None:
     async with get_sessionmaker()() as session, session.begin():
         document = await session.get_one(Document, doc_id)
         document.status = "done"
+        document.ingest_seconds = ingest_seconds
+        await _maybe_notify_embed(session, document.library_id)
     await persist_document_tree(doc_id)
+
+
+async def mark_document(doc_id: int, status: str, ingest_seconds: float | None) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        document = await session.get_one(Document, doc_id)
+        document.status = status
+        document.ingest_seconds = ingest_seconds
+        await _maybe_notify_embed(session, document.library_id)
 
 
 async def _load_payloads(session: AsyncSession, ids: list[str]) -> dict[str, dict]:

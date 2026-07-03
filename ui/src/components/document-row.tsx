@@ -3,6 +3,7 @@ import { motion } from "motion/react";
 import { StatusBadge } from "@/components/status-badge";
 import { Card } from "@/components/ui/card";
 import type { DocumentItem } from "@/lib/api";
+import { formatDuration } from "@/lib/format";
 
 function state(doc: DocumentItem): string {
   return (doc.state ?? doc.status ?? "").toLowerCase();
@@ -27,7 +28,12 @@ export function DocumentRow({ doc, libraryId }: { doc: DocumentItem; libraryId: 
     <>
       <div className="flex items-center justify-between gap-4">
         <span className="truncate font-mono text-sm text-ink">{doc.filename}</span>
-        <StatusBadge doc={doc} />
+        <div className="flex shrink-0 items-center gap-3">
+          {doc.elapsed != null ? (
+            <span className="text-xs tabular-nums text-ink-muted">{formatDuration(doc.elapsed)}</span>
+          ) : null}
+          <StatusBadge doc={doc} />
+        </div>
       </div>
       {active ? (
         <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-surface-2">

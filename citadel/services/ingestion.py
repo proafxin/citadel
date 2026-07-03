@@ -28,7 +28,7 @@ from citadel.schemas.document import DocumentRead, DocumentStatus, IngestRespons
 from citadel.services.document import (
     create_documents,
     finalize_tabular,
-    notify_embed,
+    mark_document,
     persist_document_tree,
     save_document_tree,
     save_sheet_tables,
@@ -122,7 +122,6 @@ async def submit_documents(files: list[UploadFile], library_id: int, background:
     doc_ids = await create_documents(library_id, [name for _data, name in payloads])
     now = time.time()
     pipe = get_redis().pipeline(transaction=False)
-    pipe.incrby(f"inflight:{library_id}", len(files))
     for doc_id, (_data, name) in zip(doc_ids, payloads, strict=True):
         pipe.hset(
             f"doc:{doc_id}",
@@ -132,20 +131,6 @@ async def submit_documents(files: list[UploadFile], library_id: int, background:
     background.add_task(_enqueue_ingest, doc_ids, payloads)
     logger.info("ingest library=%s files=%d doc_ids=%s", library_id, len(files), doc_ids)
     return IngestResponse(doc_ids=doc_ids)
-
-
-_DECR_INFLIGHT = "local n = redis.call('decr', KEYS[1]); if n <= 0 then redis.call('del', KEYS[1]) end; return n"
-
-
-async def _finish(doc_id: str) -> None:
-    redis = get_redis()
-    if not await redis.hsetnx(f"doc:{doc_id}", "counted", "1"):
-        return
-    library_id = (await redis.hget(f"doc:{doc_id}", "library_id") or b"").decode()
-    if not library_id:
-        return
-    if await redis.eval(_DECR_INFLIGHT, 1, f"inflight:{library_id}") <= 0:
-        await notify_embed(int(library_id))
 
 
 async def get_status(doc_id: int) -> DocumentStatus:
@@ -161,25 +146,33 @@ async def get_status(doc_id: int) -> DocumentStatus:
     )
 
 
+def _elapsed(status: str, ingest_seconds: float | None, data: dict[str, str], now: float) -> float | None:
+    if status != "pending":
+        return ingest_seconds
+    return (now - float(data["t_proc"])) if "t_proc" in data else None
+
+
 async def list_documents(library_id: int) -> list[DocumentRead]:
     if not await library_exists(library_id):
         raise HTTPException(status_code=404, detail="unknown library")
     async with get_sessionmaker()() as session:
         rows = list(
             await session.execute(
-                select(Document.id, Document.filename, Document.status)
+                select(Document.id, Document.filename, Document.status, Document.ingest_seconds)
                 .where(Document.library_id == library_id)
                 .order_by(Document.id)
             )
         )
+    pending_ids = [row[0] for row in rows if row[2] == "pending"]
     redis = get_redis()
     pipe = redis.pipeline()
-    for doc_id, _filename, _status in rows:
+    for doc_id in pending_ids:
         pipe.hgetall(f"doc:{doc_id}")
-    live = await pipe.execute()
+    live = dict(zip(pending_ids, await pipe.execute(), strict=True)) if pending_ids else {}
+    now = time.time()
     documents: list[DocumentRead] = []
-    for (doc_id, filename, status), raw in zip(rows, live, strict=True):
-        data = {key.decode(): value.decode() for key, value in raw.items()}
+    for doc_id, filename, status, ingest_seconds in rows:
+        data = {key.decode(): value.decode() for key, value in live.get(doc_id, {}).items()}
         documents.append(
             DocumentRead(
                 id=doc_id,
@@ -188,6 +181,7 @@ async def list_documents(library_id: int) -> list[DocumentRead]:
                 state=data.get("state"),
                 page_count=int(data["page_count"]) if "page_count" in data else None,
                 done_count=int(data["done_count"]) if "done_count" in data else None,
+                elapsed=_elapsed(status, ingest_seconds, data, now),
             )
         )
     return documents
@@ -379,8 +373,11 @@ async def handle_tabular(fields: dict[str, str]) -> None:
 
 
 async def fail_document(doc_id: str, stage: str) -> None:
-    await get_redis().hset(f"doc:{doc_id}", mapping={"state": "failed", "error": f"{stage} failed"})
-    await _finish(doc_id)
+    redis = get_redis()
+    now = time.time()
+    elapsed = now - float(await redis.hget(f"doc:{doc_id}", "t_proc") or now)
+    await redis.hset(f"doc:{doc_id}", mapping={"state": "failed", "error": f"{stage} failed", "t_done": now})
+    await mark_document(int(doc_id), "failed", elapsed)
     await cleanup(doc_id)  # terminal failure → release the source blobs (no wall-clock TTL to fall back on)
 
 
@@ -587,10 +584,11 @@ async def emit_vlm_only(fields: dict[str, str]) -> None:
 async def handle_merge(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
+    now = time.time()
+    elapsed = now - float(await redis.hget(f"doc:{doc_id}", "t_proc") or now)
     if (await redis.hget(f"doc:{doc_id}", "mode") or b"").decode() == "tabular":
-        await finalize_tabular(int(doc_id))
-        await redis.hset(f"doc:{doc_id}", "state", "done")
-        await _finish(doc_id)
+        await finalize_tabular(int(doc_id), elapsed)
+        await redis.hset(f"doc:{doc_id}", mapping={"state": "done", "t_done": now})
         logger.info("merge doc_id=%s state=done tabular", doc_id)
         return
     per_page = await redis.hgetall(f"blocks:{doc_id}")
@@ -599,10 +597,9 @@ async def handle_merge(fields: dict[str, str]) -> None:
         blocks.extend(Block(**raw) for raw in json.loads(per_page[str(page_idx).encode()]))
     source = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
     state = "partial" if any(b.type == "error" for b in blocks) else "done"
-    await save_document_tree(int(doc_id), blocks, state)
+    await save_document_tree(int(doc_id), blocks, state, elapsed)
     await persist_document_tree(int(doc_id))
-    await redis.hset(f"doc:{doc_id}", "state", state)
-    await _finish(doc_id)
+    await redis.hset(f"doc:{doc_id}", mapping={"state": state, "t_done": now})
     t0 = float(await redis.hget(f"doc:{doc_id}", "t0") or 0)
     logger.info("merge file=%s state=%s blocks=%d dur=%.1fs", source, state, len(blocks), time.time() - t0)
 

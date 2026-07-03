@@ -7,6 +7,7 @@ import { Eyebrow } from "@/components/eyebrow";
 import { Card } from "@/components/ui/card";
 import { type DocumentItem, listDocuments } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { formatDuration } from "@/lib/format";
 
 type Bucket = "processing" | "queued" | "ready" | "failed";
 type Filter = "all" | Bucket;
@@ -45,6 +46,7 @@ export function DocumentsPanel({ libraryId }: { libraryId: number }) {
   const totalPages = docs.reduce((sum, doc) => sum + (doc.page_count ?? 0), 0);
   const donePages = docs.reduce((sum, doc) => sum + (doc.done_count ?? 0), 0);
   const overall = totalPages > 0 ? donePages / totalPages : docs.length > 0 ? counts.ready / docs.length : 0;
+  const totalElapsed = docs.reduce((sum, doc) => sum + (doc.elapsed ?? 0), 0);
 
   const live = docs.filter((doc) => bucketOf(doc) === "processing").slice(0, LIVE_CAP);
   const showStrip = live.length > 0 && filter !== "processing";
@@ -66,6 +68,7 @@ export function DocumentsPanel({ libraryId }: { libraryId: number }) {
             <Eyebrow>Progress</Eyebrow>
             <span className="text-xs text-ink-muted">
               {counts.ready}/{docs.length} ready
+              {totalElapsed > 0 ? ` · ${formatDuration(totalElapsed)} total` : ""}
             </span>
           </div>
           <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-surface-2">

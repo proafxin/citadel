@@ -10,3 +10,4 @@ class Document(Base):
     library_id: Mapped[int] = mapped_column(ForeignKey("libraries.id", ondelete="CASCADE"))
     filename: Mapped[str]
     status: Mapped[str] = mapped_column(default="pending")
+    ingest_seconds: Mapped[float | None] = mapped_column(default=None)
