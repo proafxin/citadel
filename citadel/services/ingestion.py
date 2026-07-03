@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 import pypdfium2 as pdfium
 import redis.asyncio as aioredis
-from fastapi import HTTPException, UploadFile
+from fastapi import BackgroundTasks, HTTPException, UploadFile
 from mineru_vl_utils import MinerUClient
 from mineru_vl_utils.structs import ContentBlock, ExtractResult
 from PIL import Image
@@ -108,7 +108,14 @@ def make_profile_pool(n: int) -> asyncio.Queue[str]:
 # ---- orchestrator side ----------------------------------------------------------------
 
 
-async def submit_documents(files: list[UploadFile], library_id: int) -> IngestResponse:
+async def _enqueue_ingest(doc_ids: list[int], payloads: list[tuple[bytes, str]]) -> None:
+    pipe = get_redis().pipeline(transaction=False)
+    for doc_id, (data, name) in zip(doc_ids, payloads, strict=True):
+        pipe.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": name, "data": data})
+    await pipe.execute()
+
+
+async def submit_documents(files: list[UploadFile], library_id: int, background: BackgroundTasks) -> IngestResponse:
     if not await library_exists(library_id):
         raise HTTPException(status_code=404, detail="unknown library")
     payloads = [(await file.read(), file.filename or "upload") for file in files]
@@ -116,13 +123,13 @@ async def submit_documents(files: list[UploadFile], library_id: int) -> IngestRe
     now = time.time()
     pipe = get_redis().pipeline(transaction=False)
     pipe.incrby(f"inflight:{library_id}", len(files))
-    for doc_id, (data, name) in zip(doc_ids, payloads, strict=True):
+    for doc_id, (_data, name) in zip(doc_ids, payloads, strict=True):
         pipe.hset(
             f"doc:{doc_id}",
             mapping={"state": "queued", "filename": name, "library_id": library_id, "done_count": 0, "t0": now},
         )
-        pipe.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": name, "data": data})
     await pipe.execute()
+    background.add_task(_enqueue_ingest, doc_ids, payloads)
     logger.info("ingest library=%s files=%d doc_ids=%s", library_id, len(files), doc_ids)
     return IngestResponse(doc_ids=doc_ids)
 
