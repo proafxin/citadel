@@ -55,7 +55,7 @@ export function LibraryDetailPage() {
               <Card className="border-red-500/30 p-5 text-sm text-red-400">{(docsQ.error as Error).message}</Card>
             ) : null}
             {docsQ.data && docsQ.data.length === 0 ? (
-              <Card className="p-6 text-sm text-ink-muted">No documents yet — upload some above to start ingestion.</Card>
+              <Card className="p-6 text-sm text-ink-muted">No documents yet.</Card>
             ) : null}
             {docsQ.data?.map((doc) => (
               <DocumentRow key={doc.id} doc={doc} libraryId={id} />
@@ -67,21 +67,15 @@ export function LibraryDetailPage() {
           <Eyebrow>Ask</Eyebrow>
           <Card className="mt-3 p-6 text-sm text-ink-muted">
             {meta?.searchable ? (
-              <>
-                <p>Ask questions across every document in this library — answers are grounded in and cited from them.</p>
-                <Link
-                  to="/library/$libraryId/ask"
-                  params={{ libraryId: String(id) }}
-                  className="mt-4 inline-flex h-10 items-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-accent-ink transition-colors hover:bg-accent-hover"
-                >
-                  <MessageSquare size={16} /> Open chatbot
-                </Link>
-              </>
+              <Link
+                to="/library/$libraryId/ask"
+                params={{ libraryId: String(id) }}
+                className="inline-flex h-10 items-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-accent-ink transition-colors hover:bg-accent-hover"
+              >
+                <MessageSquare size={16} /> Open chatbot
+              </Link>
             ) : (
-              <p>
-                This is a <span className="text-ink">Structure</span> library — asking questions is a{" "}
-                <span className="text-ink">Search</span> (Tier 2) feature. Upgrade any time to enable it.
-              </p>
+              <p>Search is a Tier 2 feature. Upgrade to enable chat.</p>
             )}
           </Card>
         </aside>

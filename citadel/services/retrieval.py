@@ -95,9 +95,7 @@ async def _dense(
     return list(await session.scalars(stmt))
 
 
-async def _sparse(
-    session: AsyncSession, channel: ColumnElement[bool], terms: list[str], library_id: int
-) -> list[str]:
+async def _sparse(session: AsyncSession, channel: ColumnElement[bool], terms: list[str], library_id: int) -> list[str]:
     if not terms:
         return []
     conditions = [ContentNode.search_text.ilike(_like(term), escape="\\") for term in terms]

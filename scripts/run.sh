@@ -29,6 +29,13 @@ uv run alembic upgrade head
 
 trap 'kill 0' EXIT
 
-
 uv run fastapi dev citadel/app.py &
+
+if [ ! -d ui/node_modules ]; then
+    (cd ui && bun install)
+fi
+(cd ui && bun run dev) &
+
+echo "citadel up — UI: http://localhost:5173   API: http://localhost:8000"
+
 uv run python citadel/worker.py

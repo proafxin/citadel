@@ -79,17 +79,12 @@ export function LibraryAskPage() {
       </div>
 
       {!searchable ? (
-        <Card className="mt-8 p-6 text-sm text-ink-muted">
-          This is a <span className="text-ink">Structure</span> library. Asking questions is a{" "}
-          <span className="text-ink">Search</span> (Tier 2) feature — upgrade it to enable chat.
-        </Card>
+        <Card className="mt-8 p-6 text-sm text-ink-muted">Search is a Tier 2 feature. Upgrade to enable chat.</Card>
       ) : (
         <>
           <div className="mt-6 flex-1 space-y-5">
             {messages.length === 0 ? (
-              <p className="text-sm text-ink-muted">
-                Ask anything about the documents in this library — answers are grounded in and cited from them.
-              </p>
+              <p className="text-sm text-ink-muted">Ask anything about this library.</p>
             ) : null}
             {messages.map((m, i) => (
               <div key={`m-${i}`} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>

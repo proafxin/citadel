@@ -24,9 +24,6 @@ export function LibrariesPage() {
         <div>
           <Eyebrow>Your workspace</Eyebrow>
           <h1 className="mt-2 font-display text-4xl tracking-tight text-ink">Libraries</h1>
-          <p className="mt-2 max-w-xl text-sm text-ink-muted">
-            Each library is a canonical, structured layer over your documents. Choose its purpose when you create it.
-          </p>
         </div>
         <CreateLibraryDialog>
           <Button>
@@ -98,9 +95,7 @@ function Notice({ children }: { children: ReactNode }) {
 function EmptyState() {
   return (
     <Card className="flex flex-col items-center justify-center gap-4 border-dashed p-14 text-center">
-      <p className="max-w-sm text-sm text-ink-muted">
-        No libraries yet. Create your first one to start turning documents into structured, queryable data.
-      </p>
+      <p className="text-sm text-ink-muted">No libraries yet.</p>
       <CreateLibraryDialog>
         <Button>
           <Plus size={16} /> New library
