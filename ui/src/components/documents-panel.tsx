@@ -47,6 +47,7 @@ export function DocumentsPanel({ libraryId }: { libraryId: number }) {
   const overall = totalPages > 0 ? donePages / totalPages : docs.length > 0 ? counts.ready / docs.length : 0;
 
   const live = docs.filter((doc) => bucketOf(doc) === "processing").slice(0, LIVE_CAP);
+  const showStrip = live.length > 0 && filter !== "processing";
   const filtered = filter === "all" ? docs : docs.filter((doc) => bucketOf(doc) === filter);
   const lastPage = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const current = Math.min(page, lastPage - 1);
@@ -97,10 +98,13 @@ export function DocumentsPanel({ libraryId }: { libraryId: number }) {
         <DocumentUpload libraryId={libraryId} />
       </div>
 
-      {live.length > 0 && filter !== "processing" ? (
-        <div className="mt-5">
-          <Eyebrow>Now processing</Eyebrow>
-          <div className="mt-2 space-y-2">
+      {showStrip ? (
+        <div className="mt-5 rounded-xl border border-accent/30 bg-accent/5 p-4">
+          <div className="flex items-center gap-2">
+            <span className="size-1.5 animate-pulse rounded-full bg-accent" />
+            <Eyebrow>Now processing · live</Eyebrow>
+          </div>
+          <div className="mt-3 space-y-2">
             {live.map((doc) => (
               <DocumentRow key={doc.id} doc={doc} libraryId={libraryId} />
             ))}
@@ -108,15 +112,20 @@ export function DocumentsPanel({ libraryId }: { libraryId: number }) {
         </div>
       ) : null}
 
-      <div className="mt-5 space-y-2">
-        {isLoading ? <p className="text-sm text-ink-muted">Loading…</p> : null}
-        {isError ? (
-          <Card className="border-red-500/30 p-5 text-sm text-red-400">{(error as Error).message}</Card>
-        ) : null}
-        {docs.length === 0 && !isLoading ? <Card className="p-6 text-sm text-ink-muted">No documents yet.</Card> : null}
-        {shown.map((doc) => (
-          <DocumentRow key={doc.id} doc={doc} libraryId={libraryId} />
-        ))}
+      <div className="mt-6">
+        <Eyebrow>All documents</Eyebrow>
+        <div className="mt-2 space-y-2">
+          {isLoading ? <p className="text-sm text-ink-muted">Loading…</p> : null}
+          {isError ? (
+            <Card className="border-red-500/30 p-5 text-sm text-red-400">{(error as Error).message}</Card>
+          ) : null}
+          {docs.length === 0 && !isLoading ? (
+            <Card className="p-6 text-sm text-ink-muted">No documents yet.</Card>
+          ) : null}
+          {shown.map((doc) => (
+            <DocumentRow key={doc.id} doc={doc} libraryId={libraryId} />
+          ))}
+        </div>
       </div>
 
       {filtered.length > PAGE_SIZE ? (

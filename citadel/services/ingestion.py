@@ -134,6 +134,9 @@ async def submit_documents(files: list[UploadFile], library_id: int, background:
     return IngestResponse(doc_ids=doc_ids)
 
 
+_DECR_INFLIGHT = "local n = redis.call('decr', KEYS[1]); if n <= 0 then redis.call('del', KEYS[1]) end; return n"
+
+
 async def _finish(doc_id: str) -> None:
     redis = get_redis()
     if not await redis.hsetnx(f"doc:{doc_id}", "counted", "1"):
@@ -141,7 +144,7 @@ async def _finish(doc_id: str) -> None:
     library_id = (await redis.hget(f"doc:{doc_id}", "library_id") or b"").decode()
     if not library_id:
         return
-    if await redis.decr(f"inflight:{library_id}") <= 0:
+    if await redis.eval(_DECR_INFLIGHT, 1, f"inflight:{library_id}") <= 0:
         await notify_embed(int(library_id))
 
 
@@ -195,7 +198,9 @@ async def list_documents(library_id: int) -> list[DocumentRead]:
 
 async def handle_normalize(fields: dict[str, str], profile_dir: str, data: bytes) -> None:
     doc_id = fields["doc_id"]
-    await get_redis().hset(f"doc:{doc_id}", "state", "normalizing")
+    redis = get_redis()
+    await redis.hset(f"doc:{doc_id}", "state", "normalizing")
+    await redis.hsetnx(f"doc:{doc_id}", "t_proc", time.time())
     kind, normalized = await asyncio.to_thread(normalize_file, data, fields["filename"], profile_dir)
     await get_redis().xadd(
         STREAM_NORMALIZED, {"doc_id": doc_id, "kind": kind, "filename": fields["filename"], "data": normalized}
