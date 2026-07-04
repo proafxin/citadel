@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, File, UploadFile
+from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import Response, StreamingResponse
 
 from citadel.schemas.document import DocumentRead, DocumentStatus, IngestResponse
@@ -50,9 +50,8 @@ async def remove_library(library_id: int) -> None:
 async def post_documents(
     library_id: int,
     files: Annotated[list[UploadFile], File(description="Select multiple files to upload")],
-    background: BackgroundTasks,
 ) -> IngestResponse:
-    return await submit_documents(files, library_id, background)
+    return await submit_documents(files, library_id)
 
 
 @router.get("/libraries/{library_id}/documents")

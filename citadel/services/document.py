@@ -55,7 +55,9 @@ async def _maybe_notify_embed(session: AsyncSession, library_id: int) -> None:
     if library is None or library.tier != "tier_2":
         return
     pending = await session.scalar(
-        select(func.count()).select_from(Document).where(Document.library_id == library_id, Document.status == "pending")
+        select(func.count())
+        .select_from(Document)
+        .where(Document.library_id == library_id, Document.status == "pending")
     )
     if pending == 0:
         await session.execute(text("SELECT pg_notify('embed', :library)"), {"library": str(library_id)})
@@ -106,12 +108,16 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: str, inge
         # finds the tree already written and only refreshes status — never re-inserts duplicate content_ids
         if await session.scalar(select(ContentNode.id).where(ContentNode.document_id == doc_id).limit(1)) is not None:
             async with session.begin():
-                document = await session.get_one(Document, doc_id)
+                document = await session.get(Document, doc_id)
+                if document is None:
+                    return
                 document.status = status
                 document.ingest_seconds = ingest_seconds
                 await _maybe_notify_embed(session, document.library_id)
             return
-        document = await session.get_one(Document, doc_id)
+        document = await session.get(Document, doc_id)
+        if document is None:
+            return
         library = await session.get_one(Library, document.library_id)
         library_id, filename, library_name = document.library_id, document.filename, library.name
     content_blocks, paratext = split_paratext(blocks)
@@ -121,7 +127,9 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: str, inge
     search_text = build_search_text(specs, library_name, filename, paratext)
     tables = iter(table_queue)
     async with get_sessionmaker()() as session, session.begin():
-        document = await session.get_one(Document, doc_id)
+        document = await session.get(Document, doc_id)
+        if document is None:
+            return
         document.status = status
         document.ingest_seconds = ingest_seconds
         id_map: dict[str, int] = {}
@@ -233,7 +241,9 @@ async def save_sheet_tables(
 
 async def finalize_tabular(doc_id: int, ingest_seconds: float | None) -> None:
     async with get_sessionmaker()() as session, session.begin():
-        document = await session.get_one(Document, doc_id)
+        document = await session.get(Document, doc_id)
+        if document is None:
+            return
         document.status = "ingested"
         document.ingest_seconds = ingest_seconds
         await _maybe_notify_embed(session, document.library_id)
@@ -242,7 +252,9 @@ async def finalize_tabular(doc_id: int, ingest_seconds: float | None) -> None:
 
 async def mark_document(doc_id: int, status: str, ingest_seconds: float | None) -> None:
     async with get_sessionmaker()() as session, session.begin():
-        document = await session.get_one(Document, doc_id)
+        document = await session.get(Document, doc_id)
+        if document is None:
+            return
         document.status = status
         document.ingest_seconds = ingest_seconds
         await _maybe_notify_embed(session, document.library_id)
@@ -333,7 +345,9 @@ def compress_tree(tree: dict) -> bytes:
 
 async def persist_document_tree(doc_id: int) -> None:
     async with get_sessionmaker()() as session:
-        document = await session.get_one(Document, doc_id)
+        document = await session.get(Document, doc_id)
+        if document is None:
+            return
         tree = await build_document_tree(session, document)
     payload = await asyncio.to_thread(compress_tree, tree)
     await asyncio.to_thread(put_object, _tree_key(doc_id), payload)
@@ -386,8 +400,10 @@ def _md_node(
                 if table is not None:
                     lines.extend(_md_table(table.columns, table_rows.get(table.id, [])))
             case "list":
-                for item in payloads["lists"].get(node.content_id) or []:
-                    lines.append("  " * int(item.get("depth", 0) or 0) + "- " + str(item.get("content", "")))
+                lines.extend(
+                    "  " * int(item.get("depth", 0) or 0) + "- " + str(item.get("content", ""))
+                    for item in payloads["lists"].get(node.content_id) or []
+                )
                 lines.append("")
             case "code":
                 lines.extend(["```", payloads["codes"].get(node.content_id) or "", "```", ""])
@@ -410,11 +426,15 @@ async def _document_markdown(session: AsyncSession, doc_id: int) -> str:
         )
     )
     payloads = await _load_payloads(session, [node.content_id for node in nodes])
-    tables = {table.content_id: table for table in await session.scalars(select(Table).where(Table.document_id == doc_id))}
+    tables = {
+        table.content_id: table for table in await session.scalars(select(Table).where(Table.document_id == doc_id))
+    }
     table_rows: dict[int, list[list]] = {}
     table_ids = [table.id for table in tables.values()]
     if table_ids:
-        rows = await session.scalars(select(TableRow).where(TableRow.table_id.in_(table_ids)).order_by(TableRow.row_idx))
+        rows = await session.scalars(
+            select(TableRow).where(TableRow.table_id.in_(table_ids)).order_by(TableRow.row_idx)
+        )
         for row in rows:
             table_rows.setdefault(row.table_id, []).append(row.values)
     children_of: dict[int | None, list[ContentNode]] = {}

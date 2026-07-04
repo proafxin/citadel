@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 import pypdfium2 as pdfium
 import redis.asyncio as aioredis
-from fastapi import BackgroundTasks, HTTPException, UploadFile
+from fastapi import HTTPException, UploadFile
 from mineru_vl_utils import MinerUClient
 from mineru_vl_utils.structs import ContentBlock, ExtractResult
 from PIL import Image
@@ -108,6 +108,9 @@ def make_profile_pool(n: int) -> asyncio.Queue[str]:
 # ---- orchestrator side ----------------------------------------------------------------
 
 
+_INGEST_TASKS: set[asyncio.Task[None]] = set()
+
+
 async def _enqueue_ingest(doc_ids: list[int], payloads: list[tuple[bytes, str]]) -> None:
     pipe = get_redis().pipeline(transaction=False)
     for doc_id, (data, name) in zip(doc_ids, payloads, strict=True):
@@ -115,7 +118,7 @@ async def _enqueue_ingest(doc_ids: list[int], payloads: list[tuple[bytes, str]])
     await pipe.execute()
 
 
-async def submit_documents(files: list[UploadFile], library_id: int, background: BackgroundTasks) -> IngestResponse:
+async def submit_documents(files: list[UploadFile], library_id: int) -> IngestResponse:
     if not await library_exists(library_id):
         raise HTTPException(status_code=404, detail="unknown library")
     payloads = [(await file.read(), file.filename or "upload") for file in files]
@@ -128,7 +131,9 @@ async def submit_documents(files: list[UploadFile], library_id: int, background:
             mapping={"state": "queued", "filename": name, "library_id": library_id, "done_count": 0, "t0": now},
         )
     await pipe.execute()
-    background.add_task(_enqueue_ingest, doc_ids, payloads)
+    task = asyncio.create_task(_enqueue_ingest(doc_ids, payloads))
+    _INGEST_TASKS.add(task)
+    task.add_done_callback(_INGEST_TASKS.discard)
     logger.info("ingest library=%s files=%d doc_ids=%s", library_id, len(files), doc_ids)
     return IngestResponse(doc_ids=doc_ids)
 
