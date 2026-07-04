@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import Response, StreamingResponse
 
+from citadel.schemas.config import ConfigRead
 from citadel.schemas.document import DocumentRead, DocumentStatus, IngestResponse
 from citadel.schemas.library import LibraryCreate, LibraryRead
 from citadel.schemas.query import QueryRequest
@@ -17,8 +18,14 @@ from citadel.services.library import (
     update_library,
 )
 from citadel.services.query import answer
+from config import CPU_THIRD
 
 router = APIRouter()
+
+
+@router.get("/config")
+async def get_config() -> ConfigRead:
+    return ConfigRead(ingest_concurrency=CPU_THIRD)
 
 
 @router.post("/libraries")

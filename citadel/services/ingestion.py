@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 import re
 import tempfile
 import time
@@ -35,7 +36,7 @@ from citadel.services.document import (
 from citadel.services.excel import extract_sheet_no, extract_tables, sheet_names
 from citadel.services.html import parse_html
 from citadel.services.library import library_exists
-from citadel.services.pdf import MAX_IMAGE_SIDE, downscale, extract_layer_by_bbox, render_pdf_pages
+from citadel.services.pdf import MAX_IMAGE_SIDE, count_pdf_pages, downscale, extract_layer_by_bbox, render_pdf_page
 from citadel.services.tabular import extract_json_tables, read_csv_table
 from citadel.utils import normalize_file
 from config import CPU_THIRD, get_settings
@@ -219,6 +220,22 @@ def _cap_image_bytes(image_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
+def _write_temp_pdf(data: bytes) -> str:
+    fd, path = tempfile.mkstemp(suffix=".pdf", prefix="citadel_pg_")
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+    return path
+
+
+async def _render_and_emit(doc_id: str, path: str, dpi: int, page_idx: int) -> None:
+    loop = asyncio.get_running_loop()
+    image_bytes, digital = await loop.run_in_executor(get_paginate_pool(), render_pdf_page, path, page_idx, dpi)
+    await get_redis().xadd(
+        STREAM_PAGES,
+        {"doc_id": doc_id, "page_idx": page_idx, "image": image_bytes, "digital": "1" if digital else "0"},
+    )
+
+
 async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
     doc_id = fields["doc_id"]
     kind = fields["kind"]
@@ -262,14 +279,14 @@ async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
     await redis.set(f"pdf:{doc_id}", data)  # no TTL: the source must outlive OCR; cleaned by cleanup()
     dpi = DIGITAL_RENDER_DPI if kind == "office-pdf" else RENDER_DPI
     loop = asyncio.get_running_loop()
-    pages = await loop.run_in_executor(get_paginate_pool(), render_pdf_pages, data, dpi)
-    await redis.hset(f"doc:{doc_id}", "page_count", len(pages))
-    for idx, (image_bytes, digital) in enumerate(pages):
-        await redis.xadd(
-            STREAM_PAGES,
-            {"doc_id": doc_id, "page_idx": idx, "image": image_bytes, "digital": "1" if digital else "0"},
-        )
-    logger.info("paginate file=%s pages=%d", fields["filename"], len(pages))
+    path = await asyncio.to_thread(_write_temp_pdf, data)
+    try:
+        count = await loop.run_in_executor(get_paginate_pool(), count_pdf_pages, path)
+        await redis.hset(f"doc:{doc_id}", "page_count", count)
+        await asyncio.gather(*(_render_and_emit(doc_id, path, dpi, idx) for idx in range(count)))
+    finally:
+        await asyncio.to_thread(os.unlink, path)
+    logger.info("paginate file=%s pages=%d", fields["filename"], count)
 
 
 # ---- ocr stage (async I/O → vLLM via mineru-vl-utils) ----------------------------------

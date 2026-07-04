@@ -13,17 +13,21 @@ def downscale(img: Image.Image) -> Image.Image:
     return img.resize((round(img.width * scale), round(img.height * scale)))
 
 
-def render_pdf_pages(pdf_bytes: bytes, dpi: int) -> list[tuple[bytes, bool]]:
-    pages: list[tuple[bytes, bool]] = []
-    pdf = pdfium.PdfDocument(pdf_bytes)
-    scale = dpi / 72
-    for page in pdf:
-        bio = io.BytesIO()
-        downscale(page.render(scale=scale).to_pil()).save(bio, format="PNG")
-        digital = page.get_rotation() == 0 and page.get_textpage().count_chars() > 16
-        pages.append((bio.getvalue(), digital))
+def count_pdf_pages(path: str) -> int:
+    pdf = pdfium.PdfDocument(path)
+    n = len(pdf)
     pdf.close()
-    return pages
+    return n
+
+
+def render_pdf_page(path: str, page_idx: int, dpi: int) -> tuple[bytes, bool]:
+    pdf = pdfium.PdfDocument(path)
+    page = pdf[page_idx]
+    bio = io.BytesIO()
+    downscale(page.render(scale=dpi / 72).to_pil()).save(bio, format="PNG")
+    digital = page.get_rotation() == 0 and page.get_textpage().count_chars() > 16
+    pdf.close()
+    return bio.getvalue(), digital
 
 
 def extract_layer_by_bbox(pdf_bytes: bytes, page_idx: int, bboxes: list[list[float]]) -> list[str]:
