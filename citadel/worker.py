@@ -282,7 +282,7 @@ async def render() -> None:
 
 # ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. one global concurrency bound ----------
 async def ocr() -> None:
-    await asyncio.to_thread(get_mineru_client)  # build the http client once now, not lazily mid-OCR
+    await asyncio.to_thread(get_mineru_client)  # build the pooled clients once now, not lazily mid-OCR
     cap = _Capacity(OCR_CONCURRENCY)
     await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)))
 

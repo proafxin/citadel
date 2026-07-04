@@ -1,5 +1,6 @@
 import asyncio
 import io
+import itertools
 import json
 import logging
 import re
@@ -61,7 +62,8 @@ STREAM_GAPFILL = "gapfill"  # decoupled CPU stage: scanned pages do RapidOCR gap
 MAX_ATTEMPTS = 3
 LAYER_TYPES = ("text", "title")  # filled from the PDF text layer on born-digital pages (skip VLM recognition)
 
-MINERU_MAX_CONNECTIONS = 256  # hard cap on the shared httpx pool → bounds VLM sockets (match server max-num-seqs)
+MINERU_CLIENTS = 16  # pool of VLM clients; OCR jobs round-robin across them (more, smaller pools → cheaper event-loop walk)
+MINERU_CONN_PER_CLIENT = 8  # sockets per client (reused). clients x per-client = 128 total = OCR_CONCURRENCY, bounded
 REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connection, never open unbounded sockets
 DOC_SOURCE_MAX = 16  # per-worker LRU of source blobs (pdf/workbook): each fetched from the bus once, not per page/sheet
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
@@ -93,19 +95,27 @@ def get_redis() -> aioredis.Redis:
     )
 
 
+_MINERU_RR = itertools.count()
+
+
 @lru_cache
+def _mineru_pool() -> list[MinerUClient]:
+    # a fixed pool of MINERU_CLIENTS clients, each its own httpx pool capped at MINERU_CONN_PER_CLIENT connections
+    # (reused). OCR jobs round-robin across them, so total sockets = clients x per-client (bounded, no fd blow-up) and
+    # each pool's httpcore per-event walk is tiny (per-client^2, not total^2) instead of pegging the event loop.
+    return [
+        MinerUClient(
+            backend="http-client",
+            server_url=get_settings().mineru_base_url,
+            use_tqdm=False,
+            max_connections=MINERU_CONN_PER_CLIENT,
+        )
+        for _ in range(MINERU_CLIENTS)
+    ]
+
+
 def get_mineru_client() -> MinerUClient:
-    # max_keepalive_connections=0: never retain/reuse a pooled connection — each VLM request opens a fresh connection
-    # (sub-ms on localhost) and closes it right after. keeps the httpx pool from accumulating hundreds of idle
-    # connections, which is what makes httpcore's O(pending x connections) request-assignment peg the event loop under
-    # the per-page x per-block fan-out. max_connections still bounds concurrent sockets.
-    return MinerUClient(
-        backend="http-client",
-        server_url=get_settings().mineru_base_url,
-        use_tqdm=False,
-        max_connections=MINERU_MAX_CONNECTIONS,
-        max_keepalive_connections=0,
-    )
+    return _mineru_pool()[next(_MINERU_RR) % MINERU_CLIENTS]
 
 
 @lru_cache
@@ -524,7 +534,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     page_idx = int(fields["page_idx"])
     digital = fields.get("digital") == "1"
     img = Image.open(io.BytesIO(image))
-    client = get_mineru_client()
+    client = get_mineru_client()  # one of the pooled clients, round-robin — its httpx pool is reused, not per-page
     if digital:
         # born-digital page: VLM does layout + recognizes only non-text; text/title come from the exact text layer
         content_blocks = await client.aio_two_step_extract(img, not_extract_list=list(LAYER_TYPES))
