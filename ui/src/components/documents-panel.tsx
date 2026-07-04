@@ -57,9 +57,8 @@ export function LibraryProgress({
 }) {
   const counts: Record<Bucket, number> = { processing: 0, ready: 0, failed: 0, skipped: 0 };
   for (const doc of docs) counts[bucketOf(doc)] += 1;
-  const totalPages = docs.reduce((sum, doc) => sum + (doc.page_count ?? 0), 0);
-  const donePages = docs.reduce((sum, doc) => sum + (doc.done_count ?? 0), 0);
-  const overall = totalPages > 0 ? donePages / totalPages : docs.length > 0 ? counts.ready / docs.length : 0;
+  const settled = counts.ready + counts.failed + counts.skipped;
+  const overall = docs.length > 0 ? settled / docs.length : 0;
   const totalElapsed = docs.reduce((sum, doc) => sum + (doc.status === "pending" ? 0 : (doc.elapsed ?? 0)), 0);
 
   return (

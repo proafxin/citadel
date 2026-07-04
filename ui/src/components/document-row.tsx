@@ -1,5 +1,4 @@
 import { Link } from "@tanstack/react-router";
-import { motion } from "motion/react";
 import { StatusBadge } from "@/components/status-badge";
 import { Card } from "@/components/ui/card";
 import type { DocumentItem } from "@/lib/api";
@@ -18,8 +17,6 @@ export function isIngested(doc: DocumentItem): boolean {
 export function DocumentRow({ doc, libraryId }: { doc: DocumentItem; libraryId: number }) {
   const active = isPending(doc);
   const viewable = VIEWABLE.has(doc.status);
-  const total = doc.page_count ?? 0;
-  const fraction = active && total > 0 ? Math.min(1, (doc.done_count ?? 0) / total) : 0;
 
   const inner = (
     <>
@@ -34,16 +31,7 @@ export function DocumentRow({ doc, libraryId }: { doc: DocumentItem; libraryId: 
       </div>
       {active ? (
         <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-surface-2">
-          {total > 0 ? (
-            <motion.div
-              className="h-full rounded-full bg-accent"
-              initial={false}
-              animate={{ width: `${fraction * 100}%` }}
-              transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-            />
-          ) : (
-            <div className="h-full w-1/3 animate-pulse rounded-full bg-accent/60" />
-          )}
+          <div className="h-full w-1/3 animate-pulse rounded-full bg-accent/60" />
         </div>
       ) : null}
     </>

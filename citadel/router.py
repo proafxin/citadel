@@ -4,11 +4,11 @@ from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import Response, StreamingResponse
 
 from citadel.schemas.config import ConfigRead
-from citadel.schemas.document import DocumentRead, DocumentStatus, IngestResponse
+from citadel.schemas.document import DocumentRead, IngestResponse
 from citadel.schemas.library import LibraryCreate, LibraryRead
 from citadel.schemas.query import QueryRequest
 from citadel.services.document import export_markdown, get_result
-from citadel.services.ingestion import get_status, list_documents, submit_documents
+from citadel.services.ingestion import list_documents, submit_documents
 from citadel.services.library import (
     create_library,
     delete_library,
@@ -74,11 +74,6 @@ async def get_library_tree(library_id: int) -> Response:
 @router.get("/libraries/{library_id}/export")
 async def get_library_export(library_id: int) -> Response:
     return await export_markdown(library_id)
-
-
-@router.get("/status/{doc_id}")
-async def get_doc_status(doc_id: int) -> DocumentStatus:
-    return await get_status(doc_id)
 
 
 @router.get("/result/{doc_id}")

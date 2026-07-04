@@ -105,10 +105,16 @@ services:
     restart: always
     ports:
       - "${CITADEL_REDIS_PORT:-6379}:6379"
-    # Append-only persistence so Redis Streams (worker queues / pub-sub) survive restarts
-    command: redis-server --appendonly yes
-    volumes:
-      - redis-data:/data
+    # Ephemeral ingestion bus — NO persistence. Redis carries transient streams + multi-MB page images;
+    # the DB is the source of truth and run.sh FLUSHALLs each run. AOF/RDB here only fork- and fsync-stall
+    # the single-threaded server under image load → those freezes time out client connects and crash the
+    # worker. Keep it purely in-memory (no --save, no appendonly).
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
 
   postgres:
     image: pgvector/pgvector:pg17
@@ -126,7 +132,6 @@ services:
       - ./scripts/db:/docker-entrypoint-initdb.d:ro
 
 volumes:
-  redis-data:
   postgres-data:
   vllm-cache:
   qwen-vllm-cache:

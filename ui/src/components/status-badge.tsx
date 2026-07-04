@@ -2,10 +2,7 @@ import type { DocumentItem } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
 const LABELS: Record<string, string> = {
-  queued: "Queued",
-  pending: "Queued",
-  normalizing: "Processing",
-  paginating: "Processing",
+  pending: "Processing",
   ingested: "Ready",
   embedded: "Ready",
   partial: "Partial",
@@ -48,11 +45,9 @@ const TONE_DOT: Record<Tone, string> = {
 };
 
 export function StatusBadge({ doc }: { doc: DocumentItem }) {
-  const key = (doc.state ?? doc.status ?? "").toLowerCase();
+  const key = doc.status.toLowerCase();
   const tone = toneFor(key);
   const label = LABELS[key] ?? "Processing";
-  const count =
-    doc.status === "pending" && doc.page_count && doc.page_count > 0 ? `${doc.done_count ?? 0}/${doc.page_count}` : null;
 
   return (
     <span
@@ -63,7 +58,6 @@ export function StatusBadge({ doc }: { doc: DocumentItem }) {
     >
       <span className={cn("size-1.5 rounded-full", TONE_DOT[tone])} />
       {label}
-      {count ? ` · ${count}` : ""}
     </span>
   );
 }

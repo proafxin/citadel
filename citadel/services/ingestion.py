@@ -24,7 +24,7 @@ from citadel.db import get_sessionmaker
 from citadel.llm import describe_table
 from citadel.models.document import Document
 from citadel.schemas.content import Block
-from citadel.schemas.document import DocumentRead, DocumentStatus, IngestResponse
+from citadel.schemas.document import DocumentRead, IngestResponse
 from citadel.services.document import (
     create_documents,
     finalize_tabular,
@@ -139,25 +139,6 @@ async def submit_documents(files: list[UploadFile], library_id: int) -> IngestRe
     return IngestResponse(doc_ids=doc_ids)
 
 
-async def get_status(doc_id: int) -> DocumentStatus:
-    raw = await get_redis().hgetall(f"doc:{doc_id}")
-    if not raw:
-        raise HTTPException(status_code=404, detail="unknown doc_id")
-    data = {key.decode(): value.decode() for key, value in raw.items()}
-    return DocumentStatus(
-        state=data.get("state", ""),
-        filename=data.get("filename"),
-        page_count=int(data["page_count"]) if "page_count" in data else None,
-        done_count=int(data["done_count"]) if "done_count" in data else None,
-    )
-
-
-def _elapsed(status: str, ingest_seconds: float | None, data: dict[str, str], now: float) -> float | None:
-    if status != "pending":
-        return ingest_seconds
-    return (now - float(data["t_proc"])) if "t_proc" in data else None
-
-
 async def list_documents(library_id: int) -> list[DocumentRead]:
     if not await library_exists(library_id):
         raise HTTPException(status_code=404, detail="unknown library")
@@ -169,28 +150,10 @@ async def list_documents(library_id: int) -> list[DocumentRead]:
                 .order_by(Document.id)
             )
         )
-    pending_ids = [row[0] for row in rows if row[2] == "pending"]
-    redis = get_redis()
-    pipe = redis.pipeline()
-    for doc_id in pending_ids:
-        pipe.hgetall(f"doc:{doc_id}")
-    live = dict(zip(pending_ids, await pipe.execute(), strict=True)) if pending_ids else {}
-    now = time.time()
-    documents: list[DocumentRead] = []
-    for doc_id, filename, status, ingest_seconds in rows:
-        data = {key.decode(): value.decode() for key, value in live.get(doc_id, {}).items()}
-        documents.append(
-            DocumentRead(
-                id=doc_id,
-                filename=filename,
-                status=status,
-                state=data.get("state"),
-                page_count=int(data["page_count"]) if "page_count" in data else None,
-                done_count=int(data["done_count"]) if "done_count" in data else None,
-                elapsed=_elapsed(status, ingest_seconds, data, now),
-            )
-        )
-    return documents
+    return [
+        DocumentRead(id=doc_id, filename=filename, status=status, elapsed=ingest_seconds)
+        for doc_id, filename, status, ingest_seconds in rows
+    ]
 
 
 # ---- normalize stage (CPU / process pool) ---------------------------------------------

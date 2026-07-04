@@ -103,17 +103,16 @@ async def _add_table(session: AsyncSession, content_id: str, doc_id: int, table:
 
 
 async def save_document_tree(doc_id: int, blocks: list[Block], status: str, ingest_seconds: float | None) -> None:
-    async with get_sessionmaker()() as session:
+    async with get_sessionmaker()() as session, session.begin():
         # idempotent merge: a redelivered/retried merge (worker died after commit, or persist failed post-commit)
         # finds the tree already written and only refreshes status — never re-inserts duplicate content_ids
         if await session.scalar(select(ContentNode.id).where(ContentNode.document_id == doc_id).limit(1)) is not None:
-            async with session.begin():
-                document = await session.get(Document, doc_id)
-                if document is None:
-                    return
-                document.status = status
-                document.ingest_seconds = ingest_seconds
-                await _maybe_notify_embed(session, document.library_id)
+            document = await session.get(Document, doc_id)
+            if document is None:
+                return
+            document.status = status
+            document.ingest_seconds = ingest_seconds
+            await _maybe_notify_embed(session, document.library_id)
             return
         document = await session.get(Document, doc_id)
         if document is None:
