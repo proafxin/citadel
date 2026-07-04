@@ -10,7 +10,6 @@ from functools import lru_cache
 
 import cv2
 import numpy as np
-import pypdfium2 as pdfium
 import redis.asyncio as aioredis
 from fastapi import HTTPException, UploadFile
 from mineru_vl_utils import MinerUClient
@@ -36,6 +35,7 @@ from citadel.services.document import (
 from citadel.services.excel import extract_sheet_no, extract_tables, sheet_names
 from citadel.services.html import parse_html
 from citadel.services.library import library_exists
+from citadel.services.pdf import MAX_IMAGE_SIDE, downscale, extract_layer_by_bbox, render_pdf_pages
 from citadel.services.tabular import extract_json_tables, read_csv_table
 from citadel.utils import normalize_file
 from config import CPU_THIRD, get_settings
@@ -210,53 +210,13 @@ async def handle_normalize(fields: dict[str, str], profile_dir: str, data: bytes
 # ---- paginate stage (CPU / process pool) ----------------------------------------------
 
 
-# cap a page image's long side → bounds the worker's resident RAM (it holds full-res decoded pages to crop them).
-# the VLM resizes internally so the full-page pass is unaffected; kept generous so seal/stamp crops stay legible
-MAX_IMAGE_SIDE = 2500
-
-
-def _downscale(img: Image.Image) -> Image.Image:
-    if max(img.size) <= MAX_IMAGE_SIDE:
-        return img
-    scale = MAX_IMAGE_SIDE / max(img.size)
-    return img.resize((round(img.width * scale), round(img.height * scale)))
-
-
 def _cap_image_bytes(image_bytes: bytes) -> bytes:
     img = Image.open(io.BytesIO(image_bytes))
     if max(img.size) <= MAX_IMAGE_SIDE:
         return image_bytes
     out = io.BytesIO()
-    _downscale(img).save(out, format="PNG")
+    downscale(img).save(out, format="PNG")
     return out.getvalue()
-
-
-def render_pdf_pages(pdf_bytes: bytes, dpi: int) -> list[tuple[bytes, bool]]:
-    # (png, is_digital) per page; is_digital = has a real text layer and isn't rotated → safe to read by bbox
-    pages: list[tuple[bytes, bool]] = []
-    pdf = pdfium.PdfDocument(pdf_bytes)
-    scale = dpi / 72
-    for page in pdf:
-        bio = io.BytesIO()
-        _downscale(page.render(scale=scale).to_pil()).save(bio, format="PNG")
-        digital = page.get_rotation() == 0 and page.get_textpage().count_chars() > 16
-        pages.append((bio.getvalue(), digital))
-    pdf.close()
-    return pages
-
-
-def extract_layer_by_bbox(pdf_bytes: bytes, page_idx: int, bboxes: list[list[float]]) -> list[str]:
-    # exact text from the PDF text layer inside each normalized (0-1, top-left) bbox
-    pdf = pdfium.PdfDocument(pdf_bytes)
-    page = pdf[page_idx]
-    width, height = page.get_size()
-    textpage = page.get_textpage()
-    out: list[str] = []
-    for x0, y0, x1, y1 in bboxes:
-        left, right, bottom, top = x0 * width, x1 * width, (1 - y1) * height, (1 - y0) * height
-        out.append(textpage.get_text_bounded(left=left, bottom=bottom, right=right, top=top).strip())
-    pdf.close()
-    return out
 
 
 async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
