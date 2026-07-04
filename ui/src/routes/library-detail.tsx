@@ -6,7 +6,7 @@ import { DocumentsPanel } from "@/components/documents-panel";
 import { Eyebrow } from "@/components/eyebrow";
 import { TierBadge } from "@/components/tier-badge";
 import { Card } from "@/components/ui/card";
-import { getLibrary, listDocuments, treeDownloadUrl, updateLibrary } from "@/lib/api";
+import { exportUrl, getLibrary, listDocuments, updateLibrary } from "@/lib/api";
 import { tierMeta } from "@/lib/tiers";
 
 export function LibraryDetailPage() {
@@ -43,7 +43,7 @@ export function LibraryDetailPage() {
           <h1 className="font-display text-4xl tracking-tight text-ink">{libQ.data?.name ?? "…"}</h1>
           {ingested ? (
             <a
-              href={treeDownloadUrl(id)}
+              href={exportUrl(id)}
               className="inline-flex h-9 items-center gap-2 rounded-lg border border-border px-3 text-sm font-medium text-ink transition-colors hover:bg-surface-2"
             >
               <Download size={15} /> Export

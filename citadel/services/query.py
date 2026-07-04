@@ -132,9 +132,8 @@ async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
 
 async def _aggregate(question: str, tables: list[TableCand]) -> list[SqlResult]:
     blocks = list(starmap(_schema_block, enumerate(tables)))
-    logger.info("schema blocks passed to slm:\n%s", "\n\n".join(blocks))
     sqls = await write_queries(question, blocks) if tables else []
-    logger.info("slm sqls=%s", sqls)
+    logger.info("aggregate tables=%d sqls=%d", len(tables), len(sqls))
     results: list[SqlResult] = []
     for sql in sqls:
         resolved = await _execute(tables, sql)
@@ -267,12 +266,6 @@ async def answer(question: str, library_id: int) -> AsyncIterator[str]:
     passages_t, results_t = await _unify(question, kept_passages, results)
     final_passages, final_results = _fit_evidence(passages_t, results_t, BUDGET)
     rendered = [_result_render(result) for result in final_results]
-    logger.info(
-        "synthesis passages=%d results=%d\npassages:\n%s\nresults:\n%s",
-        len(final_passages),
-        len(final_results),
-        "\n".join(final_passages),
-        "\n---\n".join(rendered),
-    )
+    logger.info("synthesis passages=%d results=%d", len(final_passages), len(final_results))
     async for token in synthesize(question, final_passages, rendered):
         yield token

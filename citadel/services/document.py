@@ -1,8 +1,11 @@
 import asyncio
+import io
 import json
+import zipfile
 
 import zstandard
 from fastapi import HTTPException
+from fastapi.responses import Response
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -352,3 +355,93 @@ async def get_result(doc_id: int) -> dict:
     if tree is None:
         raise HTTPException(status_code=404, detail="result not ready")
     return tree
+
+
+def _md_cell(value: object) -> str:
+    return "" if value is None else str(value).replace("|", "\\|").replace("\n", " ")
+
+
+def _md_table(columns: list[dict], rows: list[list]) -> list[str]:
+    headers = [str(column.get("header") or "") for column in columns]
+    lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join("---" for _ in headers) + " |"]
+    lines.extend("| " + " | ".join(_md_cell(value) for value in row) + " |" for row in rows)
+    lines.append("")
+    return lines
+
+
+def _md_node(
+    node: ContentNode,
+    children_of: dict[int | None, list[ContentNode]],
+    payloads: dict[str, dict],
+    tables: dict[str, Table],
+    table_rows: dict[int, list[list]],
+    lines: list[str],
+) -> None:
+    if node.type == "level":
+        lines.extend(["#" * min(node.level or 1, 6) + " " + (node.label or ""), ""])
+    else:
+        match detail_kind(node.type):
+            case "table":
+                table = tables.get(node.content_id)
+                if table is not None:
+                    lines.extend(_md_table(table.columns, table_rows.get(table.id, [])))
+            case "list":
+                for item in payloads["lists"].get(node.content_id) or []:
+                    lines.append("  " * int(item.get("depth", 0) or 0) + "- " + str(item.get("content", "")))
+                lines.append("")
+            case "code":
+                lines.extend(["```", payloads["codes"].get(node.content_id) or "", "```", ""])
+            case "equation":
+                lines.extend(["$$", payloads["equations"].get(node.content_id) or "", "$$", ""])
+            case _:
+                text = payloads["paragraphs"].get(node.content_id)
+                if text:
+                    lines.extend([text, ""])
+    for child in children_of.get(node.id, []):
+        _md_node(child, children_of, payloads, tables, table_rows, lines)
+
+
+async def _document_markdown(session: AsyncSession, doc_id: int) -> str:
+    nodes = list(
+        await session.scalars(
+            select(ContentNode)
+            .where(ContentNode.document_id == doc_id)
+            .order_by(ContentNode.page_no, ContentNode.ordinal)
+        )
+    )
+    payloads = await _load_payloads(session, [node.content_id for node in nodes])
+    tables = {table.content_id: table for table in await session.scalars(select(Table).where(Table.document_id == doc_id))}
+    table_rows: dict[int, list[list]] = {}
+    table_ids = [table.id for table in tables.values()]
+    if table_ids:
+        rows = await session.scalars(select(TableRow).where(TableRow.table_id.in_(table_ids)).order_by(TableRow.row_idx))
+        for row in rows:
+            table_rows.setdefault(row.table_id, []).append(row.values)
+    children_of: dict[int | None, list[ContentNode]] = {}
+    for node in nodes:
+        children_of.setdefault(node.parent_id, []).append(node)
+    lines: list[str] = []
+    for root in children_of.get(None, []):
+        _md_node(root, children_of, payloads, tables, table_rows, lines)
+    return "\n".join(lines).strip() + "\n"
+
+
+async def export_markdown(library_id: int) -> Response:
+    async with get_sessionmaker()() as session:
+        library = await session.get(Library, library_id)
+        if library is None:
+            raise HTTPException(status_code=404, detail="unknown library")
+        docs = list(
+            await session.execute(
+                select(Document.id, Document.filename).where(Document.library_id == library_id).order_by(Document.id)
+            )
+        )
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for doc_id, filename in docs:
+                archive.writestr(f"{filename.rsplit('.', 1)[0]}.md", await _document_markdown(session, doc_id))
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{library.name}.zip"'},
+    )
