@@ -11,11 +11,13 @@ from citadel.services.ingestion import (
     MAX_ATTEMPTS,
     PAGINATE_CONCURRENCY,
     RAPIDOCR_CONCURRENCY,
+    RENDER_CONCURRENCY,
     STREAM_GAPFILL,
     STREAM_INGEST,
     STREAM_MERGE,
     STREAM_NORMALIZED,
     STREAM_PAGES,
+    STREAM_RENDER,
     STREAM_TABLES,
     cleanup,
     emit_vlm_only,
@@ -29,6 +31,7 @@ from citadel.services.ingestion import (
     handle_normalize,
     handle_ocr,
     handle_paginate,
+    handle_render,
     handle_tabular,
     make_profile_pool,
 )
@@ -180,6 +183,21 @@ async def _paginate_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) ->
         cap.release()
 
 
+async def _render_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+    stream = STREAM_RENDER
+    try:
+        fields = {k.decode(): v.decode() for k, v in raw.items()}
+        work = asyncio.create_task(handle_render(fields))
+        await asyncio.wait({work})
+        if work.exception() is None:
+            await _settle(stream, msg_id)
+            return
+        logger.error("render failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
+        await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
+    finally:
+        cap.release()
+
+
 async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_PAGES
     try:
@@ -249,10 +267,16 @@ async def normalize() -> None:
     await _drive(STREAM_INGEST, cap, lambda mid, raw: _spawn(_normalize_job(cap, profiles, mid, raw)))
 
 
-# ---- paginate: read `normalized`, render pages, write `pages`. dedicated pdfium per process-pool worker
+# ---- paginate: read `normalized`, count pages, emit one `render` job per page (markup/tabular resolved inline)
 async def paginate() -> None:
     cap = _Capacity(PAGINATE_CONCURRENCY)
     await _drive(STREAM_NORMALIZED, cap, lambda mid, raw: _spawn(_paginate_job(cap, mid, raw)))
+
+
+# ---- render: read `render`, render one PDF page via the pdfium pool, write `pages`. bounded to the pool width -----
+async def render() -> None:
+    cap = _Capacity(RENDER_CONCURRENCY)
+    await _drive(STREAM_RENDER, cap, lambda mid, raw: _spawn(_render_job(cap, mid, raw)))
 
 
 # ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. one global concurrency bound ----------
@@ -281,7 +305,7 @@ async def tabular() -> None:
 
 
 async def _main() -> None:
-    await asyncio.gather(normalize(), paginate(), ocr(), gapfill(), merge(), tabular())
+    await asyncio.gather(normalize(), paginate(), render(), ocr(), gapfill(), merge(), tabular())
 
 
 def main() -> None:

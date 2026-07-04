@@ -2,10 +2,10 @@ import asyncio
 import io
 import json
 import logging
-import os
 import re
 import tempfile
 import time
+from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import lru_cache
 
@@ -17,7 +17,11 @@ from mineru_vl_utils import MinerUClient
 from mineru_vl_utils.structs import ContentBlock, ExtractResult
 from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import ResponseError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+from redis.retry import Retry
 from sqlalchemy import select
 
 from citadel.db import get_sessionmaker
@@ -46,6 +50,7 @@ logger = logging.getLogger(__name__)
 GROUP = "citadel"
 STREAM_INGEST = "ingest"
 STREAM_NORMALIZED = "normalized"
+STREAM_RENDER = "render"  # per-page render jobs: one message per PDF page, drained by the bounded render consumer
 STREAM_PAGES = "pages"
 STREAM_MERGE = "merge"
 STREAM_TABLES = "tables"
@@ -56,17 +61,35 @@ MAX_ATTEMPTS = 3
 LAYER_TYPES = ("text", "title")  # filled from the PDF text layer on born-digital pages (skip VLM recognition)
 
 MINERU_MAX_CONNECTIONS = 256  # hard cap on the shared httpx pool → bounds VLM sockets (match server max-num-seqs)
+REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connection, never open unbounded sockets
+DOC_SOURCE_MAX = 16  # per-worker LRU of source blobs (pdf/workbook): each fetched from the bus once, not per page/sheet
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
 DIGITAL_RENDER_DPI = 110  # office→pdf ONLY (provably born-digital): image is layout-only, text from the PDF layer → render small. validate layout still holds; regular pdf stays at RENDER_DPI
 PAGINATE_CONCURRENCY = CPU_THIRD  # pdfium process-pool workers, one dedicated pdfium per process
+RENDER_CONCURRENCY = CPU_THIRD  # in-flight render jobs; matches the pdfium pool width so pages never queue in RAM
 RAPIDOCR_CONCURRENCY = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
 GAP_FILL = True  # RapidOCR scanned gap-fill; set to False for clean-image benchmarks (pure VLM)
 
 
 @lru_cache
 def get_redis() -> aioredis.Redis:
-    # socket_timeout=None so the blocking XREADGROUP isn't cut off by a client read timeout
-    return aioredis.from_url(get_settings().redis_url, socket_timeout=None)
+    # bounded blocking pool: a burst queues for a free connection instead of opening unbounded sockets (which starve
+    # getaddrinfo on the shared executor → connect timeouts). socket_timeout=None so blocking XREADGROUP isn't cut off;
+    # keepalive + health check drop dead connections; retry reconnects a blip instead of crashing the pump.
+    pool = aioredis.BlockingConnectionPool.from_url(
+        get_settings().redis_url,
+        max_connections=REDIS_MAX_CONNECTIONS,
+        timeout=None,
+        socket_timeout=None,
+        socket_connect_timeout=5,
+        socket_keepalive=True,
+        health_check_interval=30,
+    )
+    return aioredis.Redis(
+        connection_pool=pool,
+        retry=Retry(ExponentialBackoff(cap=1.0, base=0.1), 3),
+        retry_on_error=[RedisConnectionError, RedisTimeoutError],
+    )
 
 
 @lru_cache
@@ -104,6 +127,31 @@ def make_profile_pool(n: int) -> asyncio.Queue[str]:
     for _ in range(n):
         queue.put_nowait(tempfile.mkdtemp(prefix="lo_profile_"))
     return queue
+
+
+_DOC_SOURCE: OrderedDict[str, bytes] = OrderedDict()
+_DOC_SOURCE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+async def _doc_source(key: str) -> bytes | None:
+    # a doc's source blob (pdf/workbook) is needed by every page/sheet job; fetch it from the bus once per worker,
+    # single-flight (per-key lock) so a cold burst of same-doc jobs doesn't refetch it N times in parallel
+    cached = _DOC_SOURCE.get(key)
+    if cached is not None:
+        _DOC_SOURCE.move_to_end(key)
+        return cached
+    async with _DOC_SOURCE_LOCKS.setdefault(key, asyncio.Lock()):
+        cached = _DOC_SOURCE.get(key)
+        if cached is not None:
+            _DOC_SOURCE.move_to_end(key)
+            return cached
+        cached = await get_redis().get(key)
+        if cached is not None:
+            _DOC_SOURCE[key] = cached
+            while len(_DOC_SOURCE) > DOC_SOURCE_MAX:
+                evicted, _ = _DOC_SOURCE.popitem(last=False)
+                _DOC_SOURCE_LOCKS.pop(evicted, None)
+        return cached
 
 
 # ---- orchestrator side ----------------------------------------------------------------
@@ -183,22 +231,6 @@ def _cap_image_bytes(image_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
-def _write_temp_pdf(data: bytes) -> str:
-    fd, path = tempfile.mkstemp(suffix=".pdf", prefix="citadel_pg_")
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
-    return path
-
-
-async def _render_and_emit(doc_id: str, path: str, dpi: int, page_idx: int) -> None:
-    loop = asyncio.get_running_loop()
-    image_bytes, digital = await loop.run_in_executor(get_paginate_pool(), render_pdf_page, path, page_idx, dpi)
-    await get_redis().xadd(
-        STREAM_PAGES,
-        {"doc_id": doc_id, "page_idx": page_idx, "image": image_bytes, "digital": "1" if digital else "0"},
-    )
-
-
 async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
     doc_id = fields["doc_id"]
     kind = fields["kind"]
@@ -239,17 +271,33 @@ async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
             await redis.xadd(STREAM_TABLES, {"doc_id": doc_id, "kind": kind, "sheet_no": 0})
             logger.info("paginate file=%s kind=%s", fields["filename"], kind)
         return
-    await redis.set(f"pdf:{doc_id}", data)  # no TTL: the source must outlive OCR; cleaned by cleanup()
+    await redis.set(f"pdf:{doc_id}", data)  # no TTL: the source must outlive render+OCR; cleaned by cleanup()
     dpi = DIGITAL_RENDER_DPI if kind == "office-pdf" else RENDER_DPI
     loop = asyncio.get_running_loop()
-    path = await asyncio.to_thread(_write_temp_pdf, data)
-    try:
-        count = await loop.run_in_executor(get_paginate_pool(), count_pdf_pages, path)
-        await redis.hset(f"doc:{doc_id}", "page_count", count)
-        await asyncio.gather(*(_render_and_emit(doc_id, path, dpi, idx) for idx in range(count)))
-    finally:
-        await asyncio.to_thread(os.unlink, path)
+    count = await loop.run_in_executor(get_paginate_pool(), count_pdf_pages, data)
+    await redis.hset(f"doc:{doc_id}", "page_count", count)
+    pipe = redis.pipeline(transaction=False)
+    for idx in range(count):
+        pipe.xadd(STREAM_RENDER, {"doc_id": doc_id, "page_idx": idx, "dpi": dpi})
+    await (
+        pipe.execute()
+    )  # emit one render job per page → the bounded render consumer does the work, no in-handler fan-out
     logger.info("paginate file=%s pages=%d", fields["filename"], count)
+
+
+async def handle_render(fields: dict[str, str]) -> None:
+    doc_id = fields["doc_id"]
+    page_idx = int(fields["page_idx"])
+    dpi = int(fields["dpi"])
+    data = await _doc_source(f"pdf:{doc_id}")
+    if data is None:  # source already cleaned up (doc finished) → a reclaimed render job is a no-op
+        return
+    loop = asyncio.get_running_loop()
+    image_bytes, digital = await loop.run_in_executor(get_paginate_pool(), render_pdf_page, data, page_idx, dpi)
+    await get_redis().xadd(
+        STREAM_PAGES,
+        {"doc_id": doc_id, "page_idx": page_idx, "image": image_bytes, "digital": "1" if digital else "0"},
+    )
 
 
 # ---- ocr stage (async I/O → vLLM via mineru-vl-utils) ----------------------------------
@@ -298,7 +346,9 @@ async def handle_tabular(fields: dict[str, str]) -> None:
     kind = fields["kind"]
     sheet_no = int(fields["sheet_no"])
     redis = get_redis()
-    data = await redis.get(f"tabular:{doc_id}")
+    data = await _doc_source(f"tabular:{doc_id}")
+    if data is None:  # source already cleaned up (doc finished) → a reclaimed sheet job is a no-op
+        return
     if kind == "xlsx":
         sheet = await asyncio.to_thread(extract_sheet_no, data, sheet_no)
         tables = await extract_tables(sheet)
@@ -468,7 +518,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         # born-digital page: VLM does layout + recognizes only non-text; text/title come from the exact text layer
         content_blocks = await client.aio_two_step_extract(img, not_extract_list=list(LAYER_TYPES))
         text_blocks = [cb for cb in content_blocks if cb.type in LAYER_TYPES]
-        pdf_bytes = await get_redis().get(f"pdf:{doc_id}") if text_blocks else None
+        pdf_bytes = await _doc_source(f"pdf:{doc_id}") if text_blocks else None
         if pdf_bytes:
             loop = asyncio.get_running_loop()
             layer = await loop.run_in_executor(
@@ -557,7 +607,7 @@ async def cleanup(doc_id: str) -> None:
 
 # ---- stage wiring (used by the worker entrypoint) -------------------------------------
 
-STREAMS = (STREAM_INGEST, STREAM_NORMALIZED, STREAM_PAGES, STREAM_GAPFILL, STREAM_MERGE, STREAM_TABLES)
+STREAMS = (STREAM_INGEST, STREAM_NORMALIZED, STREAM_RENDER, STREAM_PAGES, STREAM_GAPFILL, STREAM_MERGE, STREAM_TABLES)
 
 
 async def ensure_group(stream: str) -> None:

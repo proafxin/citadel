@@ -13,15 +13,15 @@ def downscale(img: Image.Image) -> Image.Image:
     return img.resize((round(img.width * scale), round(img.height * scale)))
 
 
-def count_pdf_pages(path: str) -> int:
-    pdf = pdfium.PdfDocument(path)
+def count_pdf_pages(data: bytes) -> int:
+    pdf = pdfium.PdfDocument(data)
     n = len(pdf)
     pdf.close()
     return n
 
 
-def render_pdf_page(path: str, page_idx: int, dpi: int) -> tuple[bytes, bool]:
-    pdf = pdfium.PdfDocument(path)
+def render_pdf_page(data: bytes, page_idx: int, dpi: int) -> tuple[bytes, bool]:
+    pdf = pdfium.PdfDocument(data)
     page = pdf[page_idx]
     bio = io.BytesIO()
     downscale(page.render(scale=dpi / 72).to_pil()).save(bio, format="PNG")
