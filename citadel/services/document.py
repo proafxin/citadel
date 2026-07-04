@@ -103,17 +103,7 @@ async def _add_table(session: AsyncSession, content_id: str, doc_id: int, table:
 
 
 async def save_document_tree(doc_id: int, blocks: list[Block], status: str, ingest_seconds: float | None) -> None:
-    async with get_sessionmaker()() as session, session.begin():
-        # idempotent merge: a redelivered/retried merge (worker died after commit, or persist failed post-commit)
-        # finds the tree already written and only refreshes status — never re-inserts duplicate content_ids
-        if await session.scalar(select(ContentNode.id).where(ContentNode.document_id == doc_id).limit(1)) is not None:
-            document = await session.get(Document, doc_id)
-            if document is None:
-                return
-            document.status = status
-            document.ingest_seconds = ingest_seconds
-            await _maybe_notify_embed(session, document.library_id)
-            return
+    async with get_sessionmaker()() as session:
         document = await session.get(Document, doc_id)
         if document is None:
             return
@@ -126,11 +116,18 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: str, inge
     search_text = build_search_text(specs, library_name, filename, paratext)
     tables = iter(table_queue)
     async with get_sessionmaker()() as session, session.begin():
+        # per-doc advisory lock: serialize concurrent/redelivered merges of the same document so the "already
+        # written?" check and the insert are one atomic unit. the lock holder writes the tree; any other caller waits,
+        # then finds it present and only refreshes status — never a duplicate content_id, no TOCTOU
+        await session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": doc_id})
         document = await session.get(Document, doc_id)
         if document is None:
             return
         document.status = status
         document.ingest_seconds = ingest_seconds
+        if await session.scalar(select(ContentNode.id).where(ContentNode.document_id == doc_id).limit(1)) is not None:
+            await _maybe_notify_embed(session, library_id)
+            return
         id_map: dict[str, int] = {}
         for spec in specs:
             parent_id = id_map[spec.parent_content_id] if spec.parent_content_id is not None else None

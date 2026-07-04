@@ -18,6 +18,7 @@ from mineru_vl_utils.structs import ContentBlock, ExtractResult
 from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
 from redis.backoff import ExponentialBackoff
+from redis.commands.core import AsyncScript
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import ResponseError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -94,13 +95,16 @@ def get_redis() -> aioredis.Redis:
 
 @lru_cache
 def get_mineru_client() -> MinerUClient:
-    # max_connections caps the shared httpx pool so concurrent VLM requests queue for a connection instead of
-    # opening unbounded sockets (the per-block fan-out × page concurrency otherwise exhausts the fd table)
+    # max_keepalive_connections=0: never retain/reuse a pooled connection — each VLM request opens a fresh connection
+    # (sub-ms on localhost) and closes it right after. keeps the httpx pool from accumulating hundreds of idle
+    # connections, which is what makes httpcore's O(pending x connections) request-assignment peg the event loop under
+    # the per-page x per-block fan-out. max_connections still bounds concurrent sockets.
     return MinerUClient(
         backend="http-client",
         server_url=get_settings().mineru_base_url,
         use_tqdm=False,
         max_connections=MINERU_MAX_CONNECTIONS,
+        max_keepalive_connections=0,
     )
 
 
@@ -157,9 +161,6 @@ async def _doc_source(key: str) -> bytes | None:
 # ---- orchestrator side ----------------------------------------------------------------
 
 
-_INGEST_TASKS: set[asyncio.Task[None]] = set()
-
-
 async def _enqueue_ingest(doc_ids: list[int], payloads: list[tuple[bytes, str]]) -> None:
     pipe = get_redis().pipeline(transaction=False)
     for doc_id, (data, name) in zip(doc_ids, payloads, strict=True):
@@ -180,9 +181,9 @@ async def submit_documents(files: list[UploadFile], library_id: int) -> IngestRe
             mapping={"state": "queued", "filename": name, "library_id": library_id, "done_count": 0, "t0": now},
         )
     await pipe.execute()
-    task = asyncio.create_task(_enqueue_ingest(doc_ids, payloads))
-    _INGEST_TASKS.add(task)
-    task.add_done_callback(_INGEST_TASKS.discard)
+    # enqueue inline: a failed xadd propagates to the caller instead of vanishing in a detached task, so a
+    # document can never sit "queued" with no ingest message behind it
+    await _enqueue_ingest(doc_ids, payloads)
     logger.info("ingest library=%s files=%d doc_ids=%s", library_id, len(files), doc_ids)
     return IngestResponse(doc_ids=doc_ids)
 
@@ -315,15 +316,31 @@ def map_content_block(block: object, page_idx: int) -> Block:
     )
 
 
+# atomic unit-completion: record the unit (HSETNX dedup), and ONLY if it is new, bump done_count and — when it is the
+# unit that reaches page_count — fire merge. one server-side EVAL so a crash mid-op can't wedge the doc (a redelivery
+# re-runs it, HSETNX returns 0, no double-count) and merge fires exactly once even across worker restarts.
+_RECORD_UNIT_LUA = """
+if redis.call('HSETNX', KEYS[1], ARGV[1], ARGV[2]) == 0 then return 0 end
+local done = redis.call('HINCRBY', KEYS[2], 'done_count', 1)
+local expected = tonumber(redis.call('HGET', KEYS[2], 'page_count'))
+if expected ~= nil and done == expected then
+  redis.call('XADD', KEYS[3], '*', 'doc_id', ARGV[3])
+  return 1
+end
+return 0
+"""
+
+
+@lru_cache
+def _record_unit() -> AsyncScript:
+    return get_redis().register_script(_RECORD_UNIT_LUA)
+
+
 async def record_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
-    redis = get_redis()
-    # hsetnx: a reclaimed/duplicate delivery of the same page is a no-op (first write wins, no double-count)
-    if not await redis.hsetnx(f"blocks:{doc_id}", str(page_idx), json.dumps([b.model_dump() for b in blocks])):
-        return
-    done = await redis.hincrby(f"doc:{doc_id}", "done_count", 1)
-    expected = int(await redis.hget(f"doc:{doc_id}", "page_count") or 0)
-    if expected and done == expected:  # exactly the page that completes the doc fires merge — once
-        await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
+    await _record_unit()(
+        keys=[f"blocks:{doc_id}", f"doc:{doc_id}", STREAM_MERGE],
+        args=[str(page_idx), json.dumps([b.model_dump() for b in blocks]), doc_id],
+    )
 
 
 async def fail_page(doc_id: str, page_idx: int) -> None:
@@ -332,13 +349,7 @@ async def fail_page(doc_id: str, page_idx: int) -> None:
 
 
 async def record_sheet(doc_id: str, sheet_no: int) -> None:
-    redis = get_redis()
-    if not await redis.hsetnx(f"sheets:{doc_id}", str(sheet_no), "1"):
-        return
-    done = await redis.hincrby(f"doc:{doc_id}", "done_count", 1)
-    expected = int(await redis.hget(f"doc:{doc_id}", "page_count") or 0)
-    if expected and done == expected:
-        await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
+    await _record_unit()(keys=[f"sheets:{doc_id}", f"doc:{doc_id}", STREAM_MERGE], args=[str(sheet_no), "1", doc_id])
 
 
 async def handle_tabular(fields: dict[str, str]) -> None:

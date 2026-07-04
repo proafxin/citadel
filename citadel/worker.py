@@ -44,7 +44,6 @@ OCR_CONCURRENCY = 128  # pages in flight; sockets are capped by MINERU_MAX_CONNE
 MERGE_CONCURRENCY = 4  # light assembly
 
 BLOCK_MS = 5000
-RECLAIM_BATCH = 64
 
 _tasks: set[asyncio.Task[None]] = set()
 
@@ -112,22 +111,24 @@ async def _retry_or_fail(
 
 
 async def _recover(stream: str, consumer: str, cap: _Capacity, spawn: Spawn) -> None:
-    # startup only: reclaim whatever a previous (crashed) run left pending and reprocess it (idempotent),
-    # bounded by capacity so a large pending set is drained gradually instead of pulled in all at once
+    # startup only: reprocess THIS consumer's own delivered-but-unacked entries, orphaned when a previous run crashed.
+    # id="0" reads only our own pending — never another live consumer's in-flight — so there is no idle threshold to
+    # guess and no risk of stealing a job that is legitimately still running. handlers are idempotent, so re-reading
+    # one that had actually completed is a safe no-op. paginate by advancing past each batch (entries ack async).
     redis = get_redis()
-    cursor = b"0-0"
+    last = "0"
     while True:
         if cap.free() <= 0:
             await cap.wait_free()
             continue
-        cursor, claimed, _ = await redis.xautoclaim(
-            stream, GROUP, consumer, min_idle_time=0, start_id=cursor, count=min(RECLAIM_BATCH, cap.free())
-        )
-        for msg_id, raw in claimed:
+        fresh = await redis.xreadgroup(GROUP, consumer, {stream: last}, count=cap.free())
+        entries = fresh[0][1] if fresh else []
+        if not entries:
+            return
+        for msg_id, raw in entries:
             cap.take()
             spawn(msg_id.decode(), raw)
-        if cursor == b"0-0":
-            return
+        last = entries[-1][0].decode()
 
 
 async def _pump(stream: str, consumer: str, cap: _Capacity, spawn: Spawn) -> None:
