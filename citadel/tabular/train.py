@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[2]
 TRAIN = ROOT / "features_train.csv"
 TEST = ROOT / "features_test.csv"
+MODEL = ROOT / "model.json"
 
 
 def _load(path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -40,6 +41,7 @@ def main() -> None:
         eval_metric="aucpr",
     )
     model.fit(x_train, y_train)
+    model.save_model(MODEL)
     predictions = model.predict(x_test)
     logger.info("scale_pos_weight=%.2f", scale)
     logger.info("confusion (rows=true, cols=pred):\n%s", confusion_matrix(y_test, predictions))
