@@ -1,6 +1,8 @@
+import asyncio
 import json
 import re
 from datetime import date, datetime
+from decimal import Decimal
 from io import BytesIO
 
 import polars as pl
@@ -45,13 +47,18 @@ def _cell(value: object) -> CellValue:
 
 
 def read_csv_table(data: bytes, separator: str) -> MaterializedTable:
-    frame = pl.read_csv(BytesIO(data), separator=separator, infer_schema_length=10000, truncate_ragged_lines=True)
+    # every column read as Utf8 (infer_schema_length=0): cells stay verbatim and polars' lossy, sample-based type
+    # inference — which silently misparses/drops crafted rows on untrusted input — is disabled. the dtype is a
+    # conservative lossless HINT for the query, not a conversion
+    frame = pl.read_csv(BytesIO(data), separator=separator, infer_schema_length=0, truncate_ragged_lines=True)
     frame = frame.filter(~pl.all_horizontal(pl.all().is_null()))
-    columns = [
-        Column(header=name.strip() or f"col{index}", dtype=_map_dtype(dtype))
-        for index, (name, dtype) in enumerate(frame.schema.items())
-    ]
     rows = [[_cell(value) for value in row] for row in frame.iter_rows()]
+    columns = [
+        Column(
+            header=name.strip() or f"col{index}", dtype=_dtype([r[index] for r in rows if isinstance(r[index], str)])
+        )
+        for index, name in enumerate(frame.columns)
+    ]
     return MaterializedTable(
         sheet_no=0,
         columns=columns,
@@ -66,11 +73,23 @@ def read_csv_table(data: bytes, separator: str) -> MaterializedTable:
     )
 
 
+def _table_rows(table: Tag) -> list[Tag]:
+    # the table's OWN rows only — direct <tr> plus <tr> inside a direct thead/tbody/tfoot. a <table> nested inside a
+    # <td> has its rows deeper, so recursive=False never reaches them → no phantom rows bleeding into the outer grid
+    rows: list[Tag] = []
+    for child in table.find_all(["tr", "thead", "tbody", "tfoot"], recursive=False):
+        if child.name == "tr":
+            rows.append(child)
+        else:
+            rows.extend(child.find_all("tr", recursive=False))
+    return rows
+
+
 def _grid(table: Tag) -> list[list[str]]:
     occupied: dict[tuple[int, int], str] = {}
     width = 0
     height = 0
-    for row_idx, tr in enumerate(table.find_all("tr")):
+    for row_idx, tr in enumerate(_table_rows(table)):
         col = 0
         for cell in tr.find_all(["td", "th"], recursive=False):
             while (row_idx, col) in occupied:
@@ -88,11 +107,11 @@ def _grid(table: Tag) -> list[list[str]]:
 
 
 def _header_count(table: Tag) -> int:
-    thead = table.find("thead")
-    if thead is not None:
-        return max(len(thead.find_all("tr")), 1)
+    thead = table.find("thead", recursive=False)
+    if isinstance(thead, Tag):
+        return max(len(thead.find_all("tr", recursive=False)), 1)
     count = 0
-    for tr in table.find_all("tr"):
+    for tr in _table_rows(table):
         cells = tr.find_all(["td", "th"], recursive=False)
         if cells and all(cell.name == "th" for cell in cells):
             count += 1
@@ -101,36 +120,44 @@ def _header_count(table: Tag) -> int:
     return count or 1
 
 
+def _lossless_int(value: str) -> bool:
+    # a numeric type is assigned ONLY if the value round-trips back to its exact source text. rejects "007", "+5",
+    # " 5 " etc. so codes/ids with leading zeros stay verbatim strings and are never silently renumbered. also bounded
+    # to signed 64-bit so a long numeric id can't overflow the integer cast at query time — it stays a string instead
+    if not _INT.fullmatch(value):
+        return False
+    number = int(value)
+    return str(number) == value and -(2**63) <= number <= 2**63 - 1
+
+
+def _lossless_decimal(value: str) -> bool:
+    # Decimal preserves trailing zeros and exact digits ("1.50" stays "1.50"); leading-zero/exponent forms don't
+    # round-trip and fall through to string
+    return bool(_FLOAT.fullmatch(value)) and str(Decimal(value)) == value
+
+
 def _dtype(values: list[str]) -> ColumnDType:
     present = [value for value in values if value]
     if not present:
         return ColumnDType.STRING
-    if all(_INT.fullmatch(value) for value in present):
+    if all(_lossless_int(value) for value in present):
         return ColumnDType.INTEGER
-    if all(_INT.fullmatch(value) or _FLOAT.fullmatch(value) for value in present):
-        return ColumnDType.FLOAT
+    if all(_lossless_int(value) or _lossless_decimal(value) for value in present):
+        return ColumnDType.DECIMAL
     return ColumnDType.STRING
 
 
 def _cast(value: str, dtype: ColumnDType) -> CellValue:
-    if value == "":
-        return None
-    if dtype == ColumnDType.INTEGER:
-        return int(value)
-    if dtype == ColumnDType.FLOAT:
-        return float(value)
-    return value
+    # never converts: every cell is stored as its exact source text (empty → None). the dtype travels as a hint on the
+    # column and the query casts on demand — so dirty cells, codes and ids are never silently altered or dropped
+    return None if value == "" else value
 
 
-def extract_html_table(html: str) -> MaterializedTable:
-    table = BeautifulSoup(html, "lxml").find("table")
-    grid = _grid(table) if isinstance(table, Tag) else []
-    if not grid:
-        return MaterializedTable(0, [], [], [], 0, None, None, [], "", None)
-    caption_tag = table.find("caption") if isinstance(table, Tag) else None
-    caption = caption_tag.get_text(separator=" ", strip=True) if caption_tag is not None else None
-    n_header = min(_header_count(table), len(grid))
-    width = len(grid[0])
+def _grid_table(grid: list[list[str]], n_header: int, caption: str | None = None) -> MaterializedTable:
+    # deterministic single-table materialization from a verbatim grid: header labels from the header band, every body
+    # cell copied verbatim (dtype is only a hint). used as the fallback when the model returns no structure
+    n_header = min(max(n_header, 0), len(grid))
+    width = len(grid[0]) if grid else 0
     headers = [
         " ".join(dict.fromkeys(grid[row][col] for row in range(n_header) if grid[row][col])) for col in range(width)
     ]
@@ -157,8 +184,48 @@ def extract_html_table(html: str) -> MaterializedTable:
     )
 
 
+def extract_html_table(html: str) -> MaterializedTable:
+    table = BeautifulSoup(html, "lxml").find("table")
+    grid = _grid(table) if isinstance(table, Tag) else []
+    if not grid:
+        return MaterializedTable(0, [], [], [], 0, None, None, [], "", None)
+    caption_tag = table.find("caption") if isinstance(table, Tag) else None
+    caption = caption_tag.get_text(separator=" ", strip=True) if caption_tag is not None else None
+    return _grid_table(grid, _header_count(table), caption)
+
+
 _GRID_HEAD_ROWS = 4
 _GRID_SAMPLE_CAP = 50
+
+
+def _cell_class(cell: str) -> str:
+    if not cell:
+        return ""
+    if _lossless_int(cell) or _lossless_decimal(cell):
+        return "#"
+    return "a"
+
+
+def _row_signature(row: list[str]) -> tuple[str, ...]:
+    return tuple(_cell_class(cell) for cell in row)
+
+
+def _sample_body(grid: list[list[str]], start: int) -> list[int]:
+    # two things, unioned: (1) BOUNDARY rows — where the shape changes — which are the potential header / schema-change
+    # rows (a header is text where data is numeric, a repeated header re-appears, a blank row separates); and (2) a few
+    # evenly-spaced data rows in between so the model sees real rows per segment. repetitive rows never bloat the sample
+    body = list(range(start, len(grid)))
+    if not body:
+        return []
+    boundaries: list[int] = []
+    previous: tuple[str, ...] | None = None
+    for offset in body:
+        signature = _row_signature(grid[offset])
+        if signature != previous:
+            boundaries.append(offset)
+            previous = signature
+    stride = max(1, len(body) // _GRID_SAMPLE_CAP)
+    return sorted(set(boundaries) | set(body[::stride]) | {body[-1]})[:_GRID_SAMPLE_CAP]
 
 
 def _render_grid(grid: list[list[str]], context: str) -> str:
@@ -171,11 +238,9 @@ def _render_grid(grid: list[list[str]], context: str) -> str:
         "Top rows:",
         *(f"  r{offset}: {' | '.join(grid[offset])}" for offset in range(head_end)),
     ]
-    body = list(range(head_end, height))
-    if body:
-        stride = max(1, (len(body) + _GRID_SAMPLE_CAP - 1) // _GRID_SAMPLE_CAP)
-        picked = sorted(set(body[::stride]) | {body[0], body[-1]})
-        lines.append("Sample data rows:")
+    picked = _sample_body(grid, head_end)
+    if picked:
+        lines.append("Sample data rows (one per distinct shape; a shape change marks a schema boundary):")
         lines.extend(f"  r{offset}: {' | '.join(grid[offset])}" for offset in picked)
     return "\n".join(lines)
 

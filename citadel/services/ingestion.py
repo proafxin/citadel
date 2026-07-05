@@ -62,7 +62,9 @@ STREAM_GAPFILL = "gapfill"  # decoupled CPU stage: scanned pages do RapidOCR gap
 MAX_ATTEMPTS = 3
 LAYER_TYPES = ("text", "title")  # filled from the PDF text layer on born-digital pages (skip VLM recognition)
 
-MINERU_CLIENTS = 16  # pool of VLM clients; OCR jobs round-robin across them (more, smaller pools → cheaper event-loop walk)
+MINERU_CLIENTS = (
+    16  # pool of VLM clients; OCR jobs round-robin across them (more, smaller pools → cheaper event-loop walk)
+)
 MINERU_CONN_PER_CLIENT = 8  # sockets per client (reused). clients x per-client = 128 total = OCR_CONCURRENCY, bounded
 REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connection, never open unbounded sockets
 DOC_SOURCE_MAX = 16  # per-worker LRU of source blobs (pdf/workbook): each fetched from the bus once, not per page/sheet
