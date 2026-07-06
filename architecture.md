@@ -49,7 +49,11 @@ Plain text is a degenerate markup case: split on blank lines into paragraphs.
 ## Pipeline
 
 Ingestion runs as streaming workers on a bus — an upload feeds an always-running pipeline, not a
-per-upload script. Each phase is independent:
+per-upload script. Each phase is an independent, asynchronous consumer running concurrently, and work is
+**page-granular**: the pages of one document interleave with every other document's through a shared,
+bounded pool at each stage, so a large scan never blocks a one-page form and the whole corpus reads in
+parallel. Every stage bounds its own in-flight work and applies backpressure to the one upstream, so the
+bus stays flat no matter how many or how large the uploads are. The phases:
 
 ```
 upload → normalize → paginate → ocr ─────────────────→ merge → relational store
@@ -64,9 +68,11 @@ upload → normalize → paginate → ocr ────────────�
 | ocr | read each page visually → blocks |
 | gapfill | scanned pages only: recover the lines the visual read dropped |
 | merge | blocks → split paratext → stitch tables → structure embedded tables → content tree → persist |
-| tabular | per sheet/file: structure + describe → canonical Table |
+| tabular | per sheet/file: structure → canonical Table (its retrieval description is written later, at finalize) |
 
-Bytes flow through the bus in memory; nothing but the final result is written to disk.
+The bus carries only lightweight in-flight state — page images and per-page blocks; the uploaded source is
+held once in a doc-keyed store and memory-mapped by each stage that reads it, never copied through the bus
+per page.
 
 ### Reading pages (ocr)
 
@@ -144,7 +150,9 @@ By source:
   headers dropped, page furniture skipped — so a forty-page table is structured as one.
 
 Every table gets a description written for retrieval — its subject, what a row represents, and the
-entities and vocabulary a user would search for. This description is what makes a table *findable*: a grid
+entities and vocabulary a user would search for. It is written at **finalize** (below), not during
+ingestion, uniformly over native, HTML and scanned-page tables — a search artifact, never ingested data.
+This description is what makes a table *findable*: a grid
 of numbers and terse headers has almost no natural-language surface to match a question against, so without
 a written description a search for the table's subject would miss it.
 
@@ -162,8 +170,12 @@ Search text is indexed two ways: dense multilingual vectors for meaning, and exa
 
 ## Storage
 
-- A **streaming bus** holds the pipeline's in-flight state (bytes, page images, per-page blocks) —
-  ephemeral, cleared after merge.
+- A **doc-keyed source store** holds each uploaded file on shared disk for the length of its run — the
+  interface a real object store (S3) will later fill. Every stage that renders or reads the source
+  memory-maps it from here, so a large file is materialized once, not copied through the bus per page; it
+  is deleted when the document completes.
+- A **streaming bus** holds the pipeline's in-flight state (page images, per-page blocks) — ephemeral,
+  bounded by backpressure so its memory stays flat regardless of upload size, and cleared after merge.
 - A **relational database** holds the durable content tree, the tables and their rows, and the search
   indexes — this is what queries run against. The rows of every table are stored together and projected
   into typed columns on demand, rather than materialized as one physical table each: a real corpus has far
@@ -179,12 +191,27 @@ Search text is indexed two ways: dense multilingual vectors for meaning, and exa
 - Failures are scoped: a page that can't be read leaves a marker and the document still completes as
   *partial*; a whole-document failure is marked *failed*.
 
-## Output
+## Output and finalize
 
 The result of ingestion is the materialized tree — sections and leaves with their content, and full
-canonical table representations. Progress is a state per document:
-`queued → normalizing → paginating → reading → done / partial / failed`. Once a document's content is
-stored, its search text is embedded and indexed, so it becomes answerable.
+canonical table representations. Progress is a state per document (`queued → processing → ingested`, with
+`failed` / `skipped` for the special cases) and per library (`ingesting → ingested → ready`).
+
+Making a library *answerable* is a **separate phase from ingesting it**, run once per library after its
+last document is stored — deliberately never interleaved with reading, so it can't contend with the vision
+model for the GPU. Finalize does two things:
+
+- **Describe every table.** Each canonical table — native, HTML, or lifted off a scanned page — gets its
+  retrieval description written here, uniformly, as the search artifact above.
+- **Embed and index.** Each leaf's and table's search text is embedded into the dense index and the lexical
+  index is built, so the library becomes queryable.
+
+Both are gated by the library's **tier**. A *structure* library is ingested to the lossless tree and
+tables and stops there; a *search* library additionally gets the descriptions, embeddings and indexes that
+Part II runs on. The tier is a pricing/access boundary, not a different pipeline — a structure library can
+be upgraded and finalized later without re-ingesting. Finalize is event-driven: it fires the moment a
+library's last in-flight document drains, and is re-checked on restart for any library that became ready
+while the embedder was down.
 
 ---
 
@@ -323,6 +350,9 @@ design intends.
   questions well but can keep too little for an open "summarize everything about X": the answer is correct
   but thinner than the corpus could support. This is a prompt-tuning axis, not a structural limit.
 
-- **Host memory bounds CPU-stage concurrency.** The GPU budget is comfortable, but the CPU conversion
-  stages — normalization and pagination — are memory-hungry, and on a 16 GB host they, not the GPU, cap
-  how many documents convert at once. Raising per-stage concurrency needs more host RAM, not more VRAM.
+- **Throughput is bounded by the visual-OCR model.** With the bus under backpressure and the source
+  memory-mapped rather than streamed as bytes, host memory stays flat regardless of how many or how large
+  the uploads are, so the ceiling is no longer host RAM but the vision model's page-read rate on the GPU —
+  reading a page costs far more than rendering or converting it, and it saturates the GPU well before the
+  CPU stages do. More throughput comes from a faster or smaller vision model, or less work per page (fewer
+  non-text crops), not from more host RAM.

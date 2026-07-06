@@ -1,276 +1,976 @@
-\documentclass[aspectratio=169, 11pt]{beamer}
-\usepackage[utf8]{inputenc}
+\documentclass[aspectratio=169,11pt]{beamer}
+
+% ----------------------------------------------------
+% Fonts (better weight than lmodern)
+% ----------------------------------------------------
 \usepackage[T1]{fontenc}
+\usepackage{lmodern} % OK fallback (you can replace with Inter later)
+
+% ----------------------------------------------------
+% Core packages
+% ----------------------------------------------------
 \usepackage{booktabs}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta}
 
-% --- Custom Color Palette ---
-\definecolor{CitadelDark}{RGB}{6, 17, 28}
-\definecolor{CitadelBlue}{RGB}{20, 40, 65}
-\definecolor{CitadelTextLight}{RGB}{240, 244, 248}
+% ----------------------------------------------------
+% Color Palette (RESTORED - higher contrast)
+% ----------------------------------------------------
+\definecolor{CitadelDark}{RGB}{6,17,28}
+\definecolor{CitadelBlue}{RGB}{20,40,65}
+\definecolor{CitadelAccent}{RGB}{40,180,255}
+\definecolor{CitadelTextLight}{RGB}{240,244,248}
+\definecolor{CitadelTextMuted}{RGB}{165,178,192}
 
-% --- Beamer Theme Setup ---
+% ----------------------------------------------------
+% Beamer Color System (FULL FIX)
+% ----------------------------------------------------
 \setbeamercolor{background canvas}{bg=CitadelDark}
+
 \setbeamercolor{normal text}{fg=CitadelTextLight}
+\setbeamercolor{structure}{fg=CitadelAccent}
+
 \setbeamercolor{title}{fg=CitadelTextLight}
 \setbeamercolor{frametitle}{fg=CitadelTextLight}
-\setbeamercolor{structure}{fg=CitadelTextLight}
-\setbeamercolor{block title}{fg=CitadelTextLight, bg=CitadelBlue}
-\setbeamercolor{block body}{fg=CitadelTextLight, bg=CitadelBlue!50}
 
-\setbeamertemplate{navigation symbols}{}
-\setbeamertemplate{headline}{
-	\vspace{0.2cm}\hspace{0.5cm}\textbf{\tiny\color{CitadelTextLight}CITADEL}
+\setbeamercolor{alerted text}{fg=CitadelAccent}
+
+\setbeamercolor{item}{fg=CitadelAccent}
+\setbeamercolor{subitem}{fg=CitadelAccent}
+
+% Blocks (IMPORTANT contrast fix)
+\setbeamercolor{block title}{
+	fg=CitadelTextLight,
+	bg=CitadelBlue
 }
 
-% --- Document Metadata ---
-\title[Citadel 2026 Pitch Deck]{Citadel: The Missing Lossless Layer for Enterprise Data}
-\author{Masum Billal}
+\setbeamercolor{block body}{
+	fg=CitadelTextLight,
+	bg=CitadelBlue!45!black
+}
 
+% ----------------------------------------------------
+% Clean UI
+% ----------------------------------------------------
+\setbeamertemplate{navigation symbols}{}
+
+% Header
+\setbeamertemplate{headline}{
+	\vspace{0.25cm}
+	\hspace{0.5cm}
+	{\tiny\color{CitadelTextMuted}\textbf{CITADEL}}
+}
+
+% Footer
+\setbeamertemplate{footline}{
+	\vspace{0.2cm}
+	\hspace{0.5cm}
+	{\tiny\color{CitadelTextMuted}\insertshorttitle}
+	\hfill
+	{\tiny\color{CitadelTextMuted}\insertframenumber/\inserttotalframenumber}
+	\hspace{0.5cm}
+	\vspace{0.2cm}
+}
+\setbeamersize{text margin left=6mm,text margin right=6mm}
+
+% reduce block padding
+\setlength{\parskip}{0.3em}
+
+% tighter columns spacing
+\setlength{\columnsep}{4pt}
+% ----------------------------------------------------
+% Typography tuning (fix “washed out” feel)
+% ----------------------------------------------------
+\setbeamerfont{frametitle}{series=\bfseries}
+\setbeamerfont{title}{series=\bfseries}
+\setbeamerfont{block title}{series=\bfseries}
+\setbeamerfont{normal text}{series=\mdseries}
+\colorlet{text}{CitadelTextLight}
+\colorlet{accent}{CitadelAccent}
+\colorlet{bg}{CitadelDark}
+\colorlet{panel}{CitadelBlue}
+\colorlet{muted}{CitadelTextMuted}
+% Slight spacing improvement
+\setlength{\parskip}{0.6em}
+\setlength{\emergencystretch}{3em}
+\usepackage{enumitem}
+% tighter lists
+\setlist[itemize]{topsep=3pt,itemsep=3pt,parsep=0pt}
+
+% tighter blocks
+\setlength{\abovedisplayskip}{4pt}
+\setlength{\belowdisplayskip}{4pt}
+
+% reduce overall vertical looseness
+\linespread{1.05}
+% ----------------------------------------------------
+% Title metadata
+% ----------------------------------------------------
+\title{Citadel}
+\subtitle{Compiling Enterprise Knowledge}
+\author{Masum Billal}
 
 \begin{document}
 	\maketitle
 
-	% --- Slide 2: The Problem ---
-	\begin{frame}{Enterprise Knowledge Was Built for Humans}
-		\begin{columns}[t]
-			\begin{column}{0.5\textwidth}
-				\small Every organization possesses massive amounts of high-value knowledge locked in unstructured silos.
-				\vspace{0.4cm}
-				\begin{itemize}
-					\item Multi-format legal agreements and binding contracts
-					\item Highly complex audited corporate financial reports
-					\item Multi-tiered technical specification documentation
-					\item Global regulatory filing structures and spreadsheets
-				\end{itemize}
-			\end{column}
-			\begin{column}{0.5\textwidth}
-				\begin{block}{\footnotesize UNSTRUCTURED PIPELINE}
-					\vspace{0.2cm}
-					\raggedright
-					{\large \textbf{Enterprises don't lack data.}}\\[0.3cm]
-					{\large \color{CitadelTextLight}\textbf{The problem is that their knowledge is cannot be computed.}}
-					\vspace{0.2cm}
-				\end{block}
-			\end{column}
-		\end{columns}
+	%====================================================
+	\begin{frame}
+
+		\frametitle{Databases Organized Structured Data}
+
+
+
+		The first abstraction layer of enterprise computing was structured data.
+
+
+
+		\begin{center}
+
+			\textbf{Relational databases}
+
+			\vspace{0.3cm}
+
+
+			SQL \;|\; Transactions \;|\; Deterministic computation
+
+		\end{center}
+
+
+
+		Applications could compute directly over structured representations.
+
 		\vfill
-		\hfill{\tiny\color{CitadelTextLight}THE GAP}
+
+		{\small\color{accent}
+			STRUCTURED DATA BECAME COMPUTABLE BY DEFAULT.
+		}
+
 	\end{frame}
 
-	% --- Slide 3: AI Bottleneck ---
-	\begin{frame}{AI Isn't the Bottleneck}
-		\small Today's enterprise AI systems begin by immediately flattening documents into searchable text strings. In doing so, documents lose the primary information that gives them semantic meaning:
-		\vspace{0.6cm}
-		\begin{columns}[t]
-			\begin{column}{0.48\textwidth}
-				\begin{block}{\small STRUCTURAL LOSS}
-					\footnotesize Hierarchy, document structure, and tables are flattened and stripped away.
-				\end{block}
-			\end{column}
-			\begin{column}{0.48\textwidth}
-				\begin{block}{\small CONTEXTUAL LOSS}
-					\footnotesize Semantic relationship trees are broken down into isolated raw text chunks.
-				\end{block}
-			\end{column}
-		\end{columns}
+	%====================================================
+	\begin{frame}
+
+		\frametitle{Search Indexed Documents}
+
+
+
+		The second layer introduced unstructured knowledge.
+
+
+
+		\begin{center}
+
+			\textbf{Search engines}
+
+			\vspace{0.3cm}
+
+
+			Indexing \;|\; Ranking \;|\; Retrieval
+
+		\end{center}
+
+
+
+		But documents themselves were never made computable.
+
+		They were only made searchable.
+
 		\vfill
-		\hfill{\tiny\color{CitadelTextLight}THE BOTTLENECK}
+
+		{\small\color{accent}
+			SEARCH IS NOT A COMPUTATIONAL MODEL. IT IS AN ACCESS LAYER.
+		}
+
 	\end{frame}
 
-	% --- Slide 4: Missing Architecture Layer ---
-	\begin{frame}{The Missing Architecture Layer}
-		\begin{description}
-			\item[Databases] Structured tabular systems transformed transaction execution and relational storage integrity.
-			\item[Data Warehouses] Enterprise analytics layers transformed query processing and aggregate corporate intelligence.
-			\item[\color{CitadelTextLight}Citadel Layer] \textbf{Introducing the world's first persistent, structural layer to anchor all future enterprise AI reasoning.}
-		\end{description}
-		\vfill
-		\hfill{\tiny\color{CitadelTextLight}MISSING INFRASTRUCTURE}
-	\end{frame}
+	%====================================================
+	\begin{frame}
 
-	% --- Slide 5: Core Solution ---
-	\begin{frame}{Introducing Citadel}
-		\textbf{Citadel is a stateful infrastructure layer transforming heterogeneous enterprise memory into a persistent, lossless, canonical representation.}
-		\vspace{0.6cm}
+		\frametitle{AI Still Rebuilds Enterprise Knowledge Every Time}
+
+
+
+		Modern AI systems operate on raw, unstructured documents.
+
+
+		Every system independently reconstructs structure:
+
+
+
 		\begin{itemize}
-			\item \textbf{Hierarchy Preserved:} Header tree relationships remain native.
-			\item \textbf{Relational Integrity:} Complex tables are saved intact.
-			\item \textbf{End-to-End Lineage:} Root links connect directly to source code.
+			\item OCR
+			\item Parsing
+			\item Chunking
+			\item Embedding
+			\item Retrieval
+			\item Ranking
 		\end{itemize}
-		\vfill
-		\hfill{\tiny\color{CitadelTextLight}CORE SOLUTION}
+
+
+
+		This is repeated across every application:
+
+		Legal AI, search, copilots, analytics, compliance tools.
+
+
+
+		{\small\color{CitadelAccent}
+			NO SHARED REPRESENTATION EXISTS ACROSS APPLICATIONS.
+		}
+
 	\end{frame}
 
-	% --- Slide 6: Paradigm Shift Architecture ---
-	\begin{frame}{Transform Once. Reuse Everywhere.}
-		\footnotesize Traditional search strategies re-parse and approximate documents continuously. Citadel executes structural compilation once, creating a robust framework for downstream systems.
-		\vspace{0.5cm}
-		\begin{columns}[t]
-			\begin{column}{0.23\textwidth}
-				\begin{block}{\tiny PHASE 01}
-					\centering\tiny\textbf{Raw Docs}\\ \vspace{0.1cm} Scattered PDFs, multi-tiered spreadsheets, and docs.
-				\end{block}
-			\end{column}
-			\begin{column}{0.23\textwidth}
-				\begin{block}{\tiny PHASE 02}
-					\centering\tiny\textbf{Compilation}\\ \vspace{0.1cm} Lossless parser builds explicit relationship graph.
-				\end{block}
-			\end{column}
-			\begin{column}{0.23\textwidth}
-				\begin{beamercolorbox}[wd=\textwidth, rounded=true, shadow=false]{block title}
-					\vspace{0.1cm}\centering\tiny\textbf{PERSISTENT DB}\\\textbf{Citadel Layer}\\ \tiny The structural canonical engine.\vspace{0.1cm}
-				\end{beamercolorbox}
-			\end{column}
-			\begin{column}{0.23\textwidth}
-				\begin{block}{\tiny DOWNSTREAM}
-					\centering\tiny\textbf{API Ecosystem}\\ \vspace{0.1cm} Powering Search, Auditing, Analytics \& Agents.
-				\end{block}
-			\end{column}
-		\end{columns}
-		\vfill
-		\hfill{\tiny\color{CitadelTextLight}PARADIGM SHIFT}
-	\end{frame}
+	%====================================================
+	\begin{frame}
 
-	% --- Slide 7: RAG Pipeline Comparison ---
-	\begin{frame}{Precision Through Structural Quality}
-		\begin{columns}[t]
-			\begin{column}{0.48\textwidth}
-				\textbf{STANDARD RAG PIPELINE}\\[0.1cm]
-				{\color{CitadelTextLight}\tiny Probabilistic Framework}
-				\vspace{0.2cm}
-				\begin{itemize}
-					\footnotesize
-					\item Documents parsed into flat, unlinked blocks
-					\item Context approximations are prone to massive hallucinations
-					\item Tables and hierarchies are flattened completely
-				\end{itemize}
-			\end{column}
-			\begin{column}{0.48\textwidth}
-				\textbf{\color{CitadelTextLight}CITADEL CANONICAL LAYER}\\[0.1cm]
-				{\color{CitadelTextLight}\tiny Deterministic Precision}
-				\vspace{0.2cm}
-				\begin{itemize}
-					\footnotesize
-					\item Documents mapped as native structural trees
-					\item Relational integrity fully preserved at ingestion
-					\item Precise grounding guarantees exact tracing data
-				\end{itemize}
-			\end{column}
-		\end{columns}
-		\vfill
-		\hfill{\tiny\color{CitadelTextLight}RETRIEVAL ARCHITECTURE}
-	\end{frame}
+		\frametitle{The Missing Layer}
 
-	% --- Slide 8: Deterministic Boundaries ---
-	\begin{frame}{Deterministic Integrity Boundaries}
-		\begin{block}{\small THE LLM PLANE (PROBABILISTIC)}
-			\footnotesize We leverage generative AI strictly for natural language synthesis, intent interpretation, and unstructured plan formation.
-			\begin{itemize}
-				\tiny
-				\item Understanding human conversational syntax
-				\item Designing dynamic operational pipelines
-				\item Synthesizing reports from verified source logs
-			\end{itemize}
+
+
+		Enterprise systems have:
+
+		\begin{itemize}
+			\item Storage
+			\item Search
+			\item LLMs
+		\end{itemize}
+
+
+		But they lack a computational representation of knowledge.
+
+
+		\begin{block}{Core Gap}
+			Documents are not data structures.
+
+			They are opaque inputs repeatedly re-interpreted at runtime.
 		\end{block}
-		\begin{block}{\small THE CITADEL LAYER (DETERMINISTIC)}
-			\footnotesize Factual calculations, structural checks, and database queries are evaluated over a secure, hardened runtime.
-			\begin{itemize}
-				\tiny
-				\item Executing programmatic, transactional logic
-				\item Ensuring exact numerical integrity
-				\item Guaranteeing 100\% trace evidence provenance
-			\end{itemize}
-		\end{block}
-		\vfill
-		\hfill{\tiny\color{CitadelTextLight}DETERMINISTIC BOUNDARIES}
+
+
+		{\small\color{accent}
+			THERE IS NO CANONICAL EXECUTION MODEL FOR ENTERPRISE KNOWLEDGE.
+		}
+
 	\end{frame}
 
-	% --- Slide 9: Competitive Moat ---
-	\begin{frame}{The Architectural Moat}
-		\centering
-		\tiny
-		\begin{tabular}{lll}
-			\toprule
-			\textbf{ARCHITECTURAL DIMENSION} & \textbf{STANDARD RAG INGESTION STACK} & \textbf{CITADEL CANONICAL INFRASTRUCTURE} \\
-			\midrule
-			Primary Core Representation & Vector embeddings & Canonical relational structural trees \\
-			\addlinespace
-			Ingestion Computation & Repetitive empirical dynamic re-parsing & Transform once, query indefinitely \\
-			\addlinespace
-			Information Integrity & Irreversible context fragmentation & Lossless structural invariants \\
-			\addlinespace
-			Source Provenance & Heuristic similarity matching heuristics & End-to-end trace auditing native \\
-			\bottomrule
-		\end{tabular}
+	%====================================================
+	\begin{frame}
+
+		\frametitle{Knowledge Should Be Compiled}
+
+
+
+		Software is not executed directly from source code.
+
+
+
+		\begin{center}
+
+			\begin{tikzpicture}[
+				node distance=1.5cm,
+				box/.style={
+					draw=text,
+					rounded corners,
+					minimum width=2.1cm,
+					minimum height=0.85cm,
+					align=center,
+					font=\small
+				}
+				]
+
+				\node[box](src){Source\\Code};
+
+				\node[box,right=of src](compiler){Compiler};
+
+				\node[box,right=of compiler,draw=accent,line width=1pt](ir){IR};
+
+				\node[box,right=of ir](runtime){Runtime};
+
+				\draw[-{Latex[length=2mm]}](src)--(compiler);
+				\draw[-{Latex[length=2mm]},accent,line width=1pt](compiler)--(ir);
+				\draw[-{Latex[length=2mm]}](ir)--(runtime);
+
+			\end{tikzpicture}
+
+		\end{center}
+
+
+
+
+		Enterprise knowledge should work the same way.
+
+		\vspace{0.4cm}
+
+		\textbf{Compile once. Compute forever.}
+
 		\vfill
-		\hfill{\tiny\color{CitadelTextLight}COMPETITIVE MOAT}
+
+		{\small\color{accent}
+			THE ABSENCE OF A COMPILER IS THE CORE LIMITATION OF ENTERPRISE AI.
+		}
+
 	\end{frame}
 
-	% --- Slide 10: Capabilities Extended ---
-	\begin{frame}{One Foundation. Unlimited Capabilities.}
-		\begin{columns}[t]
-			\begin{column}{0.3\textwidth}
-				\textbf{\footnotesize Enterprise Search}\\[0.1cm]
-				\tiny Instant, high-fidelity context queries with deterministic structural grounding.
-			\end{column}
-			\begin{column}{0.3\textwidth}
-				\textbf{\footnotesize Live Analytics}\\[0.1cm]
-				\tiny Run complex SQL computations directly over unstructured business logs natively.
-			\end{column}
-			\begin{column}{0.3\textwidth}
-				\textbf{\footnotesize Audit Compliance}\\[0.1cm]
-				\tiny Complete traceability maps displaying the specific origins for every AI decision.
-			\end{column}
-		\end{columns}
-		\vfill
-		\hfill{\tiny\color{CitadelTextLight}CAPABILITIES EXTENDED}
-	\end{frame}
+	%====================================================
+	\begin{frame}
 
-	% --- Slide 11: Why Now ---
-	\begin{frame}{Systemic Industrial Macro Shifts}
-		\begin{columns}[t]
-			\begin{column}{0.3\textwidth}
-				\textbf{\tiny SHIFT 01}\\[0.1cm]
-				\textbf{\footnotesize Advanced Reasoners}\\[0.1cm]
-				\tiny LLMs have shifted from mere text-predictors to capable agents able to manipulate structural maps.
-			\end{column}
-			\begin{column}{0.3\textwidth}
-				\textbf{\tiny SHIFT 02}\\[0.1cm]
-				\textbf{\footnotesize Zero-Trust Era}\\[0.1cm]
-				\tiny Enterprise buyers are shutting down unstable prompt wrappers, demanding strict auditable correctness.
-			\end{column}
-			\begin{column}{0.3\textwidth}
-				\textbf{\tiny SHIFT 03}\\[0.1cm]
-				\textbf{\footnotesize Data Scale-Out}\\[0.1cm]
-				\tiny The explosion of raw documents demands computational storage that bypasses human manual translation.
-			\end{column}
-		\end{columns}
-		\vfill
-		\hfill{\tiny\color{CitadelTextLight}WHY NOW}
-	\end{frame}
+		\frametitle{Documents Are Syntax}
 
-	% --- Slide 12: Mission Statement ---
-	\begin{frame}{The Mission}
-		\centering
-		\vspace{1cm}
-		\begin{quote}
-			\large ``Citadel transforms unstructured data into a persistent, lossless, queryable structured data.''
-		\end{quote}
+
+
+		Documents are not data structures.
+
+
+
+		They are \textbf{syntax}.
+
+
+
+		\begin{center}
+
+
+
+			PDF \;|\; DOCX \;|\; HTML \;|\; EPUB \;|\; XML \;|\; CSV \;|\; Excel \;|\; Markdown
+
+		\end{center}
+
+
+
+		Each format is just a different source language.
+
 		\vspace{0.5cm}
-		\small Enabling future applications, complex analytics, and autonomous systems to compute with absolute certainty, complete lineage, and architectural trust.
+
+		A compiler should not care about the syntax.
+
 		\vfill
-		\hfill{\tiny\color{CitadelTextLight}THE MISSION}
+
+		{\small\color{accent}
+			ALL ENTERPRISE DOCUMENT FORMATS ARE JUST SURFACE REPRESENTATIONS.
+		}
+
 	\end{frame}
 
-	% --- Slide 13: Join Us ---
-	\begin{frame}[plain]
-		\centering
-		\vspace{1.5cm}
-		{\usebeamercolor[fg]{structure}\textbf{\Large CITADEL}}\\[0.5cm]
-		{\LARGE \textbf{Build the Next Essential Layer}}\\[0.2cm]
-		{\color{CitadelTextLight}\small The Canonical Foundation for Enterprise Knowledge AI}\\[1cm]
-		{\large \textbf{Masum Billal}}\\[0.1cm]
-		{\footnotesize billalmasum93@gmail.com}\\[1.5cm]
+	%====================================================
+	\begin{frame}
+
+		\frametitle{Canonical Knowledge Representation}
+
+
+
+		Citadel compiles all documents into a single computational form.
+
+
+
+		\begin{center}
+
+			\begin{tikzpicture}[
+				node distance=1.2cm,
+				box/.style={
+					draw=text,
+					rounded corners,
+					minimum width=2.4cm,
+					minimum height=0.85cm,
+					align=center,
+					font=\small
+				}
+				]
+
+				\node[box](doc){Document};
+				\node[box,right=of doc](section){Sections/Tables};
+				\node[box,right=of section](block){Blocks};
+				%\node[box,right=of block](table){Tables};
+				\node[box,right=of block,draw=accent,line width=1pt](leaf){Leaves};
+
+				\draw[-{Latex[length=2mm]}](doc)--(section);
+				\draw[-{Latex[length=2mm]}](section)--(block);
+				%\draw[-{Latex[length=2mm]}](block)--(table);
+				\draw[-{Latex[length=2mm]},accent,line width=1pt](block)--(leaf);
+
+			\end{tikzpicture}
+
+		\end{center}
+
+
+
+		\begin{block}{Key Idea}
+			Every computation operates on this canonical tree — not raw documents.
+		\end{block}
+
+		\vfill
+
+		{\small\color{accent}
+			THIS IS THE ENTERPRISE EQUIVALENT OF INTERMEDIATE REPRESENTATION (IR).
+		}
+
 	\end{frame}
 
+	%====================================================
+	\begin{frame}
+
+		\frametitle{Citadel (The Compiler)}
+
+
+
+		Citadel compiles enterprise knowledge into a canonical representation.
+
+
+
+		\begin{center}
+
+			\begin{tikzpicture}[
+				node distance=1.2cm,
+				box/.style={
+					draw=text,
+					rounded corners,
+					minimum width=2.2cm,
+					minimum height=0.85cm,
+					align=center,
+					font=\small
+				}
+				]
+
+				\node[box](docs){
+					PDF\\Word\\Excel\\HTML\\CSV\\JSON
+				};
+
+				\node[box,right=of docs](compiler){
+					Citadel\\Compiler
+				};
+
+				\node[box,right=of compiler,draw=accent,line width=1.2pt](ir){
+					Canonical\\IR
+				};
+
+				\node[box,right=of ir](apps){
+					Apps\\Search\\Analytics
+				};
+
+				\draw[-{Latex[length=2mm]}](docs)--(compiler);
+				\draw[-{Latex[length=2mm]},accent,line width=1pt](compiler)--(ir);
+				\draw[-{Latex[length=2mm]}](ir)--(apps);
+
+			\end{tikzpicture}
+
+		\end{center}
+
+
+
+		\begin{columns}
+
+			\column{0.33\textwidth}
+			\small
+			\textbf{Lossless}
+			\begin{itemize}
+				\item Structure preserved
+				\item Tables preserved
+				\item Provenance preserved
+			\end{itemize}
+
+			\column{0.33\textwidth}
+			\small
+			\textbf{Canonical}
+			\begin{itemize}
+				\item Single representation
+				\item Cross-format unification
+				\item Shared substrate
+			\end{itemize}
+
+			\column{0.33\textwidth}
+			\small
+			\textbf{Computable}
+			\begin{itemize}
+				\item SQL-ready
+				\item API-ready
+				\item Deterministic execution
+			\end{itemize}
+
+		\end{columns}
+
+		\vfill
+
+		{\small\color{accent}
+			DOCUMENTS BECOME A COMPUTATIONAL SUBSTRATE.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{Knowledge Is Not Retrieved — It Is Computed}
+
+
+
+		Traditional systems treat documents as search targets.
+
+
+
+		Citadel treats knowledge as executable structure.
+
+
+
+		\begin{center}
+
+			\textbf{Query Planning over Canonical Data}
+
+		\end{center}
+
+		\vfill
+
+		{\small\color{accent}
+			THE SYSTEM DOES NOT RETURN TEXT. IT EXECUTES STRUCTURE.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{From Retrieval to Knowledge Planning}
+
+		\begin{center}
+
+			\begin{tikzpicture}[
+				node distance=1.1cm,
+				box/.style={
+					draw=text,
+					rounded corners,
+					minimum width=2.3cm,
+					minimum height=0.8cm,
+					align=center,
+					font=\small
+				}
+				]
+
+				\node[box](q){Query};
+
+				\node[box,right=of q](intent){Intent/Expansion};
+
+				%\node[box,right=of intent](expand){Expansion};
+
+				\node[box,right=of intent](filter){Aggregation/Filtering};
+
+				\node[box,right=of filter](exec){Execution};
+
+				\draw[-{Latex[length=2mm]}](q)--(intent);
+				%\draw[-{Latex[length=2mm]}](intent)--(expand);
+				\draw[-{Latex[length=2mm]}](intent)--(filter);
+				\draw[-{Latex[length=2mm]}](filter)--(exec);
+
+			\end{tikzpicture}
+
+		\end{center}
+
+		\vspace{0.5cm}
+
+		\begin{center}
+			\small
+			Not retrieval. \textbf{Planning over compiled knowledge.}
+		\end{center}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{SQL Becomes the Execution Layer}
+
+
+
+		All structured knowledge converges into relational execution.
+
+
+
+		\begin{center}
+
+			\textbf{LLM generates queries. Citadel executes them.}
+
+		\end{center}
+
+
+
+		\begin{itemize}
+			\item Deterministic computation replaces approximation
+			\item Tables are first-class citizens
+			\item Provenance is preserved end-to-end
+		\end{itemize}
+
+		\vfill
+
+		{\small\color{accent}
+			MODELS REASON. SYSTEMS COMPUTE.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{Wide Net Retrieval Is Not Search}
+
+
+
+		Citadel does not “retrieve top-k documents”.
+
+
+
+		It constructs a \textbf{bounded evidence field}.
+
+
+
+		\begin{itemize}
+			\item Query expansion
+			\item Multi-path retrieval
+			\item Structural matching
+			\item Ranking over canonical leaves
+		\end{itemize}
+
+		\vfill
+
+		{\small\color{accent}
+			IF THE EVIDENCE EXISTS, CITADEL FINDS IT.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{Deterministic Knowledge Runtime}
+
+
+
+		Every answer is computed, not guessed.
+
+
+
+		\begin{center}
+
+			\textbf{Canonical IR → SQL → Execution → Answer}
+
+		\end{center}
+
+
+
+		\begin{itemize}
+			\item No hallucinated structure
+			\item No probabilistic aggregation
+			\item No re-parsing documents
+		\end{itemize}
+
+		\vfill
+
+		{\small\color{accent}
+			THE DOCUMENT IS NEVER RE-INTERPRETED.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{One Layer. Many Applications.}
+
+
+
+		All enterprise workflows converge onto the same substrate.
+
+
+
+		\begin{center}
+
+			Search \;|\; Legal AI \;|\; Compliance \;|\; Analytics \;|\; Agents
+
+		\end{center}
+
+
+
+		\begin{block}{Key Insight}
+			Applications differ only in logic.
+
+			Not in infrastructure.
+		\end{block}
+
+		\vfill
+
+		{\small\color{accent}
+			INFRASTRUCTURE BECOMES SHARED, NOT REBUILT.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{One Canonical Layer. Thousands of Applications.}
+
+
+
+		Once enterprise knowledge is compiled,
+
+		every application becomes a consumer of the same substrate.
+
+
+
+		\begin{center}
+
+			Search \;|\; Legal AI \;|\; Compliance \;|\; Analytics \;|\; Agents \;|\; ERP
+
+		\end{center}
+
+
+
+		\begin{block}{Shift}
+			Applications stop rebuilding infrastructure.
+
+			They begin sharing it.
+		\end{block}
+
+		\vfill
+
+		{\small\color{accent}
+			THE CANONICAL LAYER BECOMES THE DEFAULT COMPUTE SURFACE.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{The Economic Shift}
+
+
+
+		Today, every AI product rebuilds the same infrastructure.
+
+
+
+		\begin{center}
+
+			OCR \;|\; Parsing \;|\; Retrieval \;|\; Ranking \;|\; Embeddings \;|\; Citations
+
+		\end{center}
+
+		\vspace{0.7cm}
+
+		Each system independently pays for the same primitives.
+
+
+
+		\textbf{This is duplicated computation at global scale.}
+
+		\vfill
+
+		{\small\color{accent}
+			FRAGMENTATION IS THE DEFAULT COST STRUCTURE OF CURRENT AI.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{With Citadel}
+
+
+
+		Infrastructure is compiled once.
+
+
+
+		\begin{itemize}
+			\item One ingestion system
+			\item One canonical representation
+			\item One execution runtime
+		\end{itemize}
+
+
+
+		Applications become thin logic layers:
+
+		\begin{itemize}
+			\item Workflows
+			\item UX
+			\item Business logic
+			\item APIs
+		\end{itemize}
+
+		\vfill
+
+		{\small\color{accent}
+			THE VALUE SHIFTS FROM INFRASTRUCTURE TO EXPRESSION.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{The Network Effect of Knowledge}
+
+
+
+		Each document improves the entire system.
+
+
+
+		\begin{center}
+
+			Documents \;→\; Canonical Layer \;→\; Applications \;→\; More Documents
+
+		\end{center}
+
+
+
+		\begin{itemize}
+			\item Every ingestion improves structure inference
+			\item Every query improves planning quality
+			\item Every application benefits from shared representation
+		\end{itemize}
+
+		\vfill
+
+		{\small\color{accent}
+			THE DATASET IS NOT STATIC — IT IS A COMPILING SYSTEM.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{Why This Becomes a Moat}
+
+
+
+		Citadel improves with scale in ways competitors cannot replicate.
+
+
+
+		\begin{itemize}
+			\item Structural inference improves with corpus diversity
+			\item Table extraction improves with schema variety
+			\item Query planning improves with workload history
+			\item Provenance graph strengthens with usage
+		\end{itemize}
+
+
+
+		\begin{block}{Core Property}
+			The system becomes more accurate as it compiles more reality.
+		\end{block}
+
+		\vfill
+
+		{\small\color{accent}
+			THIS IS NOT A MODEL MOAT. IT IS A REPRESENTATION MOAT.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{Why Incumbents Cannot Easily Rebuild This}
+
+
+
+		Existing systems assume documents are the unit of computation.
+
+
+
+		Citadel replaces that assumption entirely.
+
+
+
+		\begin{itemize}
+			\item Search engines index text
+			\item Vector DBs embed chunks
+			\item LLM apps re-interpret documents every query
+		\end{itemize}
+
+
+
+		\textbf{None of these systems compile structure.}
+
+		\vfill
+
+		{\small\color{accent}
+			THE SHIFT IS ARCHITECTURAL, NOT INCREMENTAL.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{The Fourth Enterprise Data Layer}
+
+
+
+		Enterprise computing has evolved through distinct abstractions:
+
+
+
+		\begin{center}
+
+			Relational Databases \\
+			\vspace{0.2cm}
+			Data Warehouses \\
+			\vspace{0.2cm}
+			Search Engines \\
+			\vspace{0.4cm}
+			\textbf{Citadel: Canonical Knowledge Layer}
+
+		\end{center}
+
+
+
+		\begin{block}{Definition}
+			A compiled, executable representation of enterprise knowledge.
+		\end{block}
+
+		\vfill
+
+		{\small\color{accent}
+			THIS IS THE MISSING PRIMITIVE IN ENTERPRISE COMPUTING.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+
+		\frametitle{Closing}
+
+
+
+		Every major computing era introduced a compiler/runtime:
+
+
+
+		\begin{itemize}
+			\item Programming languages → compilers/interpreter/machine code
+			\item Data → databases/SQL
+			\item Web → search engines/retrieval
+		\end{itemize}
+
+
+
+		\textbf{Enterprise knowledge now needs its own compiler/runtime.}
+
+
+
+		\begin{center}
+
+			Citadel is that compiler and runtime.
+
+		\end{center}
+
+		\vfill
+
+		{\small\color{accent}
+			NOT SEARCH. NOT RETRIEVAL. A COMPUTING PRIMITIVE.
+		}
+
+	\end{frame}
 \end{document}
