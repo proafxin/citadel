@@ -83,35 +83,39 @@ def _is_d_star(cells: list[CellSignature]) -> bool:
 
 
 def _over_max(ratio: float) -> ColumnRule:
-    return lambda cell, ctx: bool(_nonnull(ctx)) and not cell.null and cell.length > ratio * max(
-        c.length for c in _nonnull(ctx)
+    return lambda cell, ctx: (
+        bool(_nonnull(ctx)) and not cell.null and cell.length > ratio * max(c.length for c in _nonnull(ctx))
     )
 
 
 COLUMN_DATA_RULES: dict[str, ColumnRule] = {
-    "CONSISTENT_NUMERIC_WIDTH": lambda cell, ctx: bool(ctx)
-    and bool(_col(cell, ctx))
-    and all(c.strict_numeric for c in _col(cell, ctx))
-    and len({c.length for c in _col(cell, ctx)}) == 1,
-    "CONSISTENT_NUMERIC": lambda cell, ctx: bool(ctx)
-    and bool(_col(cell, ctx))
-    and all(c.strict_numeric for c in _col(cell, ctx)),
+    "CONSISTENT_NUMERIC_WIDTH": lambda cell, ctx: (
+        bool(ctx)
+        and bool(_col(cell, ctx))
+        and all(c.strict_numeric for c in _col(cell, ctx))
+        and len({c.length for c in _col(cell, ctx)}) == 1
+    ),
+    "CONSISTENT_NUMERIC": lambda cell, ctx: (
+        bool(ctx) and bool(_col(cell, ctx)) and all(c.strict_numeric for c in _col(cell, ctx))
+    ),
     "CONSISTENT_D_STAR": lambda cell, ctx: bool(ctx) and _is_d_star([cell, *ctx]),
     "FW_SUMMARY_D": lambda cell, ctx: _prefix([cell, *ctx], forward=True)[:1] == ("D",),
     "BW_SUMMARY_D": lambda cell, ctx: _prefix([cell, *ctx], forward=False)[:1] == ("D",),
-    "BROAD_NUMERIC": lambda cell, ctx: bool(ctx)
-    and bool(_col(cell, ctx))
-    and all(c.numeric for c in _col(cell, ctx)),
+    "BROAD_NUMERIC": lambda cell, ctx: bool(ctx) and bool(_col(cell, ctx)) and all(c.numeric for c in _col(cell, ctx)),
     "FW_THREE_OR_MORE_NO_SPACE": lambda cell, ctx: _prefix_len_no_space(_prefix([cell, *ctx], forward=True)) >= 3,
     "BW_THREE_OR_MORE_NO_SPACE": lambda cell, ctx: _prefix_len_no_space(_prefix([cell, *ctx], forward=False)) >= 3,
-    "CONSISTENT_SS_NO_SPACE": lambda cell, ctx: bool(ctx)
-    and bool(_col(cell, ctx))
-    and len({c.symbol_set for c in _col(cell, ctx)}) == 1
-    and "W" not in _col(cell, ctx)[0].symbol_set,
-    "CONSISTENT_SC_TWO_OR_MORE": lambda cell, ctx: bool(ctx)
-    and bool(_col(cell, ctx))
-    and len({c.symbol_set for c in _col(cell, ctx)}) == 1
-    and len(_col(cell, ctx)[0].symbol_set) >= 2,
+    "CONSISTENT_SS_NO_SPACE": lambda cell, ctx: (
+        bool(ctx)
+        and bool(_col(cell, ctx))
+        and len({c.symbol_set for c in _col(cell, ctx)}) == 1
+        and "W" not in _col(cell, ctx)[0].symbol_set
+    ),
+    "CONSISTENT_SC_TWO_OR_MORE": lambda cell, ctx: (
+        bool(ctx)
+        and bool(_col(cell, ctx))
+        and len({c.symbol_set for c in _col(cell, ctx)}) == 1
+        and len(_col(cell, ctx)[0].symbol_set) >= 2
+    ),
     "FW_TWO_OR_MORE_NO_SPACE": lambda cell, ctx: _prefix_len_no_space(_prefix([cell, *ctx], forward=True)) >= 2,
     "BW_TWO_OR_MORE_NO_SPACE": lambda cell, ctx: _prefix_len_no_space(_prefix([cell, *ctx], forward=False)) >= 2,
     "FW_TWO_OR_MORE_NO_SPACE_FIRST_TWO": lambda cell, ctx: _first_two_no_space([cell, *ctx], forward=True),
@@ -124,79 +128,99 @@ COLUMN_DATA_RULES: dict[str, ColumnRule] = {
     "BW_D4": lambda cell, ctx: _common_runs([cell, *ctx], forward=False) == (("D", 4),),
     "FW_LENGTH_4PLUS": lambda cell, ctx: len(_prefix([cell, *ctx], forward=True)) >= 4,
     "BW_LENGTH_4PLUS": lambda cell, ctx: len(_prefix([cell, *ctx], forward=False)) >= 4,
-    "CASE_SUMMARY_CAPS": lambda cell, ctx: bool(ctx)
-    and bool(_col(cell, ctx))
-    and all(c.case == "upper" for c in _col(cell, ctx)),
-    "CONSISTENT_SINGLE_WORD_CONSISTENT_CASE": lambda cell, ctx: bool(ctx)
-    and bool(_col(cell, ctx))
-    and len({c.case for c in _col(cell, ctx)}) == 1
-    and _col(cell, ctx)[0].case in {"upper", "lower", "title"}
-    and all("W" not in c.symbol_set for c in _col(cell, ctx)),
+    "CASE_SUMMARY_CAPS": lambda cell, ctx: (
+        bool(ctx) and bool(_col(cell, ctx)) and all(c.case == "upper" for c in _col(cell, ctx))
+    ),
+    "CONSISTENT_SINGLE_WORD_CONSISTENT_CASE": lambda cell, ctx: (
+        bool(ctx)
+        and bool(_col(cell, ctx))
+        and len({c.case for c in _col(cell, ctx)}) == 1
+        and _col(cell, ctx)[0].case in {"upper", "lower", "title"}
+        and all("W" not in c.symbol_set for c in _col(cell, ctx))
+    ),
     "VALUE_REPEATS_ONCE_BELOW": lambda cell, ctx: not cell.null and sum(1 for c in ctx if c.value == cell.value) == 1,
-    "VALUE_REPEATS_TWICE_OR_MORE_BELOW": lambda cell, ctx: not cell.null
-    and sum(1 for c in ctx if c.value == cell.value) >= 2,
-    "CONSISTENT_CHAR_LENGTH": lambda cell, ctx: bool(ctx)
-    and bool(_col(cell, ctx))
-    and len({c.length for c in _col(cell, ctx)}) == 1,
+    "VALUE_REPEATS_TWICE_OR_MORE_BELOW": lambda cell, ctx: (
+        not cell.null and sum(1 for c in ctx if c.value == cell.value) >= 2
+    ),
+    "CONSISTENT_CHAR_LENGTH": lambda cell, ctx: (
+        bool(ctx) and bool(_col(cell, ctx)) and len({c.length for c in _col(cell, ctx)}) == 1
+    ),
 }
 
 COLUMN_NOT_DATA_RULES: dict[str, ColumnRule] = {
-    "First_FW_Symbol_disagrees": lambda cell, ctx: bool(ctx)
-    and bool(cell.symbols)
-    and bool(_prefix(ctx, forward=True))
-    and (cell.symbols[0][0],) != _prefix(ctx, forward=True)[:1],
-    "First_BW_Symbol_disagrees": lambda cell, ctx: bool(ctx)
-    and bool(cell.symbols_reversed)
-    and bool(_prefix(ctx, forward=False))
-    and (cell.symbols_reversed[0][0],) != _prefix(ctx, forward=False)[:1],
-    "SymbolChain": lambda cell, ctx: len(_nonnull(ctx)) >= 2
-    and len({c.symbols for c in _nonnull(ctx)}) == 1
-    and not cell.null
-    and cell.symbols != _nonnull(ctx)[0].symbols,
-    "CONSISTENT_NUMERIC": lambda cell, ctx: bool(_nonnull(ctx))
-    and all(c.strict_numeric for c in _nonnull(ctx))
-    and not cell.null
-    and not cell.strict_numeric,
+    "First_FW_Symbol_disagrees": lambda cell, ctx: (
+        bool(ctx)
+        and bool(cell.symbols)
+        and bool(_prefix(ctx, forward=True))
+        and (cell.symbols[0][0],) != _prefix(ctx, forward=True)[:1]
+    ),
+    "First_BW_Symbol_disagrees": lambda cell, ctx: (
+        bool(ctx)
+        and bool(cell.symbols_reversed)
+        and bool(_prefix(ctx, forward=False))
+        and (cell.symbols_reversed[0][0],) != _prefix(ctx, forward=False)[:1]
+    ),
+    "SymbolChain": lambda cell, ctx: (
+        len(_nonnull(ctx)) >= 2
+        and len({c.symbols for c in _nonnull(ctx)}) == 1
+        and not cell.null
+        and cell.symbols != _nonnull(ctx)[0].symbols
+    ),
+    "CONSISTENT_NUMERIC": lambda cell, ctx: (
+        bool(_nonnull(ctx))
+        and all(c.strict_numeric for c in _nonnull(ctx))
+        and not cell.null
+        and not cell.strict_numeric
+    ),
     "CONSISTENT_D_STAR": lambda cell, ctx: bool(ctx) and _is_d_star(ctx) and not _is_d_star([*ctx, cell]),
     "FW_SUMMARY_D": lambda cell, ctx: _prefix(ctx, forward=True)[:1] == ("D",) and _breaks(cell, ctx, forward=True),
     "BW_SUMMARY_D": lambda cell, ctx: _prefix(ctx, forward=False)[:1] == ("D",) and _breaks(cell, ctx, forward=False),
-    "BROAD_NUMERIC": lambda cell, ctx: bool(_nonnull(ctx))
-    and all(c.numeric for c in _nonnull(ctx))
-    and not cell.null
-    and not cell.numeric,
-    "FW_THREE_OR_MORE_NO_SPACE": lambda cell, ctx: _prefix_len_no_space(_prefix(ctx, forward=True)) >= 3
-    and _breaks(cell, ctx, forward=True),
-    "BW_THREE_OR_MORE_NO_SPACE": lambda cell, ctx: _prefix_len_no_space(_prefix(ctx, forward=False)) >= 3
-    and _breaks(cell, ctx, forward=False),
-    "CONSISTENT_SS_NO_SPACE": lambda cell, ctx: bool(_nonnull(ctx))
-    and len({c.symbol_set for c in _nonnull(ctx)}) == 1
-    and "W" not in _nonnull(ctx)[0].symbol_set
-    and not cell.null
-    and cell.symbol_set != _nonnull(ctx)[0].symbol_set,
-    "FW_TWO_OR_MORE_NO_SPACE": lambda cell, ctx: _prefix_len_no_space(_prefix(ctx, forward=True)) >= 2
-    and _breaks(cell, ctx, forward=True),
-    "BW_TWO_OR_MORE_NO_SPACE": lambda cell, ctx: _prefix_len_no_space(_prefix(ctx, forward=False)) >= 2
-    and _breaks(cell, ctx, forward=False),
-    "CC": lambda cell, ctx: bool(_nonnull(ctx))
-    and len({c.case for c in _nonnull(ctx)}) == 1
-    and not cell.null
-    and cell.case != _nonnull(ctx)[0].case,
-    "CHAR_COUNT_UNDER_POINT1_MIN": lambda cell, ctx: bool(_nonnull(ctx))
-    and not cell.null
-    and cell.length < 0.1 * min(c.length for c in _nonnull(ctx)),
-    "CHAR_COUNT_UNDER_POINT3_MIN": lambda cell, ctx: bool(_nonnull(ctx))
-    and not cell.null
-    and cell.length < 0.3 * min(c.length for c in _nonnull(ctx)),
+    "BROAD_NUMERIC": lambda cell, ctx: (
+        bool(_nonnull(ctx)) and all(c.numeric for c in _nonnull(ctx)) and not cell.null and not cell.numeric
+    ),
+    "FW_THREE_OR_MORE_NO_SPACE": lambda cell, ctx: (
+        _prefix_len_no_space(_prefix(ctx, forward=True)) >= 3 and _breaks(cell, ctx, forward=True)
+    ),
+    "BW_THREE_OR_MORE_NO_SPACE": lambda cell, ctx: (
+        _prefix_len_no_space(_prefix(ctx, forward=False)) >= 3 and _breaks(cell, ctx, forward=False)
+    ),
+    "CONSISTENT_SS_NO_SPACE": lambda cell, ctx: (
+        bool(_nonnull(ctx))
+        and len({c.symbol_set for c in _nonnull(ctx)}) == 1
+        and "W" not in _nonnull(ctx)[0].symbol_set
+        and not cell.null
+        and cell.symbol_set != _nonnull(ctx)[0].symbol_set
+    ),
+    "FW_TWO_OR_MORE_NO_SPACE": lambda cell, ctx: (
+        _prefix_len_no_space(_prefix(ctx, forward=True)) >= 2 and _breaks(cell, ctx, forward=True)
+    ),
+    "BW_TWO_OR_MORE_NO_SPACE": lambda cell, ctx: (
+        _prefix_len_no_space(_prefix(ctx, forward=False)) >= 2 and _breaks(cell, ctx, forward=False)
+    ),
+    "CC": lambda cell, ctx: (
+        bool(_nonnull(ctx))
+        and len({c.case for c in _nonnull(ctx)}) == 1
+        and not cell.null
+        and cell.case != _nonnull(ctx)[0].case
+    ),
+    "CHAR_COUNT_UNDER_POINT1_MIN": lambda cell, ctx: (
+        bool(_nonnull(ctx)) and not cell.null and cell.length < 0.1 * min(c.length for c in _nonnull(ctx))
+    ),
+    "CHAR_COUNT_UNDER_POINT3_MIN": lambda cell, ctx: (
+        bool(_nonnull(ctx)) and not cell.null and cell.length < 0.3 * min(c.length for c in _nonnull(ctx))
+    ),
     "CHAR_COUNT_OVER_POINT5_MAX": _over_max(1.5),
     "CHAR_COUNT_OVER_POINT6_MAX": _over_max(1.6),
     "CHAR_COUNT_OVER_POINT7_MAX": _over_max(1.7),
     "CHAR_COUNT_OVER_POINT8_MAX": _over_max(1.8),
     "CHAR_COUNT_OVER_POINT9_MAX": _over_max(1.9),
-    "NON_NUMERIC_CHAR_COUNT_DIFFERS_FROM_CONSISTENT": lambda cell, ctx: bool(_nonnull(ctx))
-    and len({c.length for c in _nonnull(ctx)}) == 1
-    and not cell.null
-    and cell.length != _nonnull(ctx)[0].length
-    and not any(c.numeric for c in [cell, *_nonnull(ctx)]),
+    "NON_NUMERIC_CHAR_COUNT_DIFFERS_FROM_CONSISTENT": lambda cell, ctx: (
+        bool(_nonnull(ctx))
+        and len({c.length for c in _nonnull(ctx)}) == 1
+        and not cell.null
+        and cell.length != _nonnull(ctx)[0].length
+        and not any(c.numeric for c in [cell, *_nonnull(ctx)])
+    ),
 }
 
 
@@ -263,7 +287,9 @@ def _no_summary_below(lc: LineContext) -> bool:
 
 
 def _is_camel(value: str) -> bool:
-    return bool(value) and " " not in value and value[:1].islower() and any(c.isupper() for c in value) and value.isalnum()
+    return (
+        bool(value) and " " not in value and value[:1].islower() and any(c.isupper() for c in value) and value.isalnum()
+    )
 
 
 def _aggregation_after_first(line: LineSignature) -> bool:
@@ -271,25 +297,30 @@ def _aggregation_after_first(line: LineSignature) -> bool:
 
 
 LINE_DATA_RULES: dict[str, LineRule] = {
-    "AGGREGATION_TOKEN_IN_FIRST_VALUE_OF_ROW": lambda lc: bool(lc.line.cells)
-    and any(keyword in lc.line.cells[0].value.casefold() for keyword in AGGREGATION_KEYWORDS),
+    "AGGREGATION_TOKEN_IN_FIRST_VALUE_OF_ROW": lambda lc: (
+        bool(lc.line.cells) and any(keyword in lc.line.cells[0].value.casefold() for keyword in AGGREGATION_KEYWORDS)
+    ),
     "NULL_EQUIVALENT_ON_LINE_2_PLUS": lambda lc: sum(1 for cell in lc.line.cells if cell.null) >= 2,
     "ONE_NULL_EQUIVALENT_ON_LINE": lambda lc: sum(1 for cell in lc.line.cells if cell.null) == 1,
     "CONTAINS_DATATYPE_CELL_VALUE": lambda lc: any(cell.value.casefold() in DATATYPE_TOKENS for cell in lc.line.cells),
 }
 
 LINE_NOT_DATA_RULES: dict[str, LineRule] = {
-    "METADATA_LIKE_ROW": lambda lc: bool(lc.line.cells)
-    and lc.line.cells[0].value.startswith("(")
-    and lc.line.cells[0].value.endswith(")")
-    and all(cell.null for cell in lc.line.cells[1:]),
+    "METADATA_LIKE_ROW": lambda lc: (
+        bool(lc.line.cells)
+        and lc.line.cells[0].value.startswith("(")
+        and lc.line.cells[0].value.endswith(")")
+        and all(cell.null for cell in lc.line.cells[1:])
+    ),
     "UP_TO_FIRST_COLUMN_COMPLETE_CONSISTENTLY": lambda lc: lc.first_col_only,
     "STARTS_WITH_NULL": lambda lc: bool(lc.line.cells) and lc.line.cells[0].null,
     "NO_SUMMARY_BELOW": _no_summary_below,
-    "CONSISTENTLY_SLUG_OR_SNAKE": lambda lc: bool(lc.line.non_null)
-    and all(cell.case == "snake" or _is_camel(cell.value) for cell in lc.line.non_null),
-    "CONSISTENTLY_UPPER_CASE": lambda lc: bool(lc.line.non_null)
-    and all(cell.case == "upper" for cell in lc.line.non_null),
+    "CONSISTENTLY_SLUG_OR_SNAKE": lambda lc: (
+        bool(lc.line.non_null) and all(cell.case == "snake" or _is_camel(cell.value) for cell in lc.line.non_null)
+    ),
+    "CONSISTENTLY_UPPER_CASE": lambda lc: (
+        bool(lc.line.non_null) and all(cell.case == "upper" for cell in lc.line.non_null)
+    ),
     "ADJACENT_ARITHMETIC_SEQUENCE_2": lambda lc: _arithmetic_run(lc.line, 2),
     "ADJACENT_ARITHMETIC_SEQUENCE_3": lambda lc: _arithmetic_run(lc.line, 3),
     "ADJACENT_ARITHMETIC_SEQUENCE_4": lambda lc: _arithmetic_run(lc.line, 4),
@@ -298,12 +329,15 @@ LINE_NOT_DATA_RULES: dict[str, LineRule] = {
     "RANGE_PAIRS_1": lambda lc: _range_count(lc.line) == 1,
     "RANGE_PAIRS_2_plus": lambda lc: _range_count(lc.line) >= 2,
     "PARTIALLY_REPEATING_VALUES_length_2_plus": lambda lc: _partially_repeating(lc.line),
-    "AGGREGATION_ON_ROW_WO_NUMERIC": lambda lc: _aggregation_after_first(lc.line)
-    and not any(cell.numeric for cell in lc.line.cells),
+    "AGGREGATION_ON_ROW_WO_NUMERIC": lambda lc: (
+        _aggregation_after_first(lc.line) and not any(cell.numeric for cell in lc.line.cells)
+    ),
     "AGGREGATION_ON_ROW_W_ARITH_SEQUENCE": lambda lc: _aggregation_after_first(lc.line) and _arithmetic_run(lc.line, 2),
-    "FOOTNOTE": lambda lc: bool(lc.line.cells)
-    and any(lc.line.cells[0].value.casefold().startswith(keyword) for keyword in FOOTNOTE_KEYWORDS)
-    and all(cell.null for cell in lc.line.cells[2:]),
+    "FOOTNOTE": lambda lc: (
+        bool(lc.line.cells)
+        and any(lc.line.cells[0].value.casefold().startswith(keyword) for keyword in FOOTNOTE_KEYWORDS)
+        and all(cell.null for cell in lc.line.cells[2:])
+    ),
     "METADATA_TABLE_HEADER_KEYWORDS": lambda lc: any(cell.value.casefold() in GUIDE_HEADERS for cell in lc.line.cells),
 }
 

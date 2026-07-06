@@ -75,12 +75,12 @@ def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:
             session.add(Paragraph(content_id=spec.content_id, text=spec.text or ""))
 
 
-async def _resolve_tables(blocks: list[Block], context: str) -> tuple[dict[int, int], list[MaterializedTable]]:
+async def _resolve_tables(blocks: list[Block]) -> tuple[dict[int, int], list[MaterializedTable]]:
     counts: dict[int, int] = {}
     queue: list[MaterializedTable] = []
     for idx, block in enumerate(blocks):
         if block.type == "table":
-            tables = await structure_html_tables(block.text or "", context)
+            tables = await structure_html_tables(block.text or "")
             counts[idx] = len(tables)
             queue.extend(tables)
     return counts, queue
@@ -111,7 +111,7 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: str, inge
         library_id, filename, library_name = document.library_id, document.filename, library.name
     content_blocks, paratext = split_paratext(blocks)
     stitched = stitch_tables(content_blocks)
-    table_counts, table_queue = await _resolve_tables(stitched, filename)
+    table_counts, table_queue = await _resolve_tables(stitched)
     specs = list(build_tree(stitched, library_id, doc_id, table_counts))
     search_text = build_search_text(specs, library_name, filename, paratext)
     tables = iter(table_queue)

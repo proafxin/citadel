@@ -5,7 +5,6 @@ from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
-from citadel.llm import SLM_CONCURRENCY
 from citadel.services.ingestion import (
     GROUP,
     MAX_ATTEMPTS,
@@ -35,6 +34,7 @@ from citadel.services.ingestion import (
     handle_tabular,
     make_profile_pool,
 )
+from citadel.tabular.infer import HEADER_WORKERS
 from config import CPU_THIRD, configure_logging, get_settings
 
 logger = logging.getLogger(__name__)
@@ -299,9 +299,9 @@ async def merge() -> None:
     await _drive(STREAM_MERGE, cap, lambda mid, raw: _spawn(_merge_job(cap, mid, raw)))
 
 
-# ---- tabular: read `tables`, SLM structure + describe, write tables. bounded by the SLM slot ------------
+# ---- tabular: read `tables`, model header-detection + describe, write tables. bounded by the header pool -----
 async def tabular() -> None:
-    cap = _Capacity(SLM_CONCURRENCY)
+    cap = _Capacity(HEADER_WORKERS)
     await _drive(STREAM_TABLES, cap, lambda mid, raw: _spawn(_tabular_job(cap, mid, raw)))
 
 

@@ -4,19 +4,14 @@ from io import BytesIO
 
 import openpyxl
 from openpyxl.cell.cell import Cell as OpenpyxlCell
-from openpyxl.utils import coordinate_to_tuple, range_boundaries
 from openpyxl.worksheet.worksheet import Worksheet
 
-from citadel.llm import call_slm
-from citadel.prompts import load_prompt
-from citadel.schemas.table import CellValue, Column, ColumnDType, RegionStructure, TableStructure
+from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
+from citadel.tabular.infer import predict_pooled, structure_from_mask
 
 type RawCellValue = str | int | float | bool | datetime | None
 
-HEAD_ROWS = 4
-SAMPLE_CAP = 50
 SAMPLE_TABLE_ROWS = 10
-CONTEXT_ROWS = 2
 
 
 @dataclass
@@ -39,16 +34,6 @@ class MergedRange:
 
 
 @dataclass
-class ExcelTableObject:
-    name: str
-    min_row: int
-    min_col: int
-    max_row: int
-    max_col: int
-    header_rows: int
-
-
-@dataclass
 class SheetExtraction:
     sheet_no: int
     sheet_name: str
@@ -56,10 +41,6 @@ class SheetExtraction:
     max_col: int
     cells: list[Cell]
     merges: list[MergedRange]
-    table_objects: list[ExcelTableObject]
-    comments: dict[tuple[int, int], str]
-    freeze_row: int | None
-    freeze_col: int | None
 
 
 @dataclass
@@ -69,22 +50,6 @@ class Region:
     max_row: int
     max_col: int
     cells: list[Cell]
-
-
-@dataclass
-class RegionAnchors:
-    region: Region
-    n_rows: int
-    n_cols: int
-    head: list[list[RawCellValue]]
-    samples: list[tuple[int, list[RawCellValue]]]
-    bold_offsets: list[int]
-    merges: list[MergedRange]
-    table_objects: list[ExcelTableObject]
-    above_text: list[str]
-    below_text: list[str]
-    freeze_header_rows: int | None
-    comments: list[str]
 
 
 @dataclass
@@ -112,13 +77,10 @@ def _style_flags(cell: OpenpyxlCell) -> tuple[bool, bool, bool]:
     return bold, filled, bordered
 
 
-def _capture_cells(worksheet: Worksheet) -> tuple[list[Cell], dict[tuple[int, int], str]]:
+def _capture_cells(worksheet: Worksheet) -> list[Cell]:
     cells: list[Cell] = []
-    comments: dict[tuple[int, int], str] = {}
     for row in worksheet.iter_rows():
         for cell in row:
-            if cell.comment is not None:
-                comments[cell.row, cell.column] = cell.comment.text or ""
             if cell.value is None:
                 continue
             bold, filled, bordered = _style_flags(cell)
@@ -133,7 +95,7 @@ def _capture_cells(worksheet: Worksheet) -> tuple[list[Cell], dict[tuple[int, in
                     bordered=bordered,
                 )
             )
-    return cells, comments
+    return cells
 
 
 def _capture_merges(worksheet: Worksheet) -> list[MergedRange]:
@@ -143,45 +105,14 @@ def _capture_merges(worksheet: Worksheet) -> list[MergedRange]:
     ]
 
 
-def _capture_tables(worksheet: Worksheet) -> list[ExcelTableObject]:
-    objects: list[ExcelTableObject] = []
-    for table in worksheet.tables.values():
-        min_col, min_row, max_col, max_row = range_boundaries(table.ref)
-        objects.append(
-            ExcelTableObject(
-                name=table.name,
-                min_row=min_row,
-                min_col=min_col,
-                max_row=max_row,
-                max_col=max_col,
-                header_rows=table.headerRowCount or 0,
-            )
-        )
-    return objects
-
-
-def _freeze(worksheet: Worksheet) -> tuple[int | None, int | None]:
-    panes = worksheet.freeze_panes
-    if not panes:
-        return None, None
-    row, col = coordinate_to_tuple(panes)
-    return row, col
-
-
 def extract_sheet(worksheet: Worksheet, sheet_no: int) -> SheetExtraction:
-    cells, comments = _capture_cells(worksheet)
-    freeze_row, freeze_col = _freeze(worksheet)
     return SheetExtraction(
         sheet_no=sheet_no,
         sheet_name=worksheet.title,
         max_row=worksheet.max_row or 0,
         max_col=worksheet.max_column or 0,
-        cells=cells,
+        cells=_capture_cells(worksheet),
         merges=_capture_merges(worksheet),
-        table_objects=_capture_tables(worksheet),
-        comments=comments,
-        freeze_row=freeze_row,
-        freeze_col=freeze_col,
     )
 
 
@@ -234,12 +165,6 @@ def _value_map(cells: list[Cell]) -> dict[tuple[int, int], RawCellValue]:
     return {(cell.row, cell.col): cell.value for cell in cells}
 
 
-def _row_values(
-    values: dict[tuple[int, int], RawCellValue], row: int, min_col: int, max_col: int
-) -> list[RawCellValue]:
-    return [values.get((row, col)) for col in range(min_col, max_col + 1)]
-
-
 def _infer_dtype(values: list[RawCellValue]) -> ColumnDType:
     present = [value for value in values if value is not None]
     if not present:
@@ -253,122 +178,6 @@ def _infer_dtype(values: list[RawCellValue]) -> ColumnDType:
     if all(isinstance(value, datetime) for value in present):
         return ColumnDType.DATETIME
     return ColumnDType.STRING
-
-
-def _sample_rows(region: Region, head_end: int) -> list[int]:
-    body = list(range(head_end + 1, region.max_row + 1))
-    if not body:
-        return []
-    stride = max(1, (len(body) + SAMPLE_CAP - 1) // SAMPLE_CAP)
-    picked = set(body[::stride])
-    picked.update({body[0], body[-1]})
-    return sorted(picked)
-
-
-def _overlaps(min_row: int, min_col: int, max_row: int, max_col: int, region: Region) -> bool:
-    return not (
-        max_row < region.min_row or min_row > region.max_row or max_col < region.min_col or min_col > region.max_col
-    )
-
-
-def _text_band(cells: list[Cell], rows: range, min_col: int, max_col: int) -> list[str]:
-    return [
-        cell.value
-        for cell in cells
-        if cell.row in rows and min_col <= cell.col <= max_col and isinstance(cell.value, str)
-    ]
-
-
-def build_anchors(sheet: SheetExtraction, region: Region) -> RegionAnchors:
-    values = _value_map(region.cells)
-    head_end = min(region.min_row + HEAD_ROWS - 1, region.max_row)
-    head = [_row_values(values, row, region.min_col, region.max_col) for row in range(region.min_row, head_end + 1)]
-    samples = [
-        (row - region.min_row, _row_values(values, row, region.min_col, region.max_col))
-        for row in _sample_rows(region, head_end)
-    ]
-    freeze = sheet.freeze_row
-    return RegionAnchors(
-        region=region,
-        n_rows=region.max_row - region.min_row + 1,
-        n_cols=region.max_col - region.min_col + 1,
-        head=head,
-        samples=samples,
-        bold_offsets=sorted({cell.row - region.min_row for cell in region.cells if cell.bold}),
-        merges=[
-            merge
-            for merge in sheet.merges
-            if _overlaps(merge.min_row, merge.min_col, merge.max_row, merge.max_col, region)
-        ],
-        table_objects=[
-            table
-            for table in sheet.table_objects
-            if _overlaps(table.min_row, table.min_col, table.max_row, table.max_col, region)
-        ],
-        above_text=_text_band(
-            sheet.cells, range(max(1, region.min_row - CONTEXT_ROWS), region.min_row), region.min_col, region.max_col
-        ),
-        below_text=_text_band(
-            sheet.cells, range(region.max_row + 1, region.max_row + 1 + CONTEXT_ROWS), region.min_col, region.max_col
-        ),
-        freeze_header_rows=(
-            freeze - region.min_row if freeze and region.min_row < freeze <= region.max_row + 1 else None
-        ),
-        comments=[
-            text
-            for (row, col), text in sheet.comments.items()
-            if region.min_row <= row <= region.max_row and region.min_col <= col <= region.max_col
-        ],
-    )
-
-
-def _fmt_row(values: list[RawCellValue]) -> str:
-    return " | ".join("" if value is None else str(value) for value in values)
-
-
-def _rel(region: Region, row: int, col: int) -> str:
-    return f"r{row - region.min_row}c{col - region.min_col}"
-
-
-def _render_anchors(anchors: RegionAnchors) -> str:
-    region = anchors.region
-    lines = [
-        f"Region: {anchors.n_rows} rows x {anchors.n_cols} cols (0-based offsets within the region).",
-        "Top rows:",
-        *(f"  r{offset}: {_fmt_row(row)}" for offset, row in enumerate(anchors.head)),
-    ]
-    if anchors.samples:
-        lines.append("Sample data rows:")
-        lines.extend(f"  r{offset}: {_fmt_row(values)}" for offset, values in anchors.samples)
-    if anchors.bold_offsets:
-        lines.append(f"Bold row offsets: {anchors.bold_offsets}")
-    if anchors.merges:
-        merged = ", ".join(
-            f"{_rel(region, merge.min_row, merge.min_col)}:{_rel(region, merge.max_row, merge.max_col)}"
-            for merge in anchors.merges
-        )
-        lines.append(f"Merged ranges: {merged}")
-    if anchors.table_objects:
-        objects = ", ".join(
-            f"{table.name}[{_rel(region, table.min_row, table.min_col)}:"
-            f"{_rel(region, table.max_row, table.max_col)}] header_rows={table.header_rows}"
-            for table in anchors.table_objects
-        )
-        lines.append(f"Excel table objects: {objects}")
-    if anchors.freeze_header_rows is not None:
-        lines.append(f"Freeze suggests header rows: {anchors.freeze_header_rows}")
-    if anchors.above_text:
-        lines.append(f"Text above region: {anchors.above_text}")
-    if anchors.below_text:
-        lines.append(f"Text below region: {anchors.below_text}")
-    if anchors.comments:
-        lines.append(f"Comments: {anchors.comments}")
-    return "\n".join(lines)
-
-
-async def extract_structure(anchors: RegionAnchors) -> RegionStructure:
-    prompt = f"{load_prompt('table_structure')}\n{_render_anchors(anchors)}"
-    return RegionStructure.model_validate(await call_slm(prompt, RegionStructure.model_json_schema()))
 
 
 def _cast(value: RawCellValue, dtype: ColumnDType) -> CellValue:
@@ -441,12 +250,43 @@ def apply_structure(region: Region, structure: TableStructure, sheet_no: int) ->
     )
 
 
+def _render_cell(value: RawCellValue) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
+    # the region as a dense string grid for the header model: merged cells are filled (top-left value spans the whole
+    # merge) and every typed value rendered to text, so a merged / multi-row header reads like a normal grid. offsets
+    # are region-relative (row 0 = region.min_row) to line up with structure_from_mask and apply_structure
+    values = {(cell.row, cell.col): cell.value for cell in region.cells}
+    for merge in sheet.merges:
+        if merge.max_row < region.min_row or merge.min_row > region.max_row:
+            continue
+        if merge.max_col < region.min_col or merge.min_col > region.max_col:
+            continue
+        top_left = values.get((merge.min_row, merge.min_col))
+        if top_left is None:
+            continue
+        for row in range(max(merge.min_row, region.min_row), min(merge.max_row, region.max_row) + 1):
+            for col in range(max(merge.min_col, region.min_col), min(merge.max_col, region.max_col) + 1):
+                values.setdefault((row, col), top_left)
+    return [
+        [_render_cell(values.get((row, col))) for col in range(region.min_col, region.max_col + 1)]
+        for row in range(region.min_row, region.max_row + 1)
+    ]
+
+
 async def extract_tables(sheet: SheetExtraction) -> list[tuple[int, MaterializedTable]]:
     tables: list[tuple[int, MaterializedTable]] = []
     ordinal = 0
     for region in find_regions(sheet):
-        structure = await extract_structure(build_anchors(sheet, region))
-        for table in structure.tables:
+        grid = region_grid(sheet, region)
+        mask = await predict_pooled(grid)
+        for structure in structure_from_mask(grid, mask):
             ordinal += 1
-            tables.append((ordinal, apply_structure(region, table, sheet.sheet_no)))
+            tables.append((ordinal, apply_structure(region, structure, sheet.sheet_no)))
     return tables

@@ -43,7 +43,7 @@ from citadel.services.excel import extract_sheet_no, extract_tables, sheet_names
 from citadel.services.html import parse_html
 from citadel.services.library import library_exists
 from citadel.services.pdf import MAX_IMAGE_SIDE, count_pdf_pages, downscale, extract_layer_by_bbox, render_pdf_page
-from citadel.services.tabular import extract_json_tables, read_csv_table
+from citadel.services.tabular import extract_json_tables, structure_csv_tables
 from citadel.utils import normalize_file
 from config import CPU_THIRD, get_settings
 
@@ -382,10 +382,10 @@ async def handle_tabular(fields: dict[str, str]) -> None:
             tables = await asyncio.to_thread(extract_json_tables, data, filename.rsplit(".", 1)[0] or "root")
         else:
             separator = "\t" if kind == "tsv" else ","
-            tables = [(1, await asyncio.to_thread(read_csv_table, data, separator))]
-        for _ordinal, table in tables:
-            table.description = await describe_table(table.columns, table.sample_rows, filename)
+            tables = list(enumerate(await structure_csv_tables(data, separator), start=1))
         sheet_name = filename
+    for _ordinal, table in tables:
+        table.description = await describe_table(table.columns, table.sample_rows, sheet_name)
     await save_sheet_tables(int(doc_id), sheet_no, sheet_name, tables)
     await record_sheet(doc_id, sheet_no)
 

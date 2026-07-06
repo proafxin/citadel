@@ -1,7 +1,6 @@
 import asyncio
 import json
 import re
-from datetime import date, datetime
 from decimal import Decimal
 from io import BytesIO
 
@@ -9,68 +8,22 @@ import polars as pl
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
-from citadel.llm import call_slm
-from citadel.prompts import load_prompt
 from citadel.schemas.content import Block
-from citadel.schemas.table import CellValue, Column, ColumnDType, RegionStructure, TableStructure
+from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
 from citadel.services.excel import SAMPLE_TABLE_ROWS, MaterializedTable
+from citadel.tabular.infer import predict_pooled, structure_from_mask
 
-_DTYPE_BY_PREFIX = {
-    "Int": ColumnDType.INTEGER,
-    "UInt": ColumnDType.INTEGER,
-    "Float": ColumnDType.FLOAT,
-    "Decimal": ColumnDType.DECIMAL,
-    "Boolean": ColumnDType.BOOLEAN,
-    "Datetime": ColumnDType.DATETIME,
-    "Date": ColumnDType.DATE,
-}
 _INT = re.compile(r"-?\d+")
 _FLOAT = re.compile(r"-?\d+\.\d+")
 
 
-def _map_dtype(dtype: pl.DataType) -> ColumnDType:
-    name = str(dtype)
-    for prefix, mapped in _DTYPE_BY_PREFIX.items():
-        if name.startswith(prefix):
-            return mapped
-    return ColumnDType.STRING
-
-
-def _cell(value: object) -> CellValue:
-    if value is None or isinstance(value, bool):
-        return value
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    if isinstance(value, (int, float, str)):
-        return value
-    return str(value)
-
-
-def read_csv_table(data: bytes, separator: str) -> MaterializedTable:
-    # every column read as Utf8 (infer_schema_length=0): cells stay verbatim and polars' lossy, sample-based type
-    # inference — which silently misparses/drops crafted rows on untrusted input — is disabled. the dtype is a
-    # conservative lossless HINT for the query, not a conversion
-    frame = pl.read_csv(BytesIO(data), separator=separator, infer_schema_length=0, truncate_ragged_lines=True)
-    frame = frame.filter(~pl.all_horizontal(pl.all().is_null()))
-    rows = [[_cell(value) for value in row] for row in frame.iter_rows()]
-    columns = [
-        Column(
-            header=name.strip() or f"col{index}", dtype=_dtype([r[index] for r in rows if isinstance(r[index], str)])
-        )
-        for index, name in enumerate(frame.columns)
-    ]
-    return MaterializedTable(
-        sheet_no=0,
-        columns=columns,
-        rows=rows,
-        sample_rows=rows[:SAMPLE_TABLE_ROWS],
-        n_rows=len(rows),
-        title=None,
-        caption=None,
-        notes=[],
-        description="",
-        anchors=None,
+def read_csv_grid(data: bytes, separator: str) -> list[list[str]]:
+    # the verbatim cell grid with NO header assumption (has_header=False) — the model decides which rows are headers.
+    # every column Utf8 (infer_schema_length=0) so cells stay exact; ragged lines are padded, blanks become ""
+    frame = pl.read_csv(
+        BytesIO(data), separator=separator, has_header=False, infer_schema_length=0, truncate_ragged_lines=True
     )
+    return [["" if value is None else str(value) for value in row] for row in frame.iter_rows()]
 
 
 def _table_rows(table: Tag) -> list[Tag]:
@@ -194,57 +147,6 @@ def extract_html_table(html: str) -> MaterializedTable:
     return _grid_table(grid, _header_count(table), caption)
 
 
-_GRID_HEAD_ROWS = 4
-_GRID_SAMPLE_CAP = 50
-
-
-def _cell_class(cell: str) -> str:
-    if not cell:
-        return ""
-    if _lossless_int(cell) or _lossless_decimal(cell):
-        return "#"
-    return "a"
-
-
-def _row_signature(row: list[str]) -> tuple[str, ...]:
-    return tuple(_cell_class(cell) for cell in row)
-
-
-def _sample_body(grid: list[list[str]], start: int) -> list[int]:
-    # two things, unioned: (1) BOUNDARY rows — where the shape changes — which are the potential header / schema-change
-    # rows (a header is text where data is numeric, a repeated header re-appears, a blank row separates); and (2) a few
-    # evenly-spaced data rows in between so the model sees real rows per segment. repetitive rows never bloat the sample
-    body = list(range(start, len(grid)))
-    if not body:
-        return []
-    boundaries: list[int] = []
-    previous: tuple[str, ...] | None = None
-    for offset in body:
-        signature = _row_signature(grid[offset])
-        if signature != previous:
-            boundaries.append(offset)
-            previous = signature
-    stride = max(1, len(body) // _GRID_SAMPLE_CAP)
-    return sorted(set(boundaries) | set(body[::stride]) | {body[-1]})[:_GRID_SAMPLE_CAP]
-
-
-def _render_grid(grid: list[list[str]], context: str) -> str:
-    height = len(grid)
-    width = len(grid[0]) if grid else 0
-    head_end = min(_GRID_HEAD_ROWS, height)
-    lines = [
-        f"Source: {context}",
-        f"Region: {height} rows x {width} cols (0-based offsets within the region).",
-        "Top rows:",
-        *(f"  r{offset}: {' | '.join(grid[offset])}" for offset in range(head_end)),
-    ]
-    picked = _sample_body(grid, head_end)
-    if picked:
-        lines.append("Sample data rows (one per distinct shape; a shape change marks a schema boundary):")
-        lines.extend(f"  r{offset}: {' | '.join(grid[offset])}" for offset in picked)
-    return "\n".join(lines)
-
-
 def _grid_cell(grid: list[list[str]], row: int, col: int) -> str:
     return grid[row][col] if 0 <= row < len(grid) and 0 <= col < len(grid[row]) else ""
 
@@ -281,15 +183,23 @@ def apply_grid_structure(grid: list[list[str]], structure: TableStructure) -> Ma
     )
 
 
-async def structure_html_tables(html: str, context: str) -> list[MaterializedTable]:
+async def structure_html_tables(html: str) -> list[MaterializedTable]:
     table = BeautifulSoup(html, "lxml").find("table")
     grid = _grid(table) if isinstance(table, Tag) else []
     if not grid:
         return []
-    prompt = f"{load_prompt('table_structure')}\n{_render_grid(grid, context)}"
-    structure = RegionStructure.model_validate(await call_slm(prompt, RegionStructure.model_json_schema()))
-    tables = [apply_grid_structure(grid, spec) for spec in structure.tables]
+    mask = await predict_pooled(grid)
+    tables = [apply_grid_structure(grid, spec) for spec in structure_from_mask(grid, mask)]
     return tables or [extract_html_table(html)]
+
+
+async def structure_csv_tables(data: bytes, separator: str) -> list[MaterializedTable]:
+    grid = await asyncio.to_thread(read_csv_grid, data, separator)
+    if not grid:
+        return []
+    mask = await predict_pooled(grid)
+    tables = [apply_grid_structure(grid, spec) for spec in structure_from_mask(grid, mask)]
+    return tables or [_grid_table(grid, 1)]
 
 
 def _next(counters: dict[str, int], entity: str) -> int:
