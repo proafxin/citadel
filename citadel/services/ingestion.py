@@ -49,7 +49,7 @@ from citadel.services.library import library_exists
 from citadel.services.pdf import MAX_IMAGE_SIDE, count_pdf_pages, downscale, extract_layer_by_bbox, render_pdf_page
 from citadel.services.tabular import extract_json_tables, structure_csv_tables
 from citadel.utils import normalize_file
-from config import CPU_THIRD, get_settings
+from config import CPU_QUARTER, CPU_THIRD, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +73,9 @@ MINERU_CONN_PER_CLIENT = 16  # sockets per client (reused). clients x per-client
 REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connection, never open unbounded sockets
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
 DIGITAL_RENDER_DPI = 110  # office→pdf ONLY (provably born-digital): image is layout-only, text from the PDF layer → render small. validate layout still holds; regular pdf stays at RENDER_DPI
-PAGINATE_CONCURRENCY = CPU_THIRD  # pdfium process-pool workers, one dedicated pdfium per process
+PAGINATE_CONCURRENCY = CPU_QUARTER  # pdfium process-pool workers, one dedicated pdfium per process
 PAGINATE_RECYCLE = 64
-RENDER_CONCURRENCY = CPU_THIRD  # in-flight render jobs; matches the pdfium pool width so pages never queue in RAM
+RENDER_CONCURRENCY = CPU_QUARTER  # in-flight render jobs; matches the pdfium pool width so pages never queue in RAM
 RAPIDOCR_CONCURRENCY = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
 GAP_FILL = True  # RapidOCR scanned gap-fill; set to False for clean-image benchmarks (pure VLM)
 
