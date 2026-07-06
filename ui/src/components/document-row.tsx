@@ -6,8 +6,8 @@ import { formatDuration } from "@/lib/format";
 
 const VIEWABLE = new Set(["ingested", "embedded", "partial"]);
 
-export function isPending(doc: DocumentItem): boolean {
-  return doc.status === "pending";
+export function isInflight(doc: DocumentItem): boolean {
+  return doc.status === "queued" || doc.status === "processing";
 }
 
 export function isIngested(doc: DocumentItem): boolean {
@@ -15,7 +15,7 @@ export function isIngested(doc: DocumentItem): boolean {
 }
 
 export function DocumentRow({ doc, libraryId }: { doc: DocumentItem; libraryId: number }) {
-  const active = isPending(doc);
+  const active = isInflight(doc);
   const viewable = VIEWABLE.has(doc.status);
 
   const inner = (

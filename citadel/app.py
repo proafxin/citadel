@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from citadel.router import router
+from citadel.services.document import mark_library_ready
 from citadel.services.retrieval import embed_all_pending, embed_library
 from config import configure_logging, get_embedder, get_settings
 
@@ -20,6 +21,7 @@ async def _drain_embeds(queue: asyncio.Queue[int]) -> None:
         library_id = await queue.get()
         logger.info("embedding library=%d", library_id)
         embedded = await embed_library(library_id)
+        await mark_library_ready(library_id)
         logger.info("embedded library=%d nodes=%d", library_id, embedded)
 
 

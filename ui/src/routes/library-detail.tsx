@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { ArrowLeft, ArrowUp, Download, MessageSquare } from "lucide-react";
 import { useState } from "react";
-import { isIngested, isPending } from "@/components/document-row";
+import { isIngested, isInflight } from "@/components/document-row";
 import { DocumentsList, type Filter, hasActive, LibraryProgress } from "@/components/documents-panel";
 import { DocumentUpload } from "@/components/document-upload";
 import { Eyebrow } from "@/components/eyebrow";
@@ -33,9 +33,9 @@ export function LibraryDetailPage() {
     },
   });
   const docs = docsQ.data ?? [];
-  const processing = docs.some(isPending);
+  const processing = docs.some(isInflight);
   const ingested = docs.length > 0 && !processing;
-  const ready = searchable && docs.length > 0 && !docs.some((doc) => isPending(doc) || isIngested(doc));
+  const ready = searchable && docs.length > 0 && !docs.some((doc) => isInflight(doc) || isIngested(doc));
 
   return (
     <div>
@@ -71,7 +71,7 @@ export function LibraryDetailPage() {
 
       {docs.length > 0 ? (
         <div className="mt-6">
-          <LibraryProgress docs={docs} filter={filter} onFilter={setFilter} />
+          <LibraryProgress docs={docs} library={libQ.data} filter={filter} onFilter={setFilter} />
         </div>
       ) : null}
 

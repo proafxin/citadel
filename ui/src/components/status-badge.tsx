@@ -2,7 +2,8 @@ import type { DocumentItem } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
 const LABELS: Record<string, string> = {
-  pending: "Processing",
+  queued: "Queued",
+  processing: "Processing",
   ingested: "Ready",
   embedded: "Ready",
   partial: "Partial",
@@ -22,6 +23,7 @@ function toneFor(key: string): Tone {
     case "failed":
       return "bad";
     case "skipped":
+    case "queued":
       return "muted";
     default:
       return "active";

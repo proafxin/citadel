@@ -29,12 +29,15 @@ from sqlalchemy import select
 from citadel.db import get_sessionmaker
 from citadel.llm import describe_table
 from citadel.models.document import Document
+from citadel.models.status import DocumentStatus
 from citadel.schemas.content import Block
 from citadel.schemas.document import DocumentRead, IngestResponse
 from citadel.services.document import (
+    begin_library_ingest,
     create_documents,
     finalize_tabular,
     mark_document,
+    mark_processing,
     persist_document_tree,
     save_document_tree,
     save_sheet_tables,
@@ -185,6 +188,7 @@ async def submit_documents(files: list[UploadFile], library_id: int) -> IngestRe
         raise HTTPException(status_code=404, detail="unknown library")
     payloads = [(await file.read(), file.filename or "upload") for file in files]
     doc_ids = await create_documents(library_id, [name for _data, name in payloads])
+    await begin_library_ingest(library_id)
     now = time.time()
     pipe = get_redis().pipeline(transaction=False)
     for doc_id, (_data, name) in zip(doc_ids, payloads, strict=True):
@@ -225,6 +229,7 @@ async def handle_normalize(fields: dict[str, str], profile_dir: str, data: bytes
     redis = get_redis()
     await redis.hset(f"doc:{doc_id}", "state", "normalizing")
     await redis.hsetnx(f"doc:{doc_id}", "t_proc", time.time())
+    await mark_processing(int(doc_id))
     kind, normalized = await asyncio.to_thread(normalize_file, data, fields["filename"], profile_dir)
     await get_redis().xadd(
         STREAM_NORMALIZED, {"doc_id": doc_id, "kind": kind, "filename": fields["filename"], "data": normalized}
@@ -395,7 +400,7 @@ async def fail_document(doc_id: str, stage: str) -> None:
     now = time.time()
     elapsed = now - float(await redis.hget(f"doc:{doc_id}", "t_proc") or now)
     await redis.hset(f"doc:{doc_id}", mapping={"state": "failed", "error": f"{stage} failed", "t_done": now})
-    await mark_document(int(doc_id), "failed", elapsed)
+    await mark_document(int(doc_id), DocumentStatus.FAILED, elapsed)
     await cleanup(doc_id)  # terminal failure → release the source blobs (no wall-clock TTL to fall back on)
 
 
@@ -614,7 +619,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
     for page_idx in sorted(int(k) for k in per_page):
         blocks.extend(Block(**raw) for raw in json.loads(per_page[str(page_idx).encode()]))
     source = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
-    state = "partial" if any(b.type == "error" for b in blocks) else "ingested"
+    state = DocumentStatus.PARTIAL if any(b.type == "error" for b in blocks) else DocumentStatus.INGESTED
     await save_document_tree(int(doc_id), blocks, state, elapsed)
     await persist_document_tree(int(doc_id))
     await redis.hset(f"doc:{doc_id}", mapping={"state": state, "t_done": now})

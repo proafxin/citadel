@@ -1,5 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import { X } from "lucide-react";
 import { motion } from "motion/react";
 import { type ReactNode, useState } from "react";
@@ -11,17 +12,19 @@ import { TIERS } from "@/lib/tiers";
 
 export function CreateLibraryDialog({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [tier, setTier] = useState<Tier>("tier_1");
 
   const mutation = useMutation({
     mutationFn: () => createLibrary(name.trim(), tier),
-    onSuccess: () => {
+    onSuccess: (library) => {
       qc.invalidateQueries({ queryKey: ["libraries"] });
       setOpen(false);
       setName("");
       setTier("tier_1");
+      navigate({ to: "/library/$libraryId", params: { libraryId: String(library.id) } });
     },
   });
 

@@ -174,7 +174,7 @@ def _table_nodes(
     page_no = block.page_idx + 1
     parent = stack[-1][1] if stack else None
     nodes: list[NodeSpec] = []
-    for _ in range(max(count, 1)):
+    for _ in range(count):
         ordinal = _next_ordinal(counters, page_no)
         nodes.append(
             NodeSpec(

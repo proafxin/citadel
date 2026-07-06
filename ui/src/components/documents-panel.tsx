@@ -3,7 +3,7 @@ import { useState } from "react";
 import { DocumentRow } from "@/components/document-row";
 import { Eyebrow } from "@/components/eyebrow";
 import { Card } from "@/components/ui/card";
-import type { DocumentItem } from "@/lib/api";
+import type { DocumentItem, Library } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatDuration } from "@/lib/format";
 
@@ -43,15 +43,19 @@ export function bucketOf(doc: DocumentItem): Bucket {
 }
 
 export function hasActive(docs: DocumentItem[], searchable: boolean): boolean {
-  return docs.some((doc) => doc.status === "pending" || (searchable && doc.status === "ingested"));
+  return docs.some(
+    (doc) => doc.status === "queued" || doc.status === "processing" || (searchable && doc.status === "ingested"),
+  );
 }
 
 export function LibraryProgress({
   docs,
+  library,
   filter,
   onFilter,
 }: {
   docs: DocumentItem[];
+  library: Library | undefined;
   filter: Filter;
   onFilter: (next: Filter) => void;
 }) {
@@ -59,7 +63,9 @@ export function LibraryProgress({
   for (const doc of docs) counts[bucketOf(doc)] += 1;
   const settled = counts.ready + counts.failed + counts.skipped;
   const overall = docs.length > 0 ? settled / docs.length : 0;
-  const totalElapsed = docs.reduce((sum, doc) => sum + (doc.status === "pending" ? 0 : (doc.elapsed ?? 0)), 0);
+  const timings: string[] = [];
+  if (library?.ingest_seconds != null) timings.push(`ingest ${formatDuration(library.ingest_seconds)}`);
+  if (library?.total_seconds != null) timings.push(`total ${formatDuration(library.total_seconds)}`);
 
   return (
     <Card className="p-5">
@@ -67,7 +73,7 @@ export function LibraryProgress({
         <Eyebrow>Progress</Eyebrow>
         <span className="text-xs text-ink-muted">
           {counts.ready}/{docs.length} ready
-          {totalElapsed > 0 ? ` · ${formatDuration(totalElapsed)} total` : ""}
+          {timings.length > 0 ? ` · ${timings.join(" · ")}` : ""}
         </span>
       </div>
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-surface-2">

@@ -12,6 +12,7 @@ from citadel.db import get_sessionmaker
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
 from citadel.models.library import Library
+from citadel.models.status import DocumentStatus
 from citadel.models.table import Table
 from citadel.services.ingestion import get_redis
 from config import get_embedder
@@ -159,8 +160,8 @@ async def embed_library(library_id: int) -> int:
         embedded = await _embed_nodes(session, nodes)
         await session.execute(
             update(Document)
-            .where(Document.library_id == library_id, Document.status == "ingested")
-            .values(status="embedded")
+            .where(Document.library_id == library_id, Document.status == DocumentStatus.INGESTED)
+            .values(status=DocumentStatus.EMBEDDED)
         )
     await redis.hset(f"embed:{library_id}", mapping={"t_done": time.time(), "nodes": embedded})
     return embedded

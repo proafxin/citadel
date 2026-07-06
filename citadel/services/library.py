@@ -11,7 +11,15 @@ from citadel.services.document import compress_tree, delete_document_tree, load_
 
 
 def _to_read(library: Library) -> LibraryRead:
-    return LibraryRead(id=library.id, name=library.name, tier=library.tier)
+    return LibraryRead(
+        id=library.id,
+        name=library.name,
+        tier=library.tier,
+        status=library.status,
+        ingest_started_at=library.ingest_started_at,
+        ingested_at=library.ingested_at,
+        ready_at=library.ready_at,
+    )
 
 
 async def create_library(name: str, tier: Tier) -> LibraryRead:

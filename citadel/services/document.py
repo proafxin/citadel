@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import zipfile
+from datetime import UTC, datetime
 
 import zstandard
 from fastapi import HTTPException
@@ -13,6 +14,7 @@ from citadel.db import get_sessionmaker
 from citadel.models.content import Code, ContentNode, Equation, ListBlock, Paragraph
 from citadel.models.document import Document
 from citadel.models.library import Library
+from citadel.models.status import DocumentStatus, LibraryStatus
 from citadel.models.table import Table, TableRow
 from citadel.schemas.content import Block
 from citadel.services.excel import MaterializedTable
@@ -31,7 +33,7 @@ from citadel.storage import delete_object, get_object, put_object
 
 async def create_document(library_id: int, filename: str) -> int:
     async with get_sessionmaker()() as session, session.begin():
-        document = Document(library_id=library_id, filename=filename, status="pending")
+        document = Document(library_id=library_id, filename=filename, status=DocumentStatus.QUEUED)
         session.add(document)
         await session.flush()
         return document.id
@@ -39,7 +41,7 @@ async def create_document(library_id: int, filename: str) -> int:
 
 async def create_documents(library_id: int, filenames: list[str]) -> list[int]:
     async with get_sessionmaker()() as session, session.begin():
-        documents = [Document(library_id=library_id, filename=name, status="pending") for name in filenames]
+        documents = [Document(library_id=library_id, filename=name, status=DocumentStatus.QUEUED) for name in filenames]
         session.add_all(documents)
         await session.flush()
         return [document.id for document in documents]
@@ -52,15 +54,55 @@ async def notify_embed(library_id: int) -> None:
 
 async def _maybe_notify_embed(session: AsyncSession, library_id: int) -> None:
     library = await session.get(Library, library_id)
-    if library is None or library.tier != "tier_2":
+    if library is None:
         return
-    pending = await session.scalar(
+    inflight = await session.scalar(
         select(func.count())
         .select_from(Document)
-        .where(Document.library_id == library_id, Document.status == "pending")
+        .where(
+            Document.library_id == library_id,
+            Document.status.in_((DocumentStatus.QUEUED, DocumentStatus.PROCESSING)),
+        )
     )
-    if pending == 0:
+    if inflight != 0:
+        return
+    now = datetime.now(UTC)
+    if library.ingested_at is None:
+        library.ingested_at = now
+    if library.tier == "tier_2":
+        library.status = LibraryStatus.INGESTED
         await session.execute(text("SELECT pg_notify('embed', :library)"), {"library": str(library_id)})
+    else:
+        library.status = LibraryStatus.READY
+        library.ready_at = now
+
+
+async def begin_library_ingest(library_id: int) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        library = await session.get(Library, library_id)
+        if library is None or library.status == LibraryStatus.PROCESSING:
+            return
+        library.status = LibraryStatus.PROCESSING
+        library.ingest_started_at = datetime.now(UTC)
+        library.ingested_at = None
+        library.ready_at = None
+
+
+async def mark_processing(doc_id: int) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        document = await session.get(Document, doc_id)
+        if document is None or document.status != DocumentStatus.QUEUED:
+            return
+        document.status = DocumentStatus.PROCESSING
+
+
+async def mark_library_ready(library_id: int) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        library = await session.get(Library, library_id)
+        if library is None:
+            return
+        library.status = LibraryStatus.READY
+        library.ready_at = datetime.now(UTC)
 
 
 def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:
@@ -102,7 +144,9 @@ async def _add_table(session: AsyncSession, content_id: str, doc_id: int, table:
     session.add_all(TableRow(table_id=row.id, row_idx=index, values=values) for index, values in enumerate(table.rows))
 
 
-async def save_document_tree(doc_id: int, blocks: list[Block], status: str, ingest_seconds: float | None) -> None:
+async def save_document_tree(
+    doc_id: int, blocks: list[Block], status: DocumentStatus, ingest_seconds: float | None
+) -> None:
     async with get_sessionmaker()() as session:
         document = await session.get(Document, doc_id)
         if document is None:
@@ -240,13 +284,13 @@ async def finalize_tabular(doc_id: int, ingest_seconds: float | None) -> None:
         document = await session.get(Document, doc_id)
         if document is None:
             return
-        document.status = "ingested"
+        document.status = DocumentStatus.INGESTED
         document.ingest_seconds = ingest_seconds
         await _maybe_notify_embed(session, document.library_id)
     await persist_document_tree(doc_id)
 
 
-async def mark_document(doc_id: int, status: str, ingest_seconds: float | None) -> None:
+async def mark_document(doc_id: int, status: DocumentStatus, ingest_seconds: float | None) -> None:
     async with get_sessionmaker()() as session, session.begin():
         document = await session.get(Document, doc_id)
         if document is None:
