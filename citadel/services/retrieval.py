@@ -167,21 +167,16 @@ async def embed_library(library_id: int) -> int:
     return embedded
 
 
-async def embed_all_pending() -> int:
-    async with get_sessionmaker()() as session, session.begin():
-        nodes = list(
+async def pending_libraries() -> list[int]:
+    async with get_sessionmaker()() as session:
+        return list(
             await session.scalars(
-                select(ContentNode)
-                .join(Document, ContentNode.document_id == Document.id)
+                select(Document.library_id)
                 .join(Library, Document.library_id == Library.id)
-                .where(
-                    ContentNode.search_text.isnot(None),
-                    ContentNode.embedding.is_(None),
-                    Library.tier == "tier_2",
-                )
+                .where(Library.tier == "tier_2", Document.status == DocumentStatus.INGESTED)
+                .distinct()
             )
         )
-        return await _embed_nodes(session, nodes)
 
 
 async def retrieve(queries: list[str], library_id: int) -> Retrieval:
