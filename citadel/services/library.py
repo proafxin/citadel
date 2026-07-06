@@ -18,6 +18,8 @@ def _to_read(library: Library) -> LibraryRead:
         status=library.status,
         ingest_started_at=library.ingest_started_at,
         ingested_at=library.ingested_at,
+        finalize_started_at=library.finalize_started_at,
+        described_at=library.described_at,
         embed_started_at=library.embed_started_at,
         ready_at=library.ready_at,
     )

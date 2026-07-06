@@ -84,6 +84,8 @@ async def begin_library_ingest(library_id: int) -> None:
         library.status = LibraryStatus.PROCESSING
         library.ingest_started_at = datetime.now(UTC)
         library.ingested_at = None
+        library.finalize_started_at = None
+        library.described_at = None
         library.embed_started_at = None
         library.ready_at = None
 
@@ -94,6 +96,22 @@ async def mark_processing(doc_id: int) -> None:
         if document is None or document.status != DocumentStatus.QUEUED:
             return
         document.status = DocumentStatus.PROCESSING
+
+
+async def mark_finalize_started(library_id: int) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        library = await session.get(Library, library_id)
+        if library is None:
+            return
+        library.finalize_started_at = datetime.now(UTC)
+
+
+async def mark_described(library_id: int) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        library = await session.get(Library, library_id)
+        if library is None:
+            return
+        library.described_at = datetime.now(UTC)
 
 
 async def mark_embed_started(library_id: int) -> None:
