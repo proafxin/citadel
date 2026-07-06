@@ -17,7 +17,11 @@ export function LibraryDetailPage() {
   const id = Number(libraryId);
   const qc = useQueryClient();
   const [filter, setFilter] = useState<Filter>("all");
-  const libQ = useQuery({ queryKey: ["library", id], queryFn: () => getLibrary(id) });
+  const libQ = useQuery({
+    queryKey: ["library", id],
+    queryFn: () => getLibrary(id),
+    refetchInterval: (query) => (query.state.data && query.state.data.status !== "ready" ? 2_000 : false),
+  });
   const meta = libQ.data ? tierMeta(libQ.data.tier) : null;
   const searchable = meta?.searchable ?? false;
   const docsQ = useQuery({

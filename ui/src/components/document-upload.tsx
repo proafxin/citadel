@@ -11,7 +11,10 @@ export function DocumentUpload({ libraryId }: { libraryId: number }) {
 
   const mutation = useMutation({
     mutationFn: (files: File[]) => uploadDocuments(libraryId, files),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["documents", libraryId] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["documents", libraryId] });
+      qc.invalidateQueries({ queryKey: ["library", libraryId] });
+    },
   });
 
   function send(list: FileList | null) {

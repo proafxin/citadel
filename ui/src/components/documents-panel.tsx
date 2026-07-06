@@ -64,8 +64,8 @@ export function LibraryProgress({
   const settled = counts.ready + counts.failed + counts.skipped;
   const overall = docs.length > 0 ? settled / docs.length : 0;
   const timings: string[] = [];
-  if (library?.ingest_seconds != null) timings.push(`ingest ${formatDuration(library.ingest_seconds)}`);
-  if (library?.total_seconds != null) timings.push(`total ${formatDuration(library.total_seconds)}`);
+  if (library?.ingest_seconds != null) timings.push(`Ingestion runtime ${formatDuration(library.ingest_seconds)}`);
+  if (library?.total_seconds != null) timings.push(`Wall time ${formatDuration(library.total_seconds)}`);
 
   return (
     <Card className="p-5">
