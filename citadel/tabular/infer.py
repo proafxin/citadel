@@ -74,9 +74,10 @@ def _cpu_only() -> None:
 
 @functools.lru_cache(maxsize=1)
 def _pool() -> ProcessPoolExecutor:
-    return ProcessPoolExecutor(
-        max_workers=HEADER_WORKERS, mp_context=multiprocessing.get_context("spawn"), initializer=_cpu_only
-    )
+    # forkserver preloading only this module → xgboost/numpy workers, not the whole worker.py stack that spawn drags in
+    ctx = multiprocessing.get_context("forkserver")
+    ctx.set_forkserver_preload(["citadel.tabular.infer"])
+    return ProcessPoolExecutor(max_workers=HEADER_WORKERS, mp_context=ctx, initializer=_cpu_only)
 
 
 async def predict_pooled(rows: list[list[str]]) -> list[bool]:

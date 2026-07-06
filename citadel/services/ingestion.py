@@ -5,11 +5,12 @@ import json
 import logging
 import multiprocessing
 import re
+import shutil
 import tempfile
 import time
-from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import lru_cache
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -70,7 +71,6 @@ MINERU_CLIENTS = (
 )
 MINERU_CONN_PER_CLIENT = 8  # sockets per client (reused). clients x per-client = 128 total = OCR_CONCURRENCY, bounded
 REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connection, never open unbounded sockets
-DOC_SOURCE_MAX = 16  # per-worker LRU of source blobs (pdf/workbook): each fetched from the bus once, not per page/sheet
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
 DIGITAL_RENDER_DPI = 110  # office→pdf ONLY (provably born-digital): image is layout-only, text from the PDF layer → render small. validate layout still holds; regular pdf stays at RENDER_DPI
 PAGINATE_CONCURRENCY = CPU_THIRD  # pdfium process-pool workers, one dedicated pdfium per process
@@ -157,29 +157,19 @@ def make_profile_pool(n: int) -> asyncio.Queue[str]:
     return queue
 
 
-_DOC_SOURCE: OrderedDict[str, bytes] = OrderedDict()
-_DOC_SOURCE_LOCKS: dict[str, asyncio.Lock] = {}
+BLOB_DIR = Path(tempfile.gettempdir()) / "citadel-blobs"
 
 
-async def _doc_source(key: str) -> bytes | None:
-    # a doc's source blob (pdf/workbook) is needed by every page/sheet job; fetch it from the bus once per worker,
-    # single-flight (per-key lock) so a cold burst of same-doc jobs doesn't refetch it N times in parallel
-    cached = _DOC_SOURCE.get(key)
-    if cached is not None:
-        _DOC_SOURCE.move_to_end(key)
-        return cached
-    async with _DOC_SOURCE_LOCKS.setdefault(key, asyncio.Lock()):
-        cached = _DOC_SOURCE.get(key)
-        if cached is not None:
-            _DOC_SOURCE.move_to_end(key)
-            return cached
-        cached = await get_redis().get(key)
-        if cached is not None:
-            _DOC_SOURCE[key] = cached
-            while len(_DOC_SOURCE) > DOC_SOURCE_MAX:
-                evicted, _ = _DOC_SOURCE.popitem(last=False)
-                _DOC_SOURCE_LOCKS.pop(evicted, None)
-        return cached
+def blob_path(doc_id: str | int) -> Path:
+    # doc-id-keyed source store on a shared host path (the stand-in for S3): every stage reads the source from here
+    # instead of copying it through Redis, so a large PDF is memory-mapped once, never pickled per page
+    return BLOB_DIR / str(doc_id)
+
+
+def reset_blob_dir() -> None:
+    if BLOB_DIR.exists():
+        shutil.rmtree(BLOB_DIR)
+    BLOB_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ---- orchestrator side ----------------------------------------------------------------
@@ -192,13 +182,15 @@ async def submit_documents(files: list[UploadFile], library_id: int) -> IngestRe
     doc_ids = await create_documents(library_id, [name for _data, name in payloads])
     await begin_library_ingest(library_id)
     now = time.time()
+    BLOB_DIR.mkdir(parents=True, exist_ok=True)
     pipe = get_redis().pipeline(transaction=False)
     for doc_id, (data, name) in zip(doc_ids, payloads, strict=True):
+        await asyncio.to_thread(blob_path(doc_id).write_bytes, data)
         pipe.hset(
             f"doc:{doc_id}",
             mapping={"state": "queued", "filename": name, "library_id": library_id, "done_count": 0, "t0": now},
         )
-        pipe.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": name, "data": data})
+        pipe.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": name})
     await pipe.execute()
     logger.info("ingest library=%s files=%d doc_ids=%s", library_id, len(files), doc_ids)
     return IngestResponse(doc_ids=doc_ids)
@@ -249,16 +241,16 @@ async def library_progress(library_id: int) -> list[DocProgress]:
 # ---- normalize stage (CPU / process pool) ---------------------------------------------
 
 
-async def handle_normalize(fields: dict[str, str], profile_dir: str, data: bytes) -> None:
+async def handle_normalize(fields: dict[str, str], profile_dir: str) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
     await redis.hset(f"doc:{doc_id}", "state", "normalizing")
     await redis.hsetnx(f"doc:{doc_id}", "t_proc", time.time())
     await mark_processing(int(doc_id))
+    data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
     kind, normalized = await asyncio.to_thread(normalize_file, data, fields["filename"], profile_dir)
-    await get_redis().xadd(
-        STREAM_NORMALIZED, {"doc_id": doc_id, "kind": kind, "filename": fields["filename"], "data": normalized}
-    )
+    await asyncio.to_thread(blob_path(doc_id).write_bytes, normalized)
+    await get_redis().xadd(STREAM_NORMALIZED, {"doc_id": doc_id, "kind": kind, "filename": fields["filename"]})
     logger.info("normalize file=%s kind=%s", fields["filename"], kind)
 
 
@@ -274,13 +266,14 @@ def _cap_image_bytes(image_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
-async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
+async def handle_paginate(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     kind = fields["kind"]
     redis = get_redis()
     await redis.hset(f"doc:{doc_id}", "state", "paginating")
     await redis.hsetnx(f"doc:{doc_id}", "t_paginate", time.time())
     if kind == "text":
+        data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
         text = data.decode("utf-8", errors="replace")
         blocks = [
             Block(type="text", page_idx=0, text=part.strip()) for part in re.split(r"\n\s*\n", text) if part.strip()
@@ -290,22 +283,23 @@ async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
         logger.info("paginate file=%s text paragraphs=%d", fields["filename"], len(blocks))
         return
     if kind == "html":
+        data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
         blocks = await asyncio.to_thread(parse_html, data)
         await redis.hset(f"doc:{doc_id}", "page_count", 1)
         await record_page(doc_id, 0, blocks)
         logger.info("paginate file=%s html blocks=%d", fields["filename"], len(blocks))
         return
     if kind.startswith("image:"):
+        data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
         image_bytes = await asyncio.to_thread(_cap_image_bytes, data)  # cap huge scans → keep the worker's RAM bounded
         await redis.hset(f"doc:{doc_id}", "page_count", 1)
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0, "image": image_bytes})
         logger.info("paginate file=%s image", fields["filename"])
         return
     if kind in {"xlsx", "csv", "tsv", "json"}:
-        await redis.set(f"tabular:{doc_id}", data)  # no TTL: cleaned by cleanup() on completion or terminal failure
         await redis.hset(f"doc:{doc_id}", "mode", "tabular")
         if kind == "xlsx":
-            names = await asyncio.to_thread(sheet_names, data)
+            names = await asyncio.to_thread(sheet_names, await asyncio.to_thread(blob_path(doc_id).read_bytes))
             await redis.hset(f"doc:{doc_id}", "page_count", len(names))
             for sheet_no in range(1, len(names) + 1):
                 await redis.xadd(STREAM_TABLES, {"doc_id": doc_id, "kind": kind, "sheet_no": sheet_no})
@@ -315,10 +309,9 @@ async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
             await redis.xadd(STREAM_TABLES, {"doc_id": doc_id, "kind": kind, "sheet_no": 0})
             logger.info("paginate file=%s kind=%s", fields["filename"], kind)
         return
-    await redis.set(f"pdf:{doc_id}", data)  # no TTL: the source must outlive render+OCR; cleaned by cleanup()
     dpi = DIGITAL_RENDER_DPI if kind == "office-pdf" else RENDER_DPI
     loop = asyncio.get_running_loop()
-    count = await loop.run_in_executor(get_paginate_pool(), count_pdf_pages, data)
+    count = await loop.run_in_executor(get_paginate_pool(), count_pdf_pages, str(blob_path(doc_id)))
     await redis.hset(f"doc:{doc_id}", "page_count", count)
     pipe = redis.pipeline(transaction=False)
     for idx in range(count):
@@ -333,13 +326,13 @@ async def handle_render(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     page_idx = int(fields["page_idx"])
     dpi = int(fields["dpi"])
-    data = await _doc_source(f"pdf:{doc_id}")
-    if data is None:  # source already cleaned up (doc finished) → a reclaimed render job is a no-op
+    path = blob_path(doc_id)
+    if not path.exists():  # source already cleaned up (doc finished) → a reclaimed render job is a no-op
         return
     redis = get_redis()
     await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
     loop = asyncio.get_running_loop()
-    image_bytes, digital = await loop.run_in_executor(get_paginate_pool(), render_pdf_page, data, page_idx, dpi)
+    image_bytes, digital = await loop.run_in_executor(get_paginate_pool(), render_pdf_page, str(path), page_idx, dpi)
     await redis.xadd(
         STREAM_PAGES,
         {"doc_id": doc_id, "page_idx": page_idx, "image": image_bytes, "digital": "1" if digital else "0"},
@@ -403,9 +396,10 @@ async def handle_tabular(fields: dict[str, str]) -> None:
     sheet_no = int(fields["sheet_no"])
     redis = get_redis()
     await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
-    data = await _doc_source(f"tabular:{doc_id}")
-    if data is None:  # source already cleaned up (doc finished) → a reclaimed sheet job is a no-op
+    path = blob_path(doc_id)
+    if not path.exists():  # source already cleaned up (doc finished) → a reclaimed sheet job is a no-op
         return
+    data = await asyncio.to_thread(path.read_bytes)
     if kind == "xlsx":
         sheet = await asyncio.to_thread(extract_sheet_no, data, sheet_no)
         tables = await extract_tables(sheet)
@@ -572,13 +566,13 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         # born-digital page: VLM does layout + recognizes only non-text; text/title come from the exact text layer
         content_blocks = await client.aio_two_step_extract(img, not_extract_list=list(LAYER_TYPES))
         text_blocks = [cb for cb in content_blocks if cb.type in LAYER_TYPES]
-        pdf_bytes = await _doc_source(f"pdf:{doc_id}") if text_blocks else None
-        if pdf_bytes:
+        path = blob_path(doc_id)
+        if text_blocks and path.exists():
             loop = asyncio.get_running_loop()
             layer = await loop.run_in_executor(
                 get_paginate_pool(),
                 extract_layer_by_bbox,
-                pdf_bytes,
+                str(path),
                 page_idx,
                 [list(cb.bbox) for cb in text_blocks],
             )
@@ -676,10 +670,8 @@ async def handle_merge(fields: dict[str, str]) -> None:
 
 async def cleanup(doc_id: str) -> None:
     redis = get_redis()
-    await redis.delete(f"blocks:{doc_id}", f"pdf:{doc_id}", f"tabular:{doc_id}", f"sheets:{doc_id}")
-    for key in (f"pdf:{doc_id}", f"tabular:{doc_id}"):
-        _DOC_SOURCE.pop(key, None)  # drop the doc's cached source the moment it finishes, not at LRU pressure
-        _DOC_SOURCE_LOCKS.pop(key, None)
+    await redis.delete(f"blocks:{doc_id}", f"sheets:{doc_id}")
+    blob_path(doc_id).unlink(missing_ok=True)  # the doc's source file is freed the moment it finishes
     await redis.expire(f"doc:{doc_id}", 3600)  # keep final status briefly, then auto-evict — no accumulation
 
 

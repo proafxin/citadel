@@ -13,19 +13,20 @@ def downscale(img: Image.Image) -> Image.Image:
     return img.resize((round(img.width * scale), round(img.height * scale)))
 
 
-def count_pdf_pages(data: bytes) -> int:
-    pdf = pdfium.PdfDocument(data)
+def count_pdf_pages(path: str) -> int:
+    pdf = pdfium.PdfDocument(path)
     n = len(pdf)
     pdf.close()
     return n
 
 
-def render_pdf_page(data: bytes, page_idx: int, dpi: int) -> tuple[bytes, bool]:
-    pdf = pdfium.PdfDocument(data)
+def render_pdf_page(path: str, page_idx: int, dpi: int) -> tuple[bytes, bool]:
+    pdf = pdfium.PdfDocument(path)
     page = pdf[page_idx]
-    bitmap = page.render(scale=dpi / 72)
+    scale = min(dpi / 72, MAX_IMAGE_SIDE / max(page.get_size()))  # cap BEFORE render → never alloc an oversized bitmap
+    bitmap = page.render(scale=scale)
     bio = io.BytesIO()
-    downscale(bitmap.to_pil()).save(bio, format="PNG")
+    bitmap.to_pil().save(bio, format="PNG")
     bitmap.close()
     textpage = page.get_textpage()
     digital = page.get_rotation() == 0 and textpage.count_chars() > 16
@@ -35,8 +36,8 @@ def render_pdf_page(data: bytes, page_idx: int, dpi: int) -> tuple[bytes, bool]:
     return bio.getvalue(), digital
 
 
-def extract_layer_by_bbox(pdf_bytes: bytes, page_idx: int, bboxes: list[list[float]]) -> list[str]:
-    pdf = pdfium.PdfDocument(pdf_bytes)
+def extract_layer_by_bbox(path: str, page_idx: int, bboxes: list[list[float]]) -> list[str]:
+    pdf = pdfium.PdfDocument(path)
     page = pdf[page_idx]
     width, height = page.get_size()
     textpage = page.get_textpage()

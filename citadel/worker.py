@@ -33,6 +33,7 @@ from citadel.services.ingestion import (
     handle_render,
     handle_tabular,
     make_profile_pool,
+    reset_blob_dir,
 )
 from citadel.tabular.infer import HEADER_WORKERS
 from config import CPU_THIRD, configure_logging, get_settings
@@ -174,8 +175,8 @@ async def _normalize_job(cap: _Capacity, profiles: asyncio.Queue[str], msg_id: s
     stream = STREAM_INGEST
     profile = await profiles.get()  # one dedicated libreoffice profile per in-flight normalize job
     try:
-        fields = {k.decode(): v.decode() for k, v in raw.items() if k != b"data"}
-        work = asyncio.create_task(handle_normalize(fields, profile, raw.get(b"data", b"")))
+        fields = {k.decode(): v.decode() for k, v in raw.items()}
+        work = asyncio.create_task(handle_normalize(fields, profile))
         await asyncio.wait({work})
         if work.exception() is None:
             await _settle(stream, msg_id)
@@ -190,8 +191,8 @@ async def _normalize_job(cap: _Capacity, profiles: asyncio.Queue[str], msg_id: s
 async def _paginate_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_NORMALIZED
     try:
-        fields = {k.decode(): v.decode() for k, v in raw.items() if k != b"data"}
-        work = asyncio.create_task(handle_paginate(fields, raw.get(b"data", b"")))
+        fields = {k.decode(): v.decode() for k, v in raw.items()}
+        work = asyncio.create_task(handle_paginate(fields))
         await asyncio.wait({work})
         if work.exception() is None:
             await _settle(stream, msg_id)
@@ -341,6 +342,7 @@ async def _main() -> None:
 
 def main() -> None:
     configure_logging()
+    reset_blob_dir()
     asyncio.run(_main())
 
 
