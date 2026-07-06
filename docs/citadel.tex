@@ -115,119 +115,97 @@
 
 	%====================================================
 	\begin{frame}
+		\frametitle{Enterprise AI is missing a compute layer}
 
-		\frametitle{Databases Organized Structured Data}
-
-
-
-		The first abstraction layer of enterprise computing was structured data.
+		\centering
 
 
-
-		\begin{center}
-
-			\textbf{Relational databases}
-
-			\vspace{0.3cm}
-
-
-			SQL \;|\; Transactions \;|\; Deterministic computation
-
-		\end{center}
-
-
-
-		Applications could compute directly over structured representations.
-
-		\vfill
-
-		{\small\color{accent}
-			STRUCTURED DATA BECAME COMPUTABLE BY DEFAULT.
-		}
-
-	\end{frame}
-
-	%====================================================
-	\begin{frame}
-
-		\frametitle{Search Indexed Documents}
-
-
-
-		The second layer introduced unstructured knowledge.
-
-
-
-		\begin{center}
-
-			\textbf{Search engines}
-
-			\vspace{0.3cm}
-
-
-			Indexing \;|\; Ranking \;|\; Retrieval
-
-		\end{center}
-
-
-
-		But documents themselves were never made computable.
-
-		They were only made searchable.
-
-		\vfill
-
-		{\small\color{accent}
-			SEARCH IS NOT A COMPUTATIONAL MODEL. IT IS AN ACCESS LAYER.
-		}
-
-	\end{frame}
-
-	%====================================================
-	\begin{frame}
-
-		\frametitle{AI Still Rebuilds Enterprise Knowledge Every Time}
-
-
-
-		Modern AI systems operate on raw, unstructured documents.
-
-
-		Every system independently reconstructs structure:
+		Every enterprise system today works on \textbf{unstructured documents}.
 
 
 
 		\begin{itemize}
-			\item OCR
-			\item Parsing
-			\item Chunking
-			\item Embedding
-			\item Retrieval
-			\item Ranking
+			\item PDFs
+			\item Spreadsheets
+			\item Presentations
+			\item Emails
+			\item Web pages
 		\end{itemize}
 
 
 
-		This is repeated across every application:
-
-		Legal AI, search, copilots, analytics, compliance tools.
-
-
-
-		{\small\color{CitadelAccent}
-			NO SHARED REPRESENTATION EXISTS ACROSS APPLICATIONS.
+		{\color{accent}
+			But none of them are computable.
 		}
 
 	\end{frame}
 
 	%====================================================
 	\begin{frame}
-
-		\frametitle{The Missing Layer}
-
+		\frametitle{Every AI system rebuilds the same pipeline}
 
 
-		Enterprise systems have:
+
+		\begin{center}
+			OCR $\rightarrow$ Parsing $\rightarrow$ Chunking $\rightarrow$ Embedding $\rightarrow$ Retrieval
+		\end{center}
+
+
+
+		Each product repeats this independently:
+
+		\begin{itemize}
+			\item Legal AI
+			\item Search
+			\item Copilots
+			\item Analytics tools
+		\end{itemize}
+
+		\vfill
+
+		{\color{accent}
+			No shared representation exists.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+		\frametitle{Search is not computation}
+
+
+
+		Search systems:
+
+
+
+		\begin{itemize}
+			\item Index documents
+			\item Rank text
+			\item Return snippets
+		\end{itemize}
+
+
+
+		They do not understand structure.
+
+		They do not execute knowledge.
+
+		\vfill
+
+		{\color{accent}
+			Search is access. Not computation.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+		\frametitle{The real problem}
+
+
+
+		Enterprise knowledge has:
 
 		\begin{itemize}
 			\item Storage
@@ -236,740 +214,542 @@
 		\end{itemize}
 
 
-		But they lack a computational representation of knowledge.
 
+		But no \textbf{execution model}.
 
-		\begin{block}{Core Gap}
+		\vfill
+
+		{\color{accent}
 			Documents are not data structures.
-
-			They are opaque inputs repeatedly re-interpreted at runtime.
-		\end{block}
-
-
-		{\small\color{accent}
-			THERE IS NO CANONICAL EXECUTION MODEL FOR ENTERPRISE KNOWLEDGE.
 		}
 
 	\end{frame}
 
 	%====================================================
 	\begin{frame}
+		\frametitle{A missing primitive}
 
-		\frametitle{Knowledge Should Be Compiled}
-
-
-
-		Software is not executed directly from source code.
+		\centering
 
 
-
-		\begin{center}
-
-			\begin{tikzpicture}[
-				node distance=1.5cm,
-				box/.style={
-					draw=text,
-					rounded corners,
-					minimum width=2.1cm,
-					minimum height=0.85cm,
-					align=center,
-					font=\small
-				}
-				]
-
-				\node[box](src){Source\\Code};
-
-				\node[box,right=of src](compiler){Compiler};
-
-				\node[box,right=of compiler,draw=accent,line width=1pt](ir){IR};
-
-				\node[box,right=of ir](runtime){Runtime};
-
-				\draw[-{Latex[length=2mm]}](src)--(compiler);
-				\draw[-{Latex[length=2mm]},accent,line width=1pt](compiler)--(ir);
-				\draw[-{Latex[length=2mm]}](ir)--(runtime);
-
-			\end{tikzpicture}
-
-		\end{center}
+		Software is not executed from source.
 
 
 
+		It is compiled.
 
-		Enterprise knowledge should work the same way.
 
-		\vspace{0.4cm}
 
-		\textbf{Compile once. Compute forever.}
+		{\color{accent}
+			Enterprise knowledge should be too.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+		\frametitle{Documents are syntax}
+
+
+
+		PDF \;|\; DOCX \;|\; HTML \;|\; Excel \;|\; JSON \;|\; CSV
+
+
+
+		All are just \textbf{source formats}.
+
+
+
+		A system should not care about format.
 
 		\vfill
 
-		{\small\color{accent}
-			THE ABSENCE OF A COMPILER IS THE CORE LIMITATION OF ENTERPRISE AI.
+		{\color{accent}
+			Only structure matters.
 		}
 
 	\end{frame}
 
 	%====================================================
 	\begin{frame}
-
-		\frametitle{Documents Are Syntax}
-
-
-
-		Documents are not data structures.
+		\frametitle{Citadel}
 
 
 
-		They are \textbf{syntax}.
+		Citadel compiles enterprise documents into a \textbf{canonical knowledge representation}.
 
 
 
 		\begin{center}
-
-
-
-			PDF \;|\; DOCX \;|\; HTML \;|\; EPUB \;|\; XML \;|\; CSV \;|\; Excel \;|\; Markdown
-
+			Documents $\rightarrow$ Compiler $\rightarrow$ Knowledge IR $\rightarrow$ Execution
 		\end{center}
-
-
-
-		Each format is just a different source language.
-
-		\vspace{0.5cm}
-
-		A compiler should not care about the syntax.
 
 		\vfill
 
-		{\small\color{accent}
-			ALL ENTERPRISE DOCUMENT FORMATS ARE JUST SURFACE REPRESENTATIONS.
+		{\color{accent}
+			One representation. All enterprise knowledge.
 		}
 
 	\end{frame}
 
 	%====================================================
 	\begin{frame}
-
-		\frametitle{Canonical Knowledge Representation}
-
-
-
-		Citadel compiles all documents into a single computational form.
+		\frametitle{Canonical knowledge structure}
 
 
 
 		\begin{center}
-
-			\begin{tikzpicture}[
-				node distance=1.2cm,
-				box/.style={
-					draw=text,
-					rounded corners,
-					minimum width=2.4cm,
-					minimum height=0.85cm,
-					align=center,
-					font=\small
-				}
-				]
-
-				\node[box](doc){Document};
-				\node[box,right=of doc](section){Sections/Tables};
-				\node[box,right=of section](block){Blocks};
-				%\node[box,right=of block](table){Tables};
-				\node[box,right=of block,draw=accent,line width=1pt](leaf){Leaves};
-
-				\draw[-{Latex[length=2mm]}](doc)--(section);
-				\draw[-{Latex[length=2mm]}](section)--(block);
-				%\draw[-{Latex[length=2mm]}](block)--(table);
-				\draw[-{Latex[length=2mm]},accent,line width=1pt](block)--(leaf);
-
-			\end{tikzpicture}
-
+			Document $\rightarrow$ Sections $\rightarrow$ Blocks $\rightarrow$ Tables $\rightarrow$ Atomic units
 		\end{center}
 
 
 
-		\begin{block}{Key Idea}
-			Every computation operates on this canonical tree — not raw documents.
-		\end{block}
+		Every computation operates on this structure.
 
 		\vfill
 
-		{\small\color{accent}
-			THIS IS THE ENTERPRISE EQUIVALENT OF INTERMEDIATE REPRESENTATION (IR).
+		{\color{accent}
+			This replaces raw document access.
 		}
 
 	\end{frame}
 
 	%====================================================
 	\begin{frame}
+		\frametitle{From Retrieval to Execution}
 
-		\frametitle{Citadel (The Compiler)}
-
-
-
-		Citadel compiles enterprise knowledge into a canonical representation.
+		\centering
 
 
+		Traditional AI:
 
-		\begin{center}
 
-			\begin{tikzpicture}[
-				node distance=1.2cm,
-				box/.style={
-					draw=text,
-					rounded corners,
-					minimum width=2.2cm,
-					minimum height=0.85cm,
-					align=center,
-					font=\small
-				}
-				]
 
-				\node[box](docs){
-					PDF\\Word\\Excel\\HTML\\CSV\\JSON
-				};
+		\textbf{Question $\rightarrow$ Search $\rightarrow$ Text}
 
-				\node[box,right=of docs](compiler){
-					Citadel\\Compiler
-				};
 
-				\node[box,right=of compiler,draw=accent,line width=1.2pt](ir){
-					Canonical\\IR
-				};
 
-				\node[box,right=of ir](apps){
-					Apps\\Search\\Analytics
-				};
+		Citadel:
 
-				\draw[-{Latex[length=2mm]}](docs)--(compiler);
-				\draw[-{Latex[length=2mm]},accent,line width=1pt](compiler)--(ir);
-				\draw[-{Latex[length=2mm]}](ir)--(apps);
 
-			\end{tikzpicture}
 
-		\end{center}
+		\textbf{Question $\rightarrow$ Plan $\rightarrow$ Compute}
+
+		\vfill
+
+		{\color{accent}
+			Knowledge becomes executable.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+		\frametitle{The Knowledge Runtime: Amortize and Amortize}
+
+
+
+		Citadel separates:
 
 
 
 		\begin{columns}
 
-			\column{0.33\textwidth}
-			\small
-			\textbf{Lossless}
+			\column{0.45\textwidth}
+
+			\textbf{Compilation}
+
 			\begin{itemize}
-				\item Structure preserved
-				\item Tables preserved
-				\item Provenance preserved
+				\item Understand documents
+				\item Discover structure
+				\item Build representation
 			\end{itemize}
 
-			\column{0.33\textwidth}
-			\small
-			\textbf{Canonical}
-			\begin{itemize}
-				\item Single representation
-				\item Cross-format unification
-				\item Shared substrate
-			\end{itemize}
 
-			\column{0.33\textwidth}
-			\small
-			\textbf{Computable}
+			\column{0.45\textwidth}
+
+			\textbf{Execution}
+
 			\begin{itemize}
-				\item SQL-ready
-				\item API-ready
-				\item Deterministic execution
+				\item Query knowledge
+				\item Compute answers
+				\item Preserve evidence
 			\end{itemize}
 
 		\end{columns}
 
 		\vfill
 
-		{\small\color{accent}
-			DOCUMENTS BECOME A COMPUTATIONAL SUBSTRATE.
+		{\color{accent}
+			Compile once. Execute infinitely.
 		}
 
 	\end{frame}
 
 	%====================================================
 	\begin{frame}
-
-		\frametitle{Knowledge Is Not Retrieved — It Is Computed}
-
-
-
-		Traditional systems treat documents as search targets.
+		\frametitle{AI Models Should Plan. Systems Should Compute.}
 
 
 
-		Citadel treats knowledge as executable structure.
+		LLMs are powerful reasoning engines.
 
 
 
-		\begin{center}
-
-			\textbf{Query Planning over Canonical Data}
-
-		\end{center}
-
-		\vfill
-
-		{\small\color{accent}
-			THE SYSTEM DOES NOT RETURN TEXT. IT EXECUTES STRUCTURE.
-		}
-
-	\end{frame}
-
-	%====================================================
-	\begin{frame}
-
-		\frametitle{From Retrieval to Knowledge Planning}
-
-		\begin{center}
-
-			\begin{tikzpicture}[
-				node distance=1.1cm,
-				box/.style={
-					draw=text,
-					rounded corners,
-					minimum width=2.3cm,
-					minimum height=0.8cm,
-					align=center,
-					font=\small
-				}
-				]
-
-				\node[box](q){Query};
-
-				\node[box,right=of q](intent){Intent/Expansion};
-
-				%\node[box,right=of intent](expand){Expansion};
-
-				\node[box,right=of intent](filter){Aggregation/Filtering};
-
-				\node[box,right=of filter](exec){Execution};
-
-				\draw[-{Latex[length=2mm]}](q)--(intent);
-				%\draw[-{Latex[length=2mm]}](intent)--(expand);
-				\draw[-{Latex[length=2mm]}](intent)--(filter);
-				\draw[-{Latex[length=2mm]}](filter)--(exec);
-
-			\end{tikzpicture}
-
-		\end{center}
-
-		\vspace{0.5cm}
-
-		\begin{center}
-			\small
-			Not retrieval. \textbf{Planning over compiled knowledge.}
-		\end{center}
-
-	\end{frame}
-
-	%====================================================
-	\begin{frame}
-
-		\frametitle{SQL Becomes the Execution Layer}
+		But they are not databases.
 
 
 
-		All structured knowledge converges into relational execution.
-
-
-
-		\begin{center}
-
-			\textbf{LLM generates queries. Citadel executes them.}
-
-		\end{center}
-
-
+		Citadel uses models for:
 
 		\begin{itemize}
-			\item Deterministic computation replaces approximation
-			\item Tables are first-class citizens
-			\item Provenance is preserved end-to-end
-		\end{itemize}
-
-		\vfill
-
-		{\small\color{accent}
-			MODELS REASON. SYSTEMS COMPUTE.
-		}
-
-	\end{frame}
-
-	%====================================================
-	\begin{frame}
-
-		\frametitle{Wide Net Retrieval Is Not Search}
-
-
-
-		Citadel does not “retrieve top-k documents”.
-
-
-
-		It constructs a \textbf{bounded evidence field}.
-
-
-
-		\begin{itemize}
-			\item Query expansion
-			\item Multi-path retrieval
-			\item Structural matching
-			\item Ranking over canonical leaves
-		\end{itemize}
-
-		\vfill
-
-		{\small\color{accent}
-			IF THE EVIDENCE EXISTS, CITADEL FINDS IT.
-		}
-
-	\end{frame}
-
-	%====================================================
-	\begin{frame}
-
-		\frametitle{Deterministic Knowledge Runtime}
-
-
-
-		Every answer is computed, not guessed.
-
-
-
-		\begin{center}
-
-			\textbf{Canonical IR → SQL → Execution → Answer}
-
-		\end{center}
-
-
-
-		\begin{itemize}
-			\item No hallucinated structure
-			\item No probabilistic aggregation
-			\item No re-parsing documents
-		\end{itemize}
-
-		\vfill
-
-		{\small\color{accent}
-			THE DOCUMENT IS NEVER RE-INTERPRETED.
-		}
-
-	\end{frame}
-
-	%====================================================
-	\begin{frame}
-
-		\frametitle{One Layer. Many Applications.}
-
-
-
-		All enterprise workflows converge onto the same substrate.
-
-
-
-		\begin{center}
-
-			Search \;|\; Legal AI \;|\; Compliance \;|\; Analytics \;|\; Agents
-
-		\end{center}
-
-
-
-		\begin{block}{Key Insight}
-			Applications differ only in logic.
-
-			Not in infrastructure.
-		\end{block}
-
-		\vfill
-
-		{\small\color{accent}
-			INFRASTRUCTURE BECOMES SHARED, NOT REBUILT.
-		}
-
-	\end{frame}
-
-	%====================================================
-	\begin{frame}
-
-		\frametitle{One Canonical Layer. Thousands of Applications.}
-
-
-
-		Once enterprise knowledge is compiled,
-
-		every application becomes a consumer of the same substrate.
-
-
-
-		\begin{center}
-
-			Search \;|\; Legal AI \;|\; Compliance \;|\; Analytics \;|\; Agents \;|\; ERP
-
-		\end{center}
-
-
-
-		\begin{block}{Shift}
-			Applications stop rebuilding infrastructure.
-
-			They begin sharing it.
-		\end{block}
-
-		\vfill
-
-		{\small\color{accent}
-			THE CANONICAL LAYER BECOMES THE DEFAULT COMPUTE SURFACE.
-		}
-
-	\end{frame}
-
-	%====================================================
-	\begin{frame}
-
-		\frametitle{The Economic Shift}
-
-
-
-		Today, every AI product rebuilds the same infrastructure.
-
-
-
-		\begin{center}
-
-			OCR \;|\; Parsing \;|\; Retrieval \;|\; Ranking \;|\; Embeddings \;|\; Citations
-
-		\end{center}
-
-		\vspace{0.7cm}
-
-		Each system independently pays for the same primitives.
-
-
-
-		\textbf{This is duplicated computation at global scale.}
-
-		\vfill
-
-		{\small\color{accent}
-			FRAGMENTATION IS THE DEFAULT COST STRUCTURE OF CURRENT AI.
-		}
-
-	\end{frame}
-
-	%====================================================
-	\begin{frame}
-
-		\frametitle{With Citadel}
-
-
-
-		Infrastructure is compiled once.
-
-
-
-		\begin{itemize}
-			\item One ingestion system
-			\item One canonical representation
-			\item One execution runtime
+			\item Understanding intent
+			\item Generating plans
+			\item Resolving ambiguity
 		\end{itemize}
 
 
 
-		Applications become thin logic layers:
+
+		Citadel runtime performs:
 
 		\begin{itemize}
-			\item Workflows
-			\item UX
-			\item Business logic
-			\item APIs
+			\item Retrieval
+			\item Aggregation
+			\item Computation
+			\item Verification
 		\end{itemize}
 
-		\vfill
 
-		{\small\color{accent}
-			THE VALUE SHIFTS FROM INFRASTRUCTURE TO EXPRESSION.
+
+		{\color{accent}
+			Reasoning is probabilistic. Computation is deterministic.
 		}
 
 	\end{frame}
 
 	%====================================================
 	\begin{frame}
-
-		\frametitle{The Network Effect of Knowledge}
-
+		\frametitle{Knowledge Planning replaces Search}
 
 
-		Each document improves the entire system.
+
+		Search asks:
+
+
+
+		\textit{"Which document is relevant?"}
+
+
+
+		Citadel asks:
+
+
+
+		\textit{"What computation produces the answer?"}
+
 
 
 
 		\begin{center}
 
-			Documents \;→\; Canonical Layer \;→\; Applications \;→\; More Documents
+			Query $\rightarrow$ Intent $\rightarrow$ Evidence $\rightarrow$ Execution $\rightarrow$ Answer
 
 		\end{center}
 
 
-
-		\begin{itemize}
-			\item Every ingestion improves structure inference
-			\item Every query improves planning quality
-			\item Every application benefits from shared representation
-		\end{itemize}
-
 		\vfill
 
-		{\small\color{accent}
-			THE DATASET IS NOT STATIC — IT IS A COMPILING SYSTEM.
+		{\color{accent}
+			Retrieval becomes query planning over knowledge.
+
 		}
 
 	\end{frame}
 
 	%====================================================
 	\begin{frame}
+		\frametitle{Structured Data Emerges Automatically}
 
+
+
+		Documents hide structure.
+
+
+
+		Citadel discovers:
+
+		\begin{itemize}
+			\item Tables
+			\item Relationships
+			\item Schemas
+			\item Hierarchies
+		\end{itemize}
+
+
+
+		Spreadsheets stop being files.
+
+
+
+		They become databases.
+
+		\vfill
+
+		{\color{accent}
+			Enterprise documents become queryable systems.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+		\frametitle{The Execution Loop}
+
+		\centering
+
+		\begin{tikzpicture}[
+			box/.style={
+				draw=text,
+				rounded corners,
+				minimum width=2cm,
+				minimum height=0.5cm,
+				align=center,
+				font=\small
+			}
+			]
+
+			\node[box](q){Query};
+
+			\node[box,right=of q](plan){Knowledge Plan};
+
+			\node[box,right=of plan](data){Data};
+
+			\node[box,right=of data,draw=accent](sql){Execution};
+
+			\node[box,right=of sql](ans){Answer};
+
+			\draw[-{Latex[length=2mm]}](q)--(plan);
+			\draw[-{Latex[length=2mm]}](plan)--(data);
+			\draw[-{Latex[length=2mm]},accent](data)--(sql);
+			\draw[-{Latex[length=2mm]}](sql)--(ans);
+
+		\end{tikzpicture}
+
+
+
+		{\color{accent}
+			Every answer has a computation path.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+		\frametitle{This System Exists Today}
+
+
+
+		Citadel already compiles:
+
+		\begin{center}
+
+			PDF
+
+			|
+
+			Office
+
+			|
+
+			Excel
+
+			|
+
+			CSV
+
+			|
+
+			HTML
+
+			|
+
+			XML
+
+			|
+
+			JSON
+
+			|
+
+			Images
+
+		\end{center}
+
+		into one canonical representation.
+
+
+
+		{\color{accent}
+			The architecture is implemented.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
+		\frametitle{The Architecture Made Predictions}
+
+
+
+		The thesis predicted:
+
+
+
+		\begin{itemize}
+
+			\item Any document can become structured knowledge
+
+			\item Different formats can share one representation
+
+			\item Computation can replace retrieval
+
+			\item Provenance can remain exact
+
+			\item Multiple applications can share one substrate
+
+		\end{itemize}
+
+
+		\vfill
+
+		{\color{accent}
+			Every prediction became a product capability.
+		}
+
+	\end{frame}
+
+	%====================================================
+	\begin{frame}
 		\frametitle{Why This Becomes a Moat}
 
 
 
-		Citadel improves with scale in ways competitors cannot replicate.
+		Models improve with data.
 
 
+
+		Citadel improves with:
 
 		\begin{itemize}
-			\item Structural inference improves with corpus diversity
-			\item Table extraction improves with schema variety
-			\item Query planning improves with workload history
-			\item Provenance graph strengthens with usage
+			\item More documents
+			\item More structures
+			\item More schemas
+			\item More queries
 		\end{itemize}
 
 
 
-		\begin{block}{Core Property}
-			The system becomes more accurate as it compiles more reality.
-		\end{block}
+
+		The system learns how enterprises organize knowledge.
 
 		\vfill
 
-		{\small\color{accent}
-			THIS IS NOT A MODEL MOAT. IT IS A REPRESENTATION MOAT.
+		{\color{accent}
+			The moat is the representation layer.
 		}
 
 	\end{frame}
 
 	%====================================================
 	\begin{frame}
-
-		\frametitle{Why Incumbents Cannot Easily Rebuild This}
-
-
-
-		Existing systems assume documents are the unit of computation.
+		\frametitle{Why Existing Systems Cannot Simply Add This}
 
 
 
-		Citadel replaces that assumption entirely.
+		Current systems assume:
 
 
 
-		\begin{itemize}
-			\item Search engines index text
-			\item Vector DBs embed chunks
-			\item LLM apps re-interpret documents every query
-		\end{itemize}
+		\begin{center}
+
+			Documents $\rightarrow$ Search $\rightarrow$ Answer
+
+		\end{center}
 
 
 
-		\textbf{None of these systems compile structure.}
+
+		Citadel changes the assumption:
+
+
+
+		\begin{center}
+
+			Documents $\rightarrow$ Compilation $\rightarrow$ Computation
+
+		\end{center}
+
 
 		\vfill
 
-		{\small\color{accent}
-			THE SHIFT IS ARCHITECTURAL, NOT INCREMENTAL.
+		{\color{accent}
+			This is an architectural shift.
 		}
 
 	\end{frame}
 
 	%====================================================
 	\begin{frame}
-
 		\frametitle{The Fourth Enterprise Data Layer}
 
 
 
-		Enterprise computing has evolved through distinct abstractions:
+		Computing evolved through abstractions:
 
 
 
 		\begin{center}
 
-			Relational Databases \\
-			\vspace{0.2cm}
-			Data Warehouses \\
-			\vspace{0.2cm}
-			Search Engines \\
-			\vspace{0.4cm}
-			\textbf{Citadel: Canonical Knowledge Layer}
+			Databases $\rightarrow$ Warehouses $\rightarrow$ Search $\rightarrow$ \textbf{Citadel}
 
 		\end{center}
 
 
 
-		\begin{block}{Definition}
-			A compiled, executable representation of enterprise knowledge.
-		\end{block}
+
+		A canonical computational layer for enterprise knowledge.
 
 		\vfill
 
-		{\small\color{accent}
-			THIS IS THE MISSING PRIMITIVE IN ENTERPRISE COMPUTING.
+		{\color{accent}
+			The missing primitive between documents and intelligence.
 		}
 
 	\end{frame}
 
 	%====================================================
 	\begin{frame}
+		\frametitle{}
 
-		\frametitle{Closing}
-
-
-
-		Every major computing era introduced a compiler/runtime:
+		\centering
 
 
 
-		\begin{itemize}
-			\item Programming languages → compilers/interpreter/machine code
-			\item Data → databases/SQL
-			\item Web → search engines/retrieval
-		\end{itemize}
+		Every programming language needed a compiler.
 
 
 
-		\textbf{Enterprise knowledge now needs its own compiler/runtime.}
+		Every enterprise database needed SQL.
 
 
 
-		\begin{center}
+		Every document will need a computational representation.
 
-			Citadel is that compiler and runtime.
 
-		\end{center}
 
-		\vfill
-
-		{\small\color{accent}
-			NOT SEARCH. NOT RETRIEVAL. A COMPUTING PRIMITIVE.
+		{\color{accent}
+			Citadel is building it.
 		}
 
 	\end{frame}
