@@ -41,7 +41,7 @@ from config import CPU_QUARTER, CPU_THIRD, configure_logging, get_settings
 logger = logging.getLogger(__name__)
 
 NORMALIZE_CONCURRENCY = CPU_QUARTER  # one isolated libreoffice profile per worker (per-job soffice)
-OCR_CONCURRENCY = 256  # pages in flight; matched to the mineru client-pool sockets and vLLM --max-num-seqs so the VLM batch stays saturated (KV had ~6x headroom at 128)
+OCR_CONCURRENCY = 192  # pages in flight; matched to the mineru client-pool sockets and vLLM --max-num-seqs. GPU saturates below 256 (sm~100%), so 192 holds throughput for ~1GB less host RAM
 MERGE_CONCURRENCY = 4  # light assembly
 PAGES_BUFFER = 32  # K: rendered pages kept buffered ahead of OCR so neither render nor OCR starves
 # render is gated so `pages` holds at most OCR_CONCURRENCY (claimed/in-flight) + PAGES_BUFFER images — bounds the

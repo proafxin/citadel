@@ -69,13 +69,13 @@ LAYER_TYPES = ("text", "title")  # filled from the PDF text layer on born-digita
 MINERU_CLIENTS = (
     16  # pool of VLM clients; OCR jobs round-robin across them (more, smaller pools → cheaper event-loop walk)
 )
-MINERU_CONN_PER_CLIENT = 16  # sockets per client (reused). clients x per-client = 256 total = OCR_CONCURRENCY, bounded
+MINERU_CONN_PER_CLIENT = 12  # sockets per client (reused). clients x per-client = 192 total = OCR_CONCURRENCY, bounded
 REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connection, never open unbounded sockets
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
 DIGITAL_RENDER_DPI = 110  # office→pdf ONLY (provably born-digital): image is layout-only, text from the PDF layer → render small. validate layout still holds; regular pdf stays at RENDER_DPI
 PAGINATE_CONCURRENCY = CPU_QUARTER  # pdfium process-pool workers, one dedicated pdfium per process
-PAGINATE_RECYCLE = 64
 RENDER_CONCURRENCY = CPU_QUARTER  # in-flight render jobs; matches the pdfium pool width so pages never queue in RAM
+RENDER_TIMEOUT = 120  # page renders in <1s; if a job strands (dead/hung pool worker) free the slot + retry the page
 RAPIDOCR_CONCURRENCY = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
 GAP_FILL = True  # RapidOCR scanned gap-fill; set to False for clean-image benchmarks (pure VLM)
 
@@ -139,15 +139,12 @@ def get_rapidocr_pool() -> ThreadPoolExecutor:
 @lru_cache
 def get_paginate_pool() -> ProcessPoolExecutor:
     # one process per worker → each gets its own pdfium (pdfium is not thread-safe; isolate by process).
-    # forkserver preloads only the lean pdf module (not __main__ → no onnxruntime/cv2/mineru/xgboost in a render
-    # worker); max_tasks_per_child recycles each worker so pdfium's process-global font cache can't grow unbounded.
+    # forkserver preloads only the lean pdf module (not __main__ → no onnxruntime/cv2/mineru/xgboost in a render worker).
+    # NO max_tasks_per_child: recycling this hot pool races and strands run_in_executor futures → the render cap
+    # leaks and the pipeline deadlocks. mmap + scale-cap already bound the RAM it was meant to guard.
     ctx = multiprocessing.get_context("forkserver")
     ctx.set_forkserver_preload(["citadel.services.pdf"])
-    return ProcessPoolExecutor(
-        max_workers=PAGINATE_CONCURRENCY,
-        mp_context=ctx,
-        max_tasks_per_child=PAGINATE_RECYCLE,
-    )
+    return ProcessPoolExecutor(max_workers=PAGINATE_CONCURRENCY, mp_context=ctx)
 
 
 def make_profile_pool(n: int) -> asyncio.Queue[str]:
@@ -332,7 +329,9 @@ async def handle_render(fields: dict[str, str]) -> None:
     redis = get_redis()
     await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
     loop = asyncio.get_running_loop()
-    image_bytes, digital = await loop.run_in_executor(get_paginate_pool(), render_pdf_page, str(path), page_idx, dpi)
+    image_bytes, digital = await asyncio.wait_for(
+        loop.run_in_executor(get_paginate_pool(), render_pdf_page, str(path), page_idx, dpi), RENDER_TIMEOUT
+    )
     await redis.xadd(
         STREAM_PAGES,
         {"doc_id": doc_id, "page_idx": page_idx, "image": image_bytes, "digital": "1" if digital else "0"},
