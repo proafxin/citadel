@@ -42,6 +42,10 @@ logger = logging.getLogger(__name__)
 NORMALIZE_CONCURRENCY = CPU_THIRD  # one isolated libreoffice profile per worker (per-job soffice)
 OCR_CONCURRENCY = 128  # pages in flight; sockets are capped by MINERU_MAX_CONNECTIONS, so keep this high to feed the server (born-digital makes few requests/page → needs many concurrent pages)
 MERGE_CONCURRENCY = 4  # light assembly
+PAGES_BUFFER = 32  # K: rendered pages kept buffered ahead of OCR so neither render nor OCR starves
+# render is gated so `pages` holds at most OCR_CONCURRENCY (claimed/in-flight) + PAGES_BUFFER images — bounds the
+# page-image RAM in Redis. without it a huge PDF renders ALL N pages up front (800 pages → GBs of images) → OOM.
+PAGES_BOUND = OCR_CONCURRENCY + PAGES_BUFFER
 
 BLOCK_MS = 5000
 
@@ -131,24 +135,35 @@ async def _recover(stream: str, consumer: str, cap: _Capacity, spawn: Spawn) -> 
         last = entries[-1][0].decode()
 
 
-async def _pump(stream: str, consumer: str, cap: _Capacity, spawn: Spawn) -> None:
+async def _pump(
+    stream: str, consumer: str, cap: _Capacity, spawn: Spawn, downstream: Callable[[], Awaitable[int]] | None = None
+) -> None:
     redis = get_redis()
     while True:
         if cap.free() <= 0:
             await cap.wait_free()  # no slot → block here instead of claiming more messages into RAM
             continue
-        fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=cap.free(), block=BLOCK_MS)
+        room = cap.free()
+        if downstream is not None:
+            # backpressure: never produce more than the downstream stream can hold (bounds its image RAM)
+            room = min(room, await downstream())
+            if room <= 0:
+                await asyncio.sleep(0.1)
+                continue
+        fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=room, block=BLOCK_MS)
         for msg_id, raw in fresh[0][1] if fresh else []:
             cap.take()
             spawn(msg_id.decode(), raw)
 
 
-async def _drive(stream: str, cap: _Capacity, spawn: Spawn) -> None:
+async def _drive(
+    stream: str, cap: _Capacity, spawn: Spawn, downstream: Callable[[], Awaitable[int]] | None = None
+) -> None:
     await ensure_group(stream)
     consumer = f"{stream}-{get_settings().worker_id}"
     logger.info("consuming %s concurrency=%d", stream, cap.limit)
     await _recover(stream, consumer, cap, spawn)
-    await _pump(stream, consumer, cap, spawn)
+    await _pump(stream, consumer, cap, spawn, downstream)
 
 
 # ---- per-job work: run the handler as a sub-task, settle on success, requeue/giveup on failure ----------
@@ -274,10 +289,16 @@ async def paginate() -> None:
     await _drive(STREAM_NORMALIZED, cap, lambda mid, raw: _spawn(_paginate_job(cap, mid, raw)))
 
 
-# ---- render: read `render`, render one PDF page via the pdfium pool, write `pages`. bounded to the pool width -----
+async def _pages_room() -> int:
+    # backpressure gate for render: how many more page images `pages` can hold before OCR is behind
+    return PAGES_BOUND - await get_redis().xlen(STREAM_PAGES)
+
+
+# ---- render: read `render`, render one PDF page via the pdfium pool, write `pages`. bounded to the pool width and
+# gated on `pages` depth so render never runs ahead of OCR by more than PAGES_BUFFER images (RAM bound) -----------
 async def render() -> None:
     cap = _Capacity(RENDER_CONCURRENCY)
-    await _drive(STREAM_RENDER, cap, lambda mid, raw: _spawn(_render_job(cap, mid, raw)))
+    await _drive(STREAM_RENDER, cap, lambda mid, raw: _spawn(_render_job(cap, mid, raw)), _pages_room)
 
 
 # ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. one global concurrency bound ----------
