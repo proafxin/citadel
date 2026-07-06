@@ -3,6 +3,7 @@ import io
 import itertools
 import json
 import logging
+import multiprocessing
 import re
 import tempfile
 import time
@@ -73,6 +74,7 @@ DOC_SOURCE_MAX = 16  # per-worker LRU of source blobs (pdf/workbook): each fetch
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
 DIGITAL_RENDER_DPI = 110  # office→pdf ONLY (provably born-digital): image is layout-only, text from the PDF layer → render small. validate layout still holds; regular pdf stays at RENDER_DPI
 PAGINATE_CONCURRENCY = CPU_THIRD  # pdfium process-pool workers, one dedicated pdfium per process
+PAGINATE_RECYCLE = 64
 RENDER_CONCURRENCY = CPU_THIRD  # in-flight render jobs; matches the pdfium pool width so pages never queue in RAM
 RAPIDOCR_CONCURRENCY = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
 GAP_FILL = True  # RapidOCR scanned gap-fill; set to False for clean-image benchmarks (pure VLM)
@@ -136,8 +138,16 @@ def get_rapidocr_pool() -> ThreadPoolExecutor:
 
 @lru_cache
 def get_paginate_pool() -> ProcessPoolExecutor:
-    # one process per worker → each gets its own pdfium (pdfium is not thread-safe; isolate by process)
-    return ProcessPoolExecutor(max_workers=PAGINATE_CONCURRENCY)
+    # one process per worker → each gets its own pdfium (pdfium is not thread-safe; isolate by process).
+    # forkserver preloads only the lean pdf module (not __main__ → no onnxruntime/cv2/mineru/xgboost in a render
+    # worker); max_tasks_per_child recycles each worker so pdfium's process-global font cache can't grow unbounded.
+    ctx = multiprocessing.get_context("forkserver")
+    ctx.set_forkserver_preload(["citadel.services.pdf"])
+    return ProcessPoolExecutor(
+        max_workers=PAGINATE_CONCURRENCY,
+        mp_context=ctx,
+        max_tasks_per_child=PAGINATE_RECYCLE,
+    )
 
 
 def make_profile_pool(n: int) -> asyncio.Queue[str]:
@@ -667,6 +677,9 @@ async def handle_merge(fields: dict[str, str]) -> None:
 async def cleanup(doc_id: str) -> None:
     redis = get_redis()
     await redis.delete(f"blocks:{doc_id}", f"pdf:{doc_id}", f"tabular:{doc_id}", f"sheets:{doc_id}")
+    for key in (f"pdf:{doc_id}", f"tabular:{doc_id}"):
+        _DOC_SOURCE.pop(key, None)  # drop the doc's cached source the moment it finishes, not at LRU pressure
+        _DOC_SOURCE_LOCKS.pop(key, None)
     await redis.expire(f"doc:{doc_id}", 3600)  # keep final status briefly, then auto-evict — no accumulation
 
 
