@@ -175,13 +175,6 @@ async def _doc_source(key: str) -> bytes | None:
 # ---- orchestrator side ----------------------------------------------------------------
 
 
-async def _enqueue_ingest(doc_ids: list[int], payloads: list[tuple[bytes, str]]) -> None:
-    pipe = get_redis().pipeline(transaction=False)
-    for doc_id, (data, name) in zip(doc_ids, payloads, strict=True):
-        pipe.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": name, "data": data})
-    await pipe.execute()
-
-
 async def submit_documents(files: list[UploadFile], library_id: int) -> IngestResponse:
     if not await library_exists(library_id):
         raise HTTPException(status_code=404, detail="unknown library")
@@ -190,15 +183,13 @@ async def submit_documents(files: list[UploadFile], library_id: int) -> IngestRe
     await begin_library_ingest(library_id)
     now = time.time()
     pipe = get_redis().pipeline(transaction=False)
-    for doc_id, (_data, name) in zip(doc_ids, payloads, strict=True):
+    for doc_id, (data, name) in zip(doc_ids, payloads, strict=True):
         pipe.hset(
             f"doc:{doc_id}",
             mapping={"state": "queued", "filename": name, "library_id": library_id, "done_count": 0, "t0": now},
         )
+        pipe.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": name, "data": data})
     await pipe.execute()
-    # enqueue inline: a failed xadd propagates to the caller instead of vanishing in a detached task, so a
-    # document can never sit "queued" with no ingest message behind it
-    await _enqueue_ingest(doc_ids, payloads)
     logger.info("ingest library=%s files=%d doc_ids=%s", library_id, len(files), doc_ids)
     return IngestResponse(doc_ids=doc_ids)
 
