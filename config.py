@@ -21,6 +21,7 @@ EMBED_DEVICE = "cuda"
 def configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s", force=True)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     loguru_logger.disable("mineru_vl_utils")
 
 

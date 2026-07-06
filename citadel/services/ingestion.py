@@ -69,7 +69,7 @@ LAYER_TYPES = ("text", "title")  # filled from the PDF text layer on born-digita
 MINERU_CLIENTS = (
     16  # pool of VLM clients; OCR jobs round-robin across them (more, smaller pools → cheaper event-loop walk)
 )
-MINERU_CONN_PER_CLIENT = 8  # sockets per client (reused). clients x per-client = 128 total = OCR_CONCURRENCY, bounded
+MINERU_CONN_PER_CLIENT = 16  # sockets per client (reused). clients x per-client = 256 total = OCR_CONCURRENCY, bounded
 REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connection, never open unbounded sockets
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
 DIGITAL_RENDER_DPI = 110  # office→pdf ONLY (provably born-digital): image is layout-only, text from the PDF layer → render small. validate layout still holds; regular pdf stays at RENDER_DPI

@@ -24,7 +24,7 @@ services:
       - --gpu-memory-utilization
       - "0.35"
       - --max-num-seqs
-      - "128"
+      - "256"
       - --quantization
       - fp8
       - --kv-cache-dtype

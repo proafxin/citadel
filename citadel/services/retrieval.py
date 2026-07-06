@@ -23,24 +23,27 @@ RRF_K = 60
 CANDIDATES = 1000
 
 VRAM_HEADROOM = 0.7  # fraction of free VRAM to spend on one embedding batch
-BYTES_PER_ROW = 64_000_000  # BGE-M3 activation per row at typical search_text length; tune with a benchmark
-BATCH_MIN = 8
+BYTES_PER_TOKEN = 220_000  # BGE-M3 peak activation per token (~64MB at ~300 tok); calibrate with a benchmark
+MODEL_MAX_TOKENS = 8192  # BGE-M3 context ceiling — caps the per-row cost estimate for very long nodes
 BATCH_MAX = 256
 
 _EMBED_LOCK = asyncio.Lock()
 
 
-def _batch_size() -> int:
-    if not torch.cuda.is_available():
-        return BATCH_MIN
+def _batch_size(texts: list[str]) -> int:
+    # size one batch to the FREE VRAM and the longest text in the set (activation scales with batch x seq len),
+    # flooring at 1 so a near-full GPU shrinks the batch instead of OOM-ing on a fixed minimum
     free, _ = torch.cuda.mem_get_info()
-    return max(BATCH_MIN, min(BATCH_MAX, int(free * VRAM_HEADROOM / BYTES_PER_ROW)))
+    longest = min(MODEL_MAX_TOKENS, max((len(text) // 4 for text in texts), default=1))
+    return max(1, min(BATCH_MAX, int(free * VRAM_HEADROOM / (longest * BYTES_PER_TOKEN))))
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
-    vectors = get_embedder().encode(texts, batch_size=_batch_size(), normalize_embeddings=True, show_progress_bar=False)
+    vectors = get_embedder().encode(
+        texts, batch_size=_batch_size(texts), normalize_embeddings=True, show_progress_bar=False
+    )
     return [vector.tolist() for vector in vectors]
 
 
