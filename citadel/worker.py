@@ -36,11 +36,11 @@ from citadel.services.ingestion import (
     reset_blob_dir,
 )
 from citadel.tabular.infer import HEADER_WORKERS
-from config import CPU_THIRD, configure_logging, get_settings
+from config import CPU_QUARTER, CPU_THIRD, configure_logging, get_settings
 
 logger = logging.getLogger(__name__)
 
-NORMALIZE_CONCURRENCY = CPU_THIRD  # one isolated libreoffice profile per worker (per-job soffice)
+NORMALIZE_CONCURRENCY = CPU_QUARTER  # one isolated libreoffice profile per worker (per-job soffice)
 OCR_CONCURRENCY = 256  # pages in flight; matched to the mineru client-pool sockets and vLLM --max-num-seqs so the VLM batch stays saturated (KV had ~6x headroom at 128)
 MERGE_CONCURRENCY = 4  # light assembly
 PAGES_BUFFER = 32  # K: rendered pages kept buffered ahead of OCR so neither render nor OCR starves

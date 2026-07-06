@@ -475,7 +475,7 @@ def _qr_payload(crop: Image.Image) -> str | None:
     return text if points is not None else None
 
 
-async def ocr_empty_blocks(client: MinerUClient, img: Image.Image, content_blocks: ExtractResult) -> None:
+async def ocr_empty_blocks(client: MinerUClient, img: Image.Image, content_blocks: ExtractResult) -> int:
     # image blocks the VLM localized but left empty (seals, stamps, figures, logos) → OCR the crop as text.
     # the VLM never read these (it only localizes images), so this is a fresh request, not a failed retry
     width, height = img.size
@@ -490,9 +490,10 @@ async def ocr_empty_blocks(client: MinerUClient, img: Image.Image, content_block
         elif payload:
             cb.content = payload  # decoded QR → store the real encoded data instead of a hallucinated description
     await _vlm_recover(client, img, to_ocr)
+    return len(to_ocr)
 
 
-async def recover_fillin_blocks(client: MinerUClient, img: Image.Image, content_blocks: ExtractResult) -> None:
+async def recover_fillin_blocks(client: MinerUClient, img: Image.Image, content_blocks: ExtractResult) -> int:
     # text/title blocks that are empty or fill-in fields may hold ink the layer / full-page VLM missed → re-OCR a
     # focused crop of just that block. the crop fills the VLM frame, giving the region far higher effective
     # resolution than the downscaled full page, so it can read a stamp/word the first pass dropped
@@ -502,9 +503,11 @@ async def recover_fillin_blocks(client: MinerUClient, img: Image.Image, content_
         if cb.type in LAYER_TYPES and (not (cb.content or "").strip() or FILLIN.search(cb.content or ""))
     ]
     await _vlm_recover(client, img, flagged)
+    return len(flagged)
 
 
 RAPIDOCR_MIN_SCORE = 0.85  # drop low-confidence recognitions — usually garbled re-reads of decorative/stamp text
+CROP_LOG_THRESHOLD = 6  # log a page only when its empty+fill-in VLM crops exceed this — surfaces burners, no spam
 
 
 def _trigrams(text: str) -> set[str]:
@@ -582,11 +585,22 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         # digital only: the VLM never read these text blocks (we used the layer), so a focused crop is a fresh
         # attempt that can catch handwriting the layer lacks. on scanned pages the VLM already read them, so a
         # re-crop only risks re-introducing the same drop and slightly degrading the text — skip it there.
-        await recover_fillin_blocks(client, img, content_blocks)
+        fill_crops = await recover_fillin_blocks(client, img, content_blocks)
     else:
         content_blocks = await client.aio_two_step_extract(img)  # VLM reads the scanned text (primary, good quality)
-    await ocr_empty_blocks(client, img, content_blocks)  # image blocks (seals/stamps/figures) → VLM-crop, both branches
+        fill_crops = 0
+    img_crops = await ocr_empty_blocks(client, img, content_blocks)  # image blocks (seals/stamps/figures) → VLM-crop
     blocks = [map_content_block(cb, page_idx) for cb in content_blocks]
+    if img_crops + fill_crops >= CROP_LOG_THRESHOLD:  # surface only crop-heavy pages — no per-page spam over thousands
+        logger.info(
+            "ocr-heavy doc=%s page=%d digital=%d blocks=%d img_crops=%d fill_crops=%d",
+            doc_id,
+            page_idx,
+            int(digital),
+            len(blocks),
+            img_crops,
+            fill_crops,
+        )
     if not digital and GAP_FILL:
         # hand the page to the bounded CPU gapfill stage and free the GPU OCR slot now, instead of blocking on RapidOCR
         await get_redis().xadd(
