@@ -6,7 +6,6 @@ from sqlalchemy import select
 from citadel.db import get_sessionmaker
 from citadel.models.document import Document
 from citadel.models.library import Library
-from citadel.models.status import LibraryStatus
 from citadel.schemas.library import LibraryRead, Tier
 from citadel.services.document import compress_tree, delete_document_tree, load_document_tree, notify_embed
 
@@ -53,9 +52,6 @@ async def update_library(library_id: int, name: str, tier: Tier) -> LibraryRead:
         upgraded = library.tier != "tier_2" and tier == "tier_2"
         library.name = name
         library.tier = tier
-        if upgraded and library.ready_at is not None:
-            library.status = LibraryStatus.INGESTED
-            library.ready_at = None
         result = _to_read(library)
     if upgraded:
         await notify_embed(library_id)

@@ -69,12 +69,9 @@ async def _maybe_notify_embed(session: AsyncSession, library_id: int) -> None:
     now = datetime.now(UTC)
     if library.ingested_at is None:
         library.ingested_at = now
+    library.status = LibraryStatus.INGESTED
     if library.tier == "tier_2":
-        library.status = LibraryStatus.INGESTED
         await session.execute(text("SELECT pg_notify('embed', :library)"), {"library": str(library_id)})
-    else:
-        library.status = LibraryStatus.READY
-        library.ready_at = now
 
 
 async def begin_library_ingest(library_id: int) -> None:
