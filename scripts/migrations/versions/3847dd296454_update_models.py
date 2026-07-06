@@ -1,8 +1,8 @@
 """update models
 
-Revision ID: 13cc7b1e714c
+Revision ID: 3847dd296454
 Revises: 
-Create Date: 2026-07-06 16:54:26.240615
+Create Date: 2026-07-06 21:08:48.087777
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ from sqlalchemy.dialects import postgresql
 import pgvector.sqlalchemy
 
 # revision identifiers, used by Alembic.
-revision: str = '13cc7b1e714c'
+revision: str = '3847dd296454'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -28,6 +28,9 @@ def upgrade() -> None:
     sa.Column('status', sa.String(), server_default='ready', nullable=False),
     sa.Column('ingest_started_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('ingested_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('finalize_started_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('described_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('embed_started_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('ready_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
@@ -57,7 +60,7 @@ def upgrade() -> None:
     sa.Column('label', sa.String(), nullable=True),
     sa.Column('bbox', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('search_text', sa.Text(), nullable=True),
-    sa.Column('embedding', pgvector.sqlalchemy.vector.VECTOR(dim=1024), nullable=True),
+    sa.Column('embedding', pgvector.sqlalchemy.Vector(dim=1024), nullable=True),
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
