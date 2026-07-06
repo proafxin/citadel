@@ -23,9 +23,14 @@ def count_pdf_pages(data: bytes) -> int:
 def render_pdf_page(data: bytes, page_idx: int, dpi: int) -> tuple[bytes, bool]:
     pdf = pdfium.PdfDocument(data)
     page = pdf[page_idx]
+    bitmap = page.render(scale=dpi / 72)
     bio = io.BytesIO()
-    downscale(page.render(scale=dpi / 72).to_pil()).save(bio, format="PNG")
-    digital = page.get_rotation() == 0 and page.get_textpage().count_chars() > 16
+    downscale(bitmap.to_pil()).save(bio, format="PNG")
+    bitmap.close()
+    textpage = page.get_textpage()
+    digital = page.get_rotation() == 0 and textpage.count_chars() > 16
+    textpage.close()
+    page.close()
     pdf.close()
     return bio.getvalue(), digital
 
@@ -39,5 +44,7 @@ def extract_layer_by_bbox(pdf_bytes: bytes, page_idx: int, bboxes: list[list[flo
     for x0, y0, x1, y1 in bboxes:
         left, right, bottom, top = x0 * width, x1 * width, (1 - y1) * height, (1 - y0) * height
         out.append(textpage.get_text_bounded(left=left, bottom=bottom, right=right, top=top).strip())
+    textpage.close()
+    page.close()
     pdf.close()
     return out
