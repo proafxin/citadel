@@ -338,9 +338,7 @@ async def handle_render(fields: dict[str, str]) -> None:
     redis = get_redis()
     await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
     loop = asyncio.get_running_loop()
-    started = time.time()
     image_bytes, digital = await loop.run_in_executor(get_paginate_pool(), render_pdf_page, data, page_idx, dpi)
-    await redis.hincrbyfloat(f"doc:{doc_id}", "render_secs", time.time() - started)
     await redis.xadd(
         STREAM_PAGES,
         {"doc_id": doc_id, "page_idx": page_idx, "image": image_bytes, "digital": "1" if digital else "0"},
@@ -570,7 +568,6 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     digital = fields.get("digital") == "1"
     img = Image.open(io.BytesIO(image))
     client = get_mineru_client()  # one of the pooled clients, round-robin — its httpx pool is reused, not per-page
-    started = time.time()
     if digital:
         # born-digital page: VLM does layout + recognizes only non-text; text/title come from the exact text layer
         content_blocks = await client.aio_two_step_extract(img, not_extract_list=list(LAYER_TYPES))
@@ -596,7 +593,6 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         content_blocks = await client.aio_two_step_extract(img)  # VLM reads the scanned text (primary, good quality)
     await ocr_empty_blocks(client, img, content_blocks)  # image blocks (seals/stamps/figures) → VLM-crop, both branches
     blocks = [map_content_block(cb, page_idx) for cb in content_blocks]
-    await get_redis().hincrbyfloat(f"doc:{doc_id}", "ocr_secs", time.time() - started)
     if not digital and GAP_FILL:
         # hand the page to the bounded CPU gapfill stage and free the GPU OCR slot now, instead of blocking on RapidOCR
         await get_redis().xadd(
@@ -622,9 +618,7 @@ async def handle_gapfill(fields: dict[str, str], image: bytes) -> None:
     # decoupled CPU stage: RapidOCR adds the lines the VLM dropped on a scanned page, then the page is finalized
     page_idx = int(fields["page_idx"])
     blocks = _load_blocks(fields["blocks"])
-    started = time.time()
     await recover_scanned_gaps(Image.open(io.BytesIO(image)), blocks, page_idx)
-    await get_redis().hincrbyfloat(f"doc:{fields['doc_id']}", "gapfill_secs", time.time() - started)
     await _emit_page(fields["doc_id"], page_idx, blocks)
 
 
@@ -650,11 +644,7 @@ def _stage_line(doc: dict[bytes, bytes]) -> str:
         walls.append(f"pages={merge - pages:.1f}s")
     if merge and done:
         walls.append(f"merge={done - merge:.1f}s")
-    compute = [f"{name}={g(f'{name}_secs'):.1f}s" for name in ("render", "ocr", "gapfill") if g(f"{name}_secs")]
-    line = " ".join(walls)
-    if compute:
-        line += " | compute " + " ".join(compute)
-    return line
+    return " ".join(walls)
 
 
 async def handle_merge(fields: dict[str, str]) -> None:

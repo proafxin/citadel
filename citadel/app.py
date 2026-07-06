@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 async def _drain_embeds(queue: asyncio.Queue[int]) -> None:
     while True:
         library_id = await queue.get()
-        logger.info("embedding library=%d", library_id)
+        logger.info("finalizing library=%d", library_id)
         await mark_embed_started(library_id)
         described = await describe_library_tables(library_id)
         logger.info("described library=%d tables=%d", library_id, described)
@@ -30,7 +30,7 @@ async def _drain_embeds(queue: asyncio.Queue[int]) -> None:
 
 async def _catchup() -> None:
     for library_id in await pending_libraries():
-        logger.info("catch-up embedding library=%d", library_id)
+        logger.info("catch-up finalizing library=%d", library_id)
         await mark_embed_started(library_id)
         described = await describe_library_tables(library_id)
         logger.info("catch-up described library=%d tables=%d", library_id, described)

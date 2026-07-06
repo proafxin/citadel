@@ -97,7 +97,7 @@ export function LibraryDetailPage() {
           </div>
           <div className="mt-4 flex-1">
             {processing ? (
-              <NowProcessing libraryId={id} docs={docs} />
+              <NowProcessing libraryId={id} />
             ) : (
               <Card className="flex h-full flex-col p-6 text-sm text-ink-muted">
                 {!meta?.searchable ? (
