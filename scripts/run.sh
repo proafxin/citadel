@@ -13,7 +13,7 @@ fi
 
 # fresh state each run: wipe redis (streams reference doc ids from the wiped DB) and recreate postgres.
 docker compose exec -T redis redis-cli FLUSHALL >/dev/null
-# docker compose down postgres --remove-orphans -v
+docker compose down postgres --remove-orphans -v
 docker compose up -d postgres
 
 until docker compose exec -T postgres pg_isready -U "${CITADEL_POSTGRES_USER:-postgres}" >/dev/null 2>&1; do

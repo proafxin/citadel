@@ -46,6 +46,9 @@ PAGES_BUFFER = 32  # K: rendered pages kept buffered ahead of OCR so neither ren
 # render is gated so `pages` holds at most OCR_CONCURRENCY (claimed/in-flight) + PAGES_BUFFER images — bounds the
 # page-image RAM in Redis. without it a huge PDF renders ALL N pages up front (800 pages → GBs of images) → OOM.
 PAGES_BOUND = OCR_CONCURRENCY + PAGES_BUFFER
+GAPFILL_BUFFER = 64  # scanned pages OCR may run ahead of RapidOCR gap-fill before it backpressures (keeps the GPU
+# busy while still bounding the scanned-page images buffered in `gapfill`); born-digital pages never enter it
+GAPFILL_BOUND = RAPIDOCR_CONCURRENCY + GAPFILL_BUFFER
 
 BLOCK_MS = 5000
 
@@ -301,11 +304,17 @@ async def render() -> None:
     await _drive(STREAM_RENDER, cap, lambda mid, raw: _spawn(_render_job(cap, mid, raw)), _pages_room)
 
 
-# ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. one global concurrency bound ----------
+async def _gapfill_room() -> int:
+    # backpressure gate for ocr: how many more scanned-page images `gapfill` can hold before RapidOCR is behind
+    return GAPFILL_BOUND - await get_redis().xlen(STREAM_GAPFILL)
+
+
+# ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. one global concurrency bound, gated on `gapfill`
+# depth so a scanned-heavy doc can't pile up gap-fill page images faster than RapidOCR drains them -----------------
 async def ocr() -> None:
     await asyncio.to_thread(get_mineru_client)  # build the pooled clients once now, not lazily mid-OCR
     cap = _Capacity(OCR_CONCURRENCY)
-    await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)))
+    await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)), _gapfill_room)
 
 
 # ---- gapfill: read `gapfill`, RapidOCR the lines the VLM dropped, finalize the page. CPU-bound, bounded low ----
