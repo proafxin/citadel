@@ -10,3 +10,11 @@ class DocumentRead(BaseModel):
     filename: str
     status: str
     elapsed: float | None = None
+
+
+class DocProgress(BaseModel):
+    doc_id: int
+    filename: str
+    done: int
+    total: int
+    state: str

@@ -23,7 +23,7 @@ RRF_K = 60
 CANDIDATES = 1000
 
 VRAM_HEADROOM = 0.7  # fraction of free VRAM to spend on one embedding batch
-BYTES_PER_ROW = 40_000_000  # BGE-M3 activation per row at typical search_text length; tune with a benchmark
+BYTES_PER_ROW = 64_000_000  # BGE-M3 activation per row at typical search_text length; tune with a benchmark
 BATCH_MIN = 8
 BATCH_MAX = 256
 

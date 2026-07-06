@@ -72,11 +72,12 @@ services:
       - --quantization
       - fp8
       - --gpu-memory-utilization
-      - "0.42"
+      - "0.30"
       - --max-num-seqs
-      - "48"
+      - "32"
       - --max-model-len
       - "32768"
+      - --enforce-eager
       - --language-model-only
       - --uvicorn-log-level
       - warning

@@ -31,7 +31,7 @@ from citadel.llm import describe_table
 from citadel.models.document import Document
 from citadel.models.status import DocumentStatus
 from citadel.schemas.content import Block
-from citadel.schemas.document import DocumentRead, IngestResponse
+from citadel.schemas.document import DocProgress, DocumentRead, IngestResponse
 from citadel.services.document import (
     begin_library_ingest,
     create_documents,
@@ -221,6 +221,31 @@ async def list_documents(library_id: int) -> list[DocumentRead]:
     ]
 
 
+async def library_progress(library_id: int) -> list[DocProgress]:
+    async with get_sessionmaker()() as session:
+        rows = list(
+            await session.execute(
+                select(Document.id, Document.filename)
+                .where(Document.library_id == library_id, Document.status == DocumentStatus.PROCESSING)
+                .order_by(Document.id)
+            )
+        )
+    redis = get_redis()
+    progress: list[DocProgress] = []
+    for doc_id, filename in rows:
+        done, total, state = await redis.hmget(f"doc:{doc_id}", "done_count", "page_count", "state")
+        progress.append(
+            DocProgress(
+                doc_id=doc_id,
+                filename=filename,
+                done=int(done) if done else 0,
+                total=int(total) if total else 0,
+                state=state.decode() if state else "",
+            )
+        )
+    return progress
+
+
 # ---- normalize stage (CPU / process pool) ---------------------------------------------
 
 
@@ -254,6 +279,7 @@ async def handle_paginate(fields: dict[str, str], data: bytes) -> None:
     kind = fields["kind"]
     redis = get_redis()
     await redis.hset(f"doc:{doc_id}", "state", "paginating")
+    await redis.hsetnx(f"doc:{doc_id}", "t_paginate", time.time())
     if kind == "text":
         text = data.decode("utf-8", errors="replace")
         blocks = [
@@ -310,9 +336,13 @@ async def handle_render(fields: dict[str, str]) -> None:
     data = await _doc_source(f"pdf:{doc_id}")
     if data is None:  # source already cleaned up (doc finished) → a reclaimed render job is a no-op
         return
+    redis = get_redis()
+    await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
     loop = asyncio.get_running_loop()
+    started = time.time()
     image_bytes, digital = await loop.run_in_executor(get_paginate_pool(), render_pdf_page, data, page_idx, dpi)
-    await get_redis().xadd(
+    await redis.hincrbyfloat(f"doc:{doc_id}", "render_secs", time.time() - started)
+    await redis.xadd(
         STREAM_PAGES,
         {"doc_id": doc_id, "page_idx": page_idx, "image": image_bytes, "digital": "1" if digital else "0"},
     )
@@ -374,6 +404,7 @@ async def handle_tabular(fields: dict[str, str]) -> None:
     kind = fields["kind"]
     sheet_no = int(fields["sheet_no"])
     redis = get_redis()
+    await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
     data = await _doc_source(f"tabular:{doc_id}")
     if data is None:  # source already cleaned up (doc finished) → a reclaimed sheet job is a no-op
         return
@@ -542,6 +573,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     digital = fields.get("digital") == "1"
     img = Image.open(io.BytesIO(image))
     client = get_mineru_client()  # one of the pooled clients, round-robin — its httpx pool is reused, not per-page
+    started = time.time()
     if digital:
         # born-digital page: VLM does layout + recognizes only non-text; text/title come from the exact text layer
         content_blocks = await client.aio_two_step_extract(img, not_extract_list=list(LAYER_TYPES))
@@ -567,6 +599,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         content_blocks = await client.aio_two_step_extract(img)  # VLM reads the scanned text (primary, good quality)
     await ocr_empty_blocks(client, img, content_blocks)  # image blocks (seals/stamps/figures) → VLM-crop, both branches
     blocks = [map_content_block(cb, page_idx) for cb in content_blocks]
+    await get_redis().hincrbyfloat(f"doc:{doc_id}", "ocr_secs", time.time() - started)
     if not digital and GAP_FILL:
         # hand the page to the bounded CPU gapfill stage and free the GPU OCR slot now, instead of blocking on RapidOCR
         await get_redis().xadd(
@@ -592,7 +625,9 @@ async def handle_gapfill(fields: dict[str, str], image: bytes) -> None:
     # decoupled CPU stage: RapidOCR adds the lines the VLM dropped on a scanned page, then the page is finalized
     page_idx = int(fields["page_idx"])
     blocks = _load_blocks(fields["blocks"])
+    started = time.time()
     await recover_scanned_gaps(Image.open(io.BytesIO(image)), blocks, page_idx)
+    await get_redis().hincrbyfloat(f"doc:{fields['doc_id']}", "gapfill_secs", time.time() - started)
     await _emit_page(fields["doc_id"], page_idx, blocks)
 
 
@@ -604,15 +639,38 @@ async def emit_vlm_only(fields: dict[str, str]) -> None:
 # ---- merge stage ----------------------------------------------------------------------
 
 
+def _stage_line(doc: dict[bytes, bytes]) -> str:
+    def g(key: str) -> float:
+        return float(doc.get(key.encode(), 0) or 0)
+
+    proc, paginate, pages, merge, done = g("t_proc"), g("t_paginate"), g("t_pages"), g("t_merge"), g("t_done")
+    walls: list[str] = []
+    if proc and paginate:
+        walls.append(f"normalize={paginate - proc:.1f}s")
+    if paginate and pages:
+        walls.append(f"paginate={pages - paginate:.1f}s")
+    if pages and merge:
+        walls.append(f"pages={merge - pages:.1f}s")
+    if merge and done:
+        walls.append(f"merge={done - merge:.1f}s")
+    compute = [f"{name}={g(f'{name}_secs'):.1f}s" for name in ("render", "ocr", "gapfill") if g(f"{name}_secs")]
+    line = " ".join(walls)
+    if compute:
+        line += " | compute " + " ".join(compute)
+    return line
+
+
 async def handle_merge(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
     now = time.time()
+    await redis.hsetnx(f"doc:{doc_id}", "t_merge", now)
     elapsed = now - float(await redis.hget(f"doc:{doc_id}", "t_proc") or now)
     if (await redis.hget(f"doc:{doc_id}", "mode") or b"").decode() == "tabular":
         await finalize_tabular(int(doc_id), elapsed)
-        await redis.hset(f"doc:{doc_id}", mapping={"state": "ingested", "t_done": now})
-        logger.info("merge doc_id=%s state=ingested tabular", doc_id)
+        await redis.hset(f"doc:{doc_id}", mapping={"state": "ingested", "t_done": time.time()})
+        doc = await redis.hgetall(f"doc:{doc_id}")
+        logger.info("merge doc_id=%s state=ingested tabular %s", doc_id, _stage_line(doc))
         return
     per_page = await redis.hgetall(f"blocks:{doc_id}")
     blocks: list[Block] = []
@@ -622,9 +680,12 @@ async def handle_merge(fields: dict[str, str]) -> None:
     state = DocumentStatus.PARTIAL if any(b.type == "error" for b in blocks) else DocumentStatus.INGESTED
     await save_document_tree(int(doc_id), blocks, state, elapsed)
     await persist_document_tree(int(doc_id))
-    await redis.hset(f"doc:{doc_id}", mapping={"state": state, "t_done": now})
-    t0 = float(await redis.hget(f"doc:{doc_id}", "t0") or 0)
-    logger.info("merge file=%s state=%s blocks=%d dur=%.1fs", source, state, len(blocks), time.time() - t0)
+    await redis.hset(f"doc:{doc_id}", mapping={"state": state, "t_done": time.time()})
+    doc = await redis.hgetall(f"doc:{doc_id}")
+    t0 = float(doc.get(b"t0", 0) or 0)
+    logger.info(
+        "merge file=%s state=%s blocks=%d dur=%.1fs %s", source, state, len(blocks), time.time() - t0, _stage_line(doc)
+    )
 
 
 async def cleanup(doc_id: str) -> None:
