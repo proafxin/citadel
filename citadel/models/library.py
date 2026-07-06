@@ -15,4 +15,5 @@ class Library(Base):
     status: Mapped[str] = mapped_column(default=LibraryStatus.READY, server_default=LibraryStatus.READY)
     ingest_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    embed_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)

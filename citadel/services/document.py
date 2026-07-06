@@ -7,16 +7,18 @@ from datetime import UTC, datetime
 import zstandard
 from fastapi import HTTPException
 from fastapi.responses import Response
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
+from citadel.llm import describe_table
 from citadel.models.content import Code, ContentNode, Equation, ListBlock, Paragraph
 from citadel.models.document import Document
 from citadel.models.library import Library
 from citadel.models.status import DocumentStatus, LibraryStatus
 from citadel.models.table import Table, TableRow
 from citadel.schemas.content import Block
+from citadel.schemas.table import Column
 from citadel.services.excel import MaterializedTable
 from citadel.services.tabular import stitch_tables, structure_html_tables
 from citadel.services.tree import (
@@ -82,6 +84,7 @@ async def begin_library_ingest(library_id: int) -> None:
         library.status = LibraryStatus.PROCESSING
         library.ingest_started_at = datetime.now(UTC)
         library.ingested_at = None
+        library.embed_started_at = None
         library.ready_at = None
 
 
@@ -93,6 +96,14 @@ async def mark_processing(doc_id: int) -> None:
         document.status = DocumentStatus.PROCESSING
 
 
+async def mark_embed_started(library_id: int) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        library = await session.get(Library, library_id)
+        if library is None:
+            return
+        library.embed_started_at = datetime.now(UTC)
+
+
 async def mark_library_ready(library_id: int) -> None:
     async with get_sessionmaker()() as session, session.begin():
         library = await session.get(Library, library_id)
@@ -100,6 +111,45 @@ async def mark_library_ready(library_id: int) -> None:
             return
         library.status = LibraryStatus.READY
         library.ready_at = datetime.now(UTC)
+
+
+async def _describe_one(
+    content_id: str, columns: list[dict], sample_rows: list[list], metadata: dict, filename: str, search_text: str | None
+) -> tuple[str, str, str]:
+    description = await describe_table(
+        [Column(**column) for column in columns], sample_rows, metadata.get("sheet") or filename
+    )
+    combined = "\n".join(part for part in [search_text or "", description.strip()] if part)
+    return content_id, description, combined
+
+
+async def describe_library_tables(library_id: int) -> int:
+    async with get_sessionmaker()() as session:
+        rows = list(
+            await session.execute(
+                select(
+                    Table.content_id,
+                    Table.columns,
+                    Table.sample_rows,
+                    Table.table_metadata,
+                    Document.filename,
+                    ContentNode.search_text,
+                )
+                .join(Document, Table.document_id == Document.id)
+                .join(ContentNode, ContentNode.content_id == Table.content_id)
+                .where(Document.library_id == library_id, Table.description == "")
+            )
+        )
+    if not rows:
+        return 0
+    described = await asyncio.gather(*(_describe_one(*row) for row in rows))
+    async with get_sessionmaker()() as session, session.begin():
+        for content_id, description, combined in described:
+            await session.execute(update(Table).where(Table.content_id == content_id).values(description=description))
+            await session.execute(
+                update(ContentNode).where(ContentNode.content_id == content_id).values(search_text=combined)
+            )
+    return len(described)
 
 
 def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:

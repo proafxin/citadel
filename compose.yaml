@@ -27,6 +27,8 @@ services:
       - "128"
       - --quantization
       - fp8
+      - --kv-cache-dtype
+      - fp8
       # MM processor cache: enabled but capped (it lives in HOST RAM). a real win on repeated/templated pages
       # (forms, letterheads) + within-page re-encodes; bounded to 2GB so it can't balloon the host footprint.
       # cache only affects speed, never the output — so it doesn't touch the OmniDocBench quality numbers.
@@ -71,6 +73,8 @@ services:
       - "8100"
       - --quantization
       - fp8
+      - --kv-cache-dtype
+      - fp8
       - --gpu-memory-utilization
       - "0.30"
       - --max-num-seqs
@@ -78,6 +82,7 @@ services:
       - --max-model-len
       - "32768"
       - --enforce-eager
+      - --enable-prefix-caching
       - --language-model-only
       - --uvicorn-log-level
       - warning

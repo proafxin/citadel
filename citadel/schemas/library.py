@@ -18,6 +18,7 @@ class LibraryRead(BaseModel):
     status: str
     ingest_started_at: datetime | None = None
     ingested_at: datetime | None = None
+    embed_started_at: datetime | None = None
     ready_at: datetime | None = None
 
     @computed_field
@@ -30,13 +31,13 @@ class LibraryRead(BaseModel):
     @computed_field
     @property
     def finalize_seconds(self) -> float | None:
-        if self.ingested_at is None or self.ready_at is None:
+        if self.embed_started_at is None or self.ready_at is None:
             return None
-        return (self.ready_at - self.ingested_at).total_seconds()
+        return (self.ready_at - self.embed_started_at).total_seconds()
 
     @computed_field
     @property
     def total_seconds(self) -> float | None:
-        if self.ingest_started_at is None or self.ready_at is None:
+        if self.ingest_seconds is None or self.finalize_seconds is None:
             return None
-        return (self.ready_at - self.ingest_started_at).total_seconds()
+        return self.ingest_seconds + self.finalize_seconds

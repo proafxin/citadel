@@ -27,7 +27,6 @@ from redis.retry import Retry
 from sqlalchemy import select
 
 from citadel.db import get_sessionmaker
-from citadel.llm import describe_table
 from citadel.models.document import Document
 from citadel.models.status import DocumentStatus
 from citadel.schemas.content import Block
@@ -420,8 +419,6 @@ async def handle_tabular(fields: dict[str, str]) -> None:
             separator = "\t" if kind == "tsv" else ","
             tables = list(enumerate(await structure_csv_tables(data, separator), start=1))
         sheet_name = filename
-    for _ordinal, table in tables:
-        table.description = await describe_table(table.columns, table.sample_rows, sheet_name)
     await save_sheet_tables(int(doc_id), sheet_no, sheet_name, tables)
     await record_sheet(doc_id, sheet_no)
 
