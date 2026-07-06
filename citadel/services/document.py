@@ -96,6 +96,13 @@ async def mark_processing(doc_id: int) -> None:
         if document is None or document.status != DocumentStatus.QUEUED:
             return
         document.status = DocumentStatus.PROCESSING
+        document.processing_started_at = datetime.now(UTC)
+
+
+def _ingest_seconds(document: Document) -> float | None:
+    if document.processing_started_at is None:
+        return None
+    return (datetime.now(UTC) - document.processing_started_at).total_seconds()
 
 
 async def mark_finalize_started(library_id: int) -> None:
@@ -209,9 +216,7 @@ async def _add_table(session: AsyncSession, content_id: str, doc_id: int, table:
     session.add_all(TableRow(table_id=row.id, row_idx=index, values=values) for index, values in enumerate(table.rows))
 
 
-async def save_document_tree(
-    doc_id: int, blocks: list[Block], status: DocumentStatus, ingest_seconds: float | None
-) -> None:
+async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentStatus) -> None:
     async with get_sessionmaker()() as session:
         document = await session.get(Document, doc_id)
         if document is None:
@@ -233,7 +238,7 @@ async def save_document_tree(
         if document is None:
             return
         document.status = status
-        document.ingest_seconds = ingest_seconds
+        document.ingest_seconds = _ingest_seconds(document)
         if await session.scalar(select(ContentNode.id).where(ContentNode.document_id == doc_id).limit(1)) is not None:
             await _maybe_notify_embed(session, library_id)
             return
@@ -344,24 +349,24 @@ async def save_sheet_tables(
             )
 
 
-async def finalize_tabular(doc_id: int, ingest_seconds: float | None) -> None:
+async def finalize_tabular(doc_id: int) -> None:
     async with get_sessionmaker()() as session, session.begin():
         document = await session.get(Document, doc_id)
         if document is None:
             return
         document.status = DocumentStatus.INGESTED
-        document.ingest_seconds = ingest_seconds
+        document.ingest_seconds = _ingest_seconds(document)
         await _maybe_notify_embed(session, document.library_id)
     await persist_document_tree(doc_id)
 
 
-async def mark_document(doc_id: int, status: DocumentStatus, ingest_seconds: float | None) -> None:
+async def mark_document(doc_id: int, status: DocumentStatus) -> None:
     async with get_sessionmaker()() as session, session.begin():
         document = await session.get(Document, doc_id)
         if document is None:
             return
         document.status = status
-        document.ingest_seconds = ingest_seconds
+        document.ingest_seconds = _ingest_seconds(document)
         await _maybe_notify_embed(session, document.library_id)
 
 

@@ -1,8 +1,8 @@
 """update models
 
-Revision ID: 3847dd296454
+Revision ID: 58a3f55c378a
 Revises: 
-Create Date: 2026-07-06 21:08:48.087777
+Create Date: 2026-07-06 21:34:54.483720
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ from sqlalchemy.dialects import postgresql
 import pgvector.sqlalchemy
 
 # revision identifiers, used by Alembic.
-revision: str = '3847dd296454'
+revision: str = '58a3f55c378a'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -41,6 +41,7 @@ def upgrade() -> None:
     sa.Column('library_id', sa.Integer(), nullable=False),
     sa.Column('filename', sa.String(), nullable=False),
     sa.Column('status', sa.String(), nullable=False),
+    sa.Column('processing_started_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('ingest_seconds', sa.Float(), nullable=True),
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),

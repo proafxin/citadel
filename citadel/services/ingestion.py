@@ -424,9 +424,8 @@ async def handle_tabular(fields: dict[str, str]) -> None:
 async def fail_document(doc_id: str, stage: str) -> None:
     redis = get_redis()
     now = time.time()
-    elapsed = now - float(await redis.hget(f"doc:{doc_id}", "t_proc") or now)
     await redis.hset(f"doc:{doc_id}", mapping={"state": "failed", "error": f"{stage} failed", "t_done": now})
-    await mark_document(int(doc_id), DocumentStatus.FAILED, elapsed)
+    await mark_document(int(doc_id), DocumentStatus.FAILED)
     await cleanup(doc_id)  # terminal failure → release the source blobs (no wall-clock TTL to fall back on)
 
 
@@ -652,9 +651,8 @@ async def handle_merge(fields: dict[str, str]) -> None:
     redis = get_redis()
     now = time.time()
     await redis.hsetnx(f"doc:{doc_id}", "t_merge", now)
-    elapsed = now - float(await redis.hget(f"doc:{doc_id}", "t_proc") or now)
     if (await redis.hget(f"doc:{doc_id}", "mode") or b"").decode() == "tabular":
-        await finalize_tabular(int(doc_id), elapsed)
+        await finalize_tabular(int(doc_id))
         await redis.hset(f"doc:{doc_id}", mapping={"state": "ingested", "t_done": time.time()})
         doc = await redis.hgetall(f"doc:{doc_id}")
         logger.info("merge doc_id=%s state=ingested tabular %s", doc_id, _stage_line(doc))
@@ -665,7 +663,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
         blocks.extend(Block(**raw) for raw in json.loads(per_page[str(page_idx).encode()]))
     source = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
     state = DocumentStatus.PARTIAL if any(b.type == "error" for b in blocks) else DocumentStatus.INGESTED
-    await save_document_tree(int(doc_id), blocks, state, elapsed)
+    await save_document_tree(int(doc_id), blocks, state)
     await persist_document_tree(int(doc_id))
     await redis.hset(f"doc:{doc_id}", mapping={"state": state, "t_done": time.time()})
     doc = await redis.hgetall(f"doc:{doc_id}")

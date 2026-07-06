@@ -12,7 +12,7 @@ if ! curl -sf "http://localhost:${CITADEL_MINERU_PORT:-8099}/v1/models" >/dev/nu
 fi
 
 # fresh state each run: wipe redis (streams reference doc ids from the wiped DB) and recreate postgres.
-# docker compose exec -T redis redis-cli FLUSHALL >/dev/null
+docker compose exec -T redis redis-cli FLUSHALL >/dev/null
 # docker compose down postgres --remove-orphans -v
 docker compose up -d postgres
 
