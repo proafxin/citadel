@@ -262,6 +262,7 @@ async def _unify(
 
 async def answer(question: str, library_id: int) -> AsyncIterator[str]:
     queries = await reformulate(question)
+    logger.info("reformulate %r -> %s", question[:80], queries)
     hits = await retrieve(queries, library_id)
     passages = await load_passages(hits.text)
     candidates = await load_tables(hits.tables)
