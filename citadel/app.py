@@ -9,6 +9,7 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from citadel.db import get_engine
 from citadel.router import router
 from citadel.services.document import (
     describe_library_tables,
@@ -17,57 +18,52 @@ from citadel.services.document import (
     mark_finalize_started,
     mark_library_ready,
 )
+from citadel.services.ingestion import shutdown as shutdown_resources
 from citadel.services.retrieval import embed_library, pending_libraries
 from config import configure_logging, get_embedder, get_settings
 
 logger = logging.getLogger(__name__)
 
+_finalizing: set[int] = set()
+
+
+async def _finalize(library_id: int, tag: str) -> None:
+    if library_id in _finalizing:  # catch-up and the live NOTIFY can target the same library — run it once
+        return
+    _finalizing.add(library_id)
+    try:
+        await mark_finalize_started(library_id)
+        t = time.time()
+        described = await describe_library_tables(library_id)
+        describe_s = time.time() - t
+        await mark_described(library_id)
+        await mark_embed_started(library_id)
+        t = time.time()
+        embedded = await embed_library(library_id)
+        embed_s = time.time() - t
+        await mark_library_ready(library_id)
+        logger.info(
+            "%s library=%d tables=%d describe=%.1fs nodes=%d embed=%.1fs",
+            tag,
+            library_id,
+            described,
+            describe_s,
+            embedded,
+            embed_s,
+        )
+    finally:
+        _finalizing.discard(library_id)
+
 
 async def _drain_embeds(queue: asyncio.Queue[int]) -> None:
     while True:
         library_id = await queue.get()
-        logger.info("finalizing library=%d", library_id)
-        await mark_finalize_started(library_id)
-        t = time.time()
-        described = await describe_library_tables(library_id)
-        describe_s = time.time() - t
-        await mark_described(library_id)
-        await mark_embed_started(library_id)
-        t = time.time()
-        embedded = await embed_library(library_id)
-        embed_s = time.time() - t
-        await mark_library_ready(library_id)
-        logger.info(
-            "finalized library=%d tables=%d describe=%.1fs nodes=%d embed=%.1fs",
-            library_id,
-            described,
-            describe_s,
-            embedded,
-            embed_s,
-        )
+        await _finalize(library_id, "finalized")
 
 
 async def _catchup() -> None:
     for library_id in await pending_libraries():
-        logger.info("catch-up finalizing library=%d", library_id)
-        await mark_finalize_started(library_id)
-        t = time.time()
-        described = await describe_library_tables(library_id)
-        describe_s = time.time() - t
-        await mark_described(library_id)
-        await mark_embed_started(library_id)
-        t = time.time()
-        embedded = await embed_library(library_id)
-        embed_s = time.time() - t
-        await mark_library_ready(library_id)
-        logger.info(
-            "catch-up finalized library=%d tables=%d describe=%.1fs nodes=%d embed=%.1fs",
-            library_id,
-            described,
-            describe_s,
-            embedded,
-            embed_s,
-        )
+        await _finalize(library_id, "catch-up finalized")
 
 
 @asynccontextmanager
@@ -85,6 +81,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with contextlib.suppress(asyncio.CancelledError):
             await task
     await conn.close()
+    await shutdown_resources()
+    await get_engine().dispose()
 
 
 app = FastAPI(lifespan=lifespan)

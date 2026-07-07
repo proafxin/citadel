@@ -4,7 +4,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from config import get_settings
 
-POOL_SIZE = 20
+# sized to cover every stage that can hold a DB session at once, per process, with burst headroom: the worker's
+# normalize+merge+tabular caps plus the app's concurrent queries/finalize. app + worker + listener must stay under the
+# server's max_connections (raised to 200 in compose) — 50 per process leaves room for the listener and migrations.
+POOL_SIZE = 30
 MAX_OVERFLOW = 20
 
 

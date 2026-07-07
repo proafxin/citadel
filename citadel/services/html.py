@@ -1,9 +1,13 @@
 import re
+from typing import TYPE_CHECKING
 
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString, Tag
 
 from citadel.schemas.content import Block
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _HEADINGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
 _INLINE = {
@@ -62,12 +66,22 @@ def _li_text(item: Tag) -> str:
 
 
 def _walk_list(element: Tag, depth: int, blocks: list[Block]) -> None:
-    for item in element.find_all("li", recursive=False):
+    # explicit stack so arbitrarily deep list nesting can't hit the recursion limit. each frame is (li iterator, depth);
+    # a nested list is pushed the moment its parent <li> is emitted, so items still come out in document (pre-order).
+    stack: list[tuple[Iterator[Tag], int]] = [(iter(element.find_all("li", recursive=False)), depth)]
+    while stack:
+        iterator, level = stack[-1]
+        item = next(iterator, None)
+        if item is None:
+            stack.pop()
+            continue
         text = _li_text(item)
         if text:
-            blocks.append(Block(page_idx=0, type="list_item", text=text, text_level=depth))
-        for nested in item.find_all(("ul", "ol"), recursive=False):
-            _walk_list(nested, depth + 1, blocks)
+            blocks.append(Block(page_idx=0, type="list_item", text=text, text_level=level))
+        stack.extend(
+            (iter(nested.find_all("li", recursive=False)), level + 1)
+            for nested in reversed(item.find_all(("ul", "ol"), recursive=False))
+        )
 
 
 def _int_attr(value: object) -> int | None:
@@ -91,8 +105,16 @@ def _latex(element: Tag) -> str:
 
 
 def _walk(element: Tag, blocks: list[Block]) -> None:
-    buffer: list[str] = []
-    for child in element.children:
+    # explicit stack instead of recursion so arbitrarily deep container nesting (e.g. thousands of <div>) can never hit
+    # Python's recursion limit. each frame carries its own inline-text buffer, flushed when the frame is exhausted.
+    stack: list[tuple[Iterator[object], list[str]]] = [(iter(element.children), [])]
+    while stack:
+        iterator, buffer = stack[-1]
+        child = next(iterator, None)
+        if child is None:
+            _flush(buffer, blocks)
+            stack.pop()
+            continue
         if isinstance(child, NavigableString):
             piece = str(child).strip()
             if piece:
@@ -136,8 +158,7 @@ def _walk(element: Tag, blocks: list[Block]) -> None:
                 buffer.append(piece)
         else:
             _flush(buffer, blocks)
-            _walk(child, blocks)
-    _flush(buffer, blocks)
+            stack.append((iter(child.children), []))
 
 
 def parse_html(data: bytes) -> list[Block]:

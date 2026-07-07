@@ -38,6 +38,10 @@ def _table_rows(table: Tag) -> list[Tag]:
     return rows
 
 
+GRID_MAX_SPAN = 1000  # a single cell's row/col span is clamped here; real headers span a handful, only bombs span more
+GRID_MAX_CELLS = 5_000_000  # hard ceiling on a materialized grid so a hallucinated/oversized span can't OOM the merge
+
+
 def _grid(table: Tag) -> list[list[str]]:
     occupied: dict[tuple[int, int], str] = {}
     width = 0
@@ -48,11 +52,13 @@ def _grid(table: Tag) -> list[list[str]]:
             while (row_idx, col) in occupied:
                 col += 1
             value = cell.get_text(separator=" ", strip=True)
-            colspan = max(int(cell.get("colspan") or 1), 1)
-            rowspan = max(int(cell.get("rowspan") or 1), 1)
+            colspan = min(max(int(cell.get("colspan") or 1), 1), GRID_MAX_SPAN)
+            rowspan = min(max(int(cell.get("rowspan") or 1), 1), GRID_MAX_SPAN)
             for delta_row in range(rowspan):
                 for delta_col in range(colspan):
                     occupied[row_idx + delta_row, col + delta_col] = value
+            if len(occupied) > GRID_MAX_CELLS:
+                raise ValueError("table grid exceeds cell cap")
             col += colspan
             width = max(width, col)
         height = row_idx + 1

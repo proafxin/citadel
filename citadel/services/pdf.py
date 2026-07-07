@@ -1,9 +1,28 @@
 import io
+from collections import OrderedDict
 
 import pypdfium2 as pdfium
 from PIL import Image
 
 MAX_IMAGE_SIDE = 2500
+PDF_CACHE_MAX = 4  # open pdfium handles kept per (long-lived) pool worker; mmap-cheap, so repeat pages skip the reparse
+
+_pdf_cache: OrderedDict[str, pdfium.PdfDocument] = OrderedDict()
+
+
+def _open_pdf(path: str) -> pdfium.PdfDocument:
+    # one process runs one pool task at a time, so this per-process cache needs no lock. bounded + close-on-evict so a
+    # long-lived worker never accumulates handles (also caps the leak a hung/abandoned doc could otherwise cause)
+    cached = _pdf_cache.get(path)
+    if cached is not None:
+        _pdf_cache.move_to_end(path)
+        return cached
+    pdf = pdfium.PdfDocument(path)
+    _pdf_cache[path] = pdf
+    while len(_pdf_cache) > PDF_CACHE_MAX:
+        _, evicted = _pdf_cache.popitem(last=False)
+        evicted.close()
+    return pdf
 
 
 def downscale(img: Image.Image) -> Image.Image:
@@ -14,14 +33,11 @@ def downscale(img: Image.Image) -> Image.Image:
 
 
 def count_pdf_pages(path: str) -> int:
-    pdf = pdfium.PdfDocument(path)
-    n = len(pdf)
-    pdf.close()
-    return n
+    return len(_open_pdf(path))
 
 
 def render_pdf_page(path: str, page_idx: int, dpi: int) -> tuple[bytes, bool]:
-    pdf = pdfium.PdfDocument(path)
+    pdf = _open_pdf(path)
     page = pdf[page_idx]
     scale = min(dpi / 72, MAX_IMAGE_SIDE / max(page.get_size()))  # cap BEFORE render → never alloc an oversized bitmap
     bitmap = page.render(scale=scale)
@@ -32,12 +48,11 @@ def render_pdf_page(path: str, page_idx: int, dpi: int) -> tuple[bytes, bool]:
     digital = page.get_rotation() == 0 and textpage.count_chars() > 16
     textpage.close()
     page.close()
-    pdf.close()
     return bio.getvalue(), digital
 
 
 def extract_layer_by_bbox(path: str, page_idx: int, bboxes: list[list[float]]) -> list[str]:
-    pdf = pdfium.PdfDocument(path)
+    pdf = _open_pdf(path)
     page = pdf[page_idx]
     width, height = page.get_size()
     textpage = page.get_textpage()
@@ -47,5 +62,4 @@ def extract_layer_by_bbox(path: str, page_idx: int, bboxes: list[list[float]]) -
         out.append(textpage.get_text_bounded(left=left, bottom=bottom, right=right, top=top).strip())
     textpage.close()
     page.close()
-    pdf.close()
     return out

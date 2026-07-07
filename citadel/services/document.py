@@ -8,7 +8,7 @@ from itertools import starmap
 import zstandard
 from fastapi import HTTPException
 from fastapi.responses import Response
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
@@ -55,7 +55,18 @@ async def notify_embed(library_id: int) -> None:
         await session.execute(text("SELECT pg_notify('embed', :library)"), {"library": str(library_id)})
 
 
+_LIBRARY_LOCK_CLASS = 1  # namespace for the per-library advisory lock (two-arg space, disjoint from the doc lock)
+
+
 async def _maybe_notify_embed(session: AsyncSession, library_id: int) -> None:
+    # serialize completion of docs in the SAME library: without this, two docs finishing concurrently each see the other
+    # still PROCESSING (uncommitted), so neither observes inflight==0 and neither notifies → the library never embeds.
+    # the lock holder counts + notifies + commits; the next waiter then sees the prior doc committed. two-arg lock space
+    # never collides with save_document_tree's single-arg per-doc lock, and every caller takes it doc-then-library, so
+    # there is no lock-order cycle.
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:cls, :library)"), {"cls": _LIBRARY_LOCK_CLASS, "library": library_id}
+    )
     library = await session.get(Library, library_id)
     if library is None:
         return
@@ -206,20 +217,82 @@ async def _resolve_tables(blocks: list[Block]) -> tuple[dict[int, int], list[Mat
     return counts, queue
 
 
-async def _add_table(session: AsyncSession, content_id: str, doc_id: int, table: MaterializedTable) -> None:
-    row = Table(
-        content_id=content_id,
-        document_id=doc_id,
-        columns=[column.model_dump() for column in table.columns],
-        table_metadata={"title": table.title, "caption": table.caption, "notes": table.notes},
-        description=table.description,
-        n_rows=table.n_rows,
-        sample_rows=table.sample_rows,
-        anchors=table.anchors,
+def _node_row(spec: NodeSpec, doc_id: int, search: str | None) -> dict[str, object]:
+    return {
+        "content_id": spec.content_id,
+        "document_id": doc_id,
+        "ordinal": spec.ordinal,
+        "page_no": spec.page_no,
+        "type": spec.type,
+        "level": spec.level,
+        "label": spec.text if spec.kind == "heading" else None,
+        "bbox": spec.bbox,
+        "search_text": search,
+    }
+
+
+def _table_search(
+    spec: NodeSpec, table: MaterializedTable, library_name: str, filename: str, paratext: dict[int, list[str]]
+) -> str:
+    return build_table_search_text(
+        library_name,
+        filename,
+        "",
+        table.title,
+        table.caption,
+        table.notes,
+        [column.header or "" for column in table.columns],
+        table.description,
+        paratext.get(spec.page_no),
     )
-    session.add(row)
-    await session.flush()
-    session.add_all(TableRow(table_id=row.id, row_idx=index, values=values) for index, values in enumerate(table.rows))
+
+
+async def _insert_nodes_bfs(session: AsyncSession, specs: list[NodeSpec], rows: dict[str, dict[str, object]]) -> None:
+    # BFS by depth: all nodes at one level go in a single INSERT ... RETURNING (id, content_id); the returned ids feed
+    # the next level's parent_id. specs are already parent-before-child, so depth is a one-pass computation and each
+    # level's parents are guaranteed present. ~tree-depth statements instead of one flush per node.
+    parent_of = {spec.content_id: spec.parent_content_id for spec in specs}
+    depth: dict[str, int] = {}
+    levels: dict[int, list[str]] = {}
+    for spec in specs:
+        node_depth = 0 if spec.parent_content_id is None else depth[spec.parent_content_id] + 1
+        depth[spec.content_id] = node_depth
+        levels.setdefault(node_depth, []).append(spec.content_id)
+    id_map: dict[str, int] = {}
+    for level in sorted(levels):
+        payload = []
+        for content_id in levels[level]:
+            parent = parent_of[content_id]
+            payload.append({**rows[content_id], "parent_id": id_map[parent] if parent is not None else None})
+        result = await session.execute(insert(ContentNode).returning(ContentNode.id, ContentNode.content_id), payload)
+        id_map.update({node_content_id: node_id for node_id, node_content_id in result})
+
+
+async def _insert_tables_bulk(session: AsyncSession, doc_id: int, pairs: list[tuple[str, MaterializedTable]]) -> None:
+    if not pairs:
+        return
+    table_payload = [
+        {
+            "content_id": content_id,
+            "document_id": doc_id,
+            "columns": [column.model_dump() for column in table.columns],
+            "table_metadata": {"title": table.title, "caption": table.caption, "notes": table.notes},
+            "description": table.description,
+            "n_rows": table.n_rows,
+            "sample_rows": table.sample_rows,
+            "anchors": table.anchors,
+        }
+        for content_id, table in pairs
+    ]
+    result = await session.execute(insert(Table).returning(Table.id, Table.content_id), table_payload)
+    table_ids = {table_content_id: table_id for table_id, table_content_id in result}
+    row_payload = [
+        {"table_id": table_ids[content_id], "row_idx": index, "values": values}
+        for content_id, table in pairs
+        for index, values in enumerate(table.rows)
+    ]
+    if row_payload:
+        await session.execute(insert(TableRow), row_payload)
 
 
 async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentStatus) -> None:
@@ -248,43 +321,24 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentS
         if await session.scalar(select(ContentNode.id).where(ContentNode.document_id == doc_id).limit(1)) is not None:
             await _maybe_notify_embed(session, library_id)
             return
-        id_map: dict[str, int] = {}
+        node_rows: dict[str, dict[str, object]] = {}
+        table_pairs: list[tuple[str, MaterializedTable]] = []
+        detail_specs: list[NodeSpec] = []
         for spec in specs:
-            parent_id = id_map[spec.parent_content_id] if spec.parent_content_id is not None else None
-            table = next(tables) if spec.kind == "table" else None
-            if table is not None:
-                node_search = build_table_search_text(
-                    library_name,
-                    filename,
-                    "",
-                    table.title,
-                    table.caption,
-                    table.notes,
-                    [column.header or "" for column in table.columns],
-                    table.description,
-                    paratext.get(spec.page_no),
+            if spec.kind == "table":
+                table = next(tables)
+                table_pairs.append((spec.content_id, table))
+                node_rows[spec.content_id] = _node_row(
+                    spec, doc_id, _table_search(spec, table, library_name, filename, paratext)
                 )
             else:
-                node_search = search_text.get(spec.content_id)
-            node = ContentNode(
-                content_id=spec.content_id,
-                document_id=doc_id,
-                parent_id=parent_id,
-                ordinal=spec.ordinal,
-                page_no=spec.page_no,
-                type=spec.type,
-                level=spec.level,
-                label=spec.text if spec.kind == "heading" else None,
-                bbox=spec.bbox,
-                search_text=node_search,
-            )
-            session.add(node)
-            await session.flush()
-            id_map[spec.content_id] = node.id
-            if table is not None:
-                await _add_table(session, spec.content_id, doc_id, table)
-            elif spec.kind != "heading":
-                _add_detail(session, spec, doc_id)
+                node_rows[spec.content_id] = _node_row(spec, doc_id, search_text.get(spec.content_id))
+                if spec.kind != "heading":
+                    detail_specs.append(spec)
+        await _insert_nodes_bfs(session, specs, node_rows)
+        for spec in detail_specs:
+            _add_detail(session, spec, doc_id)
+        await _insert_tables_bulk(session, doc_id, table_pairs)
         await _maybe_notify_embed(session, library_id)
 
 

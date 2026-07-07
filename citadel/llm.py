@@ -24,6 +24,12 @@ def count_tokens(text: str) -> int:
     return len(get_tokenizer().encode(text, add_special_tokens=False))
 
 
+def count_tokens_batch(texts: list[str]) -> list[int]:
+    if not texts:
+        return []
+    return [len(ids) for ids in get_tokenizer()(texts, add_special_tokens=False)["input_ids"]]
+
+
 @functools.lru_cache
 def _chat_url() -> str:
     return f"{get_settings().qwen_base_url}/chat/completions"

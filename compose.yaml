@@ -130,6 +130,11 @@ services:
       POSTGRES_USER: ${CITADEL_POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${CITADEL_POSTGRES_PASSWORD}
       POSTGRES_DB: ${CITADEL_POSTGRES_DB:-citadel}
+    # app pool (50) + worker pool (50) + listener + migrations must fit; default 100 is too tight, so lift the ceiling
+    command:
+      - postgres
+      - -c
+      - max_connections=200
     ports:
       - "${CITADEL_POSTGRES_PORT:-5432}:5432"
     volumes:

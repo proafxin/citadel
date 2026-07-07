@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 
 import torch
-from sqlalchemy import ColumnElement, case, or_, select, update
+from sqlalchemy import ColumnElement, bindparam, case, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
@@ -26,15 +26,25 @@ VRAM_HEADROOM = 0.7  # fraction of free VRAM to spend on one embedding batch
 BYTES_PER_TOKEN = 220_000  # BGE-M3 peak activation per token (~64MB at ~300 tok); calibrate with a benchmark
 MODEL_MAX_TOKENS = 8192  # BGE-M3 context ceiling — caps the per-row cost estimate for very long nodes
 BATCH_MAX = 256
+EMBED_BATCH = 512  # nodes per read→embed→write cycle: bounds resident memory and keeps each write transaction short
 
 _EMBED_LOCK = asyncio.Lock()
+
+
+def _max_tokens(texts: list[str]) -> int:
+    # true token length via the model's own tokenizer, not a char/4 proxy. only the longest-by-chars candidates can hold
+    # the longest-by-tokens sequence, so tokenizing that handful is enough to size the batch without a full pass
+    tokenizer = get_embedder().tokenizer
+    candidates = sorted(texts, key=len, reverse=True)[:16]
+    encoded = tokenizer(candidates, add_special_tokens=True)["input_ids"]
+    return max((len(ids) for ids in encoded), default=1)
 
 
 def _batch_size(texts: list[str]) -> int:
     # size one batch to the FREE VRAM and the longest text in the set (activation scales with batch x seq len),
     # flooring at 1 so a near-full GPU shrinks the batch instead of OOM-ing on a fixed minimum
     free, _ = torch.cuda.mem_get_info()
-    longest = min(MODEL_MAX_TOKENS, max((len(text) // 4 for text in texts), default=1))
+    longest = min(MODEL_MAX_TOKENS, _max_tokens(texts))
     return max(1, min(BATCH_MAX, int(free * VRAM_HEADROOM / (longest * BYTES_PER_TOKEN))))
 
 
@@ -135,23 +145,11 @@ async def _channel(
     return _rrf(lists)
 
 
-async def _embed_nodes(session: AsyncSession, nodes: list[ContentNode]) -> int:
-    if not nodes:
-        return 0
-    vectors = await _embed([node.search_text or "" for node in nodes])
-    for node, vector in zip(nodes, vectors, strict=True):
-        node.embedding = vector
-    return len(nodes)
-
-
-async def embed_library(library_id: int) -> int:
-    redis = get_redis()
-    await redis.hset(f"embed:{library_id}", "t_start", time.time())
-    await redis.expire(f"embed:{library_id}", EMBED_TTL)
-    async with get_sessionmaker()() as session, session.begin():
-        nodes = list(
+async def _pending_node_ids(library_id: int) -> list[int]:
+    async with get_sessionmaker()() as session:
+        return list(
             await session.scalars(
-                select(ContentNode)
+                select(ContentNode.id)
                 .join(Document, ContentNode.document_id == Document.id)
                 .where(
                     Document.library_id == library_id,
@@ -160,12 +158,41 @@ async def embed_library(library_id: int) -> int:
                 )
             )
         )
-        embedded = await _embed_nodes(session, nodes)
+
+
+async def _embed_batch(node_ids: list[int]) -> int:
+    async with get_sessionmaker()() as session:
+        rows = list(
+            await session.execute(select(ContentNode.id, ContentNode.search_text).where(ContentNode.id.in_(node_ids)))
+        )
+    if not rows:
+        return 0
+    vectors = await _embed([search_text or "" for _id, search_text in rows])  # GPU work outside any open transaction
+    params = [{"node_id": node_id, "emb": vector} for (node_id, _text), vector in zip(rows, vectors, strict=True)]
+    stmt = update(ContentNode).where(ContentNode.id == bindparam("node_id")).values(embedding=bindparam("emb"))
+    async with get_sessionmaker()() as session, session.begin():
+        await session.execute(stmt, params)
+    return len(rows)
+
+
+async def _mark_documents_embedded(library_id: int) -> None:
+    async with get_sessionmaker()() as session, session.begin():
         await session.execute(
             update(Document)
             .where(Document.library_id == library_id, Document.status == DocumentStatus.INGESTED)
             .values(status=DocumentStatus.EMBEDDED)
         )
+
+
+async def embed_library(library_id: int) -> int:
+    redis = get_redis()
+    await redis.hset(f"embed:{library_id}", "t_start", time.time())
+    await redis.expire(f"embed:{library_id}", EMBED_TTL)
+    node_ids = await _pending_node_ids(library_id)
+    embedded = 0
+    for start in range(0, len(node_ids), EMBED_BATCH):
+        embedded += await _embed_batch(node_ids[start : start + EMBED_BATCH])
+    await _mark_documents_embedded(library_id)
     await redis.hset(f"embed:{library_id}", mapping={"t_done": time.time(), "nodes": embedded})
     return embedded
 

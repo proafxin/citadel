@@ -8,9 +8,12 @@ import re
 import shutil
 import tempfile
 import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from collections import OrderedDict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
+from typing import TypeVar
 
 import cv2
 import numpy as np
@@ -18,6 +21,7 @@ import redis.asyncio as aioredis
 from fastapi import HTTPException, UploadFile
 from mineru_vl_utils import MinerUClient
 from mineru_vl_utils.structs import ContentBlock, ExtractResult
+from pebble import ProcessPool
 from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
 from redis.backoff import ExponentialBackoff
@@ -43,7 +47,7 @@ from citadel.services.document import (
     save_document_tree,
     save_sheet_tables,
 )
-from citadel.services.excel import extract_sheet_no, extract_tables, sheet_names
+from citadel.services.excel import SheetExtraction, extract_tables, load_all_sheets, sheet_names
 from citadel.services.html import parse_html
 from citadel.services.library import library_exists
 from citadel.services.pdf import MAX_IMAGE_SIDE, count_pdf_pages, downscale, extract_layer_by_bbox, render_pdf_page
@@ -75,6 +79,7 @@ RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26%
 DIGITAL_RENDER_DPI = 110  # office→pdf ONLY (provably born-digital): image is layout-only, text from the PDF layer → render small. validate layout still holds; regular pdf stays at RENDER_DPI
 PAGINATE_CONCURRENCY = CPU_QUARTER  # pdfium process-pool workers, one dedicated pdfium per process
 RENDER_CONCURRENCY = CPU_QUARTER  # in-flight render jobs; matches the pdfium pool width so pages never queue in RAM
+LAYER_CONCURRENCY = CPU_QUARTER  # dedicated pdfium pool for born-digital text-layer extraction, isolated from render
 RENDER_TIMEOUT = 120  # page renders in <1s; if a job strands (dead/hung pool worker) free the slot + retry the page
 RAPIDOCR_CONCURRENCY = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
 GAP_FILL = True  # RapidOCR scanned gap-fill; set to False for clean-image benchmarks (pure VLM)
@@ -136,22 +141,66 @@ def get_rapidocr_pool() -> ThreadPoolExecutor:
     return ThreadPoolExecutor(max_workers=RAPIDOCR_CONCURRENCY)
 
 
-@lru_cache
-def get_paginate_pool() -> ProcessPoolExecutor:
-    # one process per worker → each gets its own pdfium (pdfium is not thread-safe; isolate by process).
-    # forkserver preloads only the lean pdf module (not __main__ → no onnxruntime/cv2/mineru/xgboost in a render worker).
-    # NO max_tasks_per_child: recycling this hot pool races and strands run_in_executor futures → the render cap
-    # leaks and the pipeline deadlocks. mmap + scale-cap already bound the RAM it was meant to guard.
+T = TypeVar("T")
+_PROCESS_POOLS: list[ProcessPool] = []
+
+
+def _pdfium_pool(workers: int) -> ProcessPool:
+    # one process per worker → each gets its own pdfium (pdfium is not thread-safe; isolate by process). forkserver
+    # preloads only the lean pdf module (not __main__ → no onnxruntime/cv2/mineru/xgboost in a pdfium worker). workers
+    # are long-lived (no max_tasks) so each keeps its bounded PdfDocument LRU warm across a document's pages; pebble
+    # kills+replaces only the specific worker a per-task timeout fires on, so a hung page can't permanently shrink it.
     ctx = multiprocessing.get_context("forkserver")
     ctx.set_forkserver_preload(["citadel.services.pdf"])
-    return ProcessPoolExecutor(max_workers=PAGINATE_CONCURRENCY, mp_context=ctx)
+    pool = ProcessPool(max_workers=workers, context=ctx)
+    _PROCESS_POOLS.append(pool)
+    return pool
+
+
+@lru_cache
+def get_paginate_pool() -> ProcessPool:
+    return _pdfium_pool(PAGINATE_CONCURRENCY)
+
+
+@lru_cache
+def get_layer_pool() -> ProcessPool:
+    return _pdfium_pool(LAYER_CONCURRENCY)
+
+
+async def _run_pool[T](pool: ProcessPool, func: Callable[..., T], *args: object, timeout: float) -> T:
+    return await asyncio.wrap_future(pool.schedule(func, args=args, timeout=timeout))
+
+
+_PROFILE_DIRS: list[str] = []
 
 
 def make_profile_pool(n: int) -> asyncio.Queue[str]:
     queue: asyncio.Queue[str] = asyncio.Queue()
     for _ in range(n):
-        queue.put_nowait(tempfile.mkdtemp(prefix="lo_profile_"))
+        path = tempfile.mkdtemp(prefix="lo_profile_")
+        _PROFILE_DIRS.append(path)  # tracked so shutdown removes exactly this process's profiles (never a shared glob)
+        queue.put_nowait(path)
     return queue
+
+
+def _reap_profile_dirs() -> None:
+    while _PROFILE_DIRS:
+        path = Path(_PROFILE_DIRS.pop())
+        if path.exists():
+            shutil.rmtree(path)
+
+
+async def shutdown() -> None:
+    # dispose every long-lived resource this process owns so termination is clean and idempotent
+    while _PROCESS_POOLS:
+        pool = _PROCESS_POOLS.pop()
+        pool.stop()
+        pool.join()
+    if get_rapidocr_pool.cache_info().currsize:
+        get_rapidocr_pool().shutdown(wait=False)
+    _reap_profile_dirs()
+    if get_redis.cache_info().currsize:
+        await get_redis().aclose()
 
 
 BLOB_DIR = Path(tempfile.gettempdir()) / "citadel-blobs"
@@ -163,10 +212,26 @@ def blob_path(doc_id: str | int) -> Path:
     return BLOB_DIR / str(doc_id)
 
 
-def reset_blob_dir() -> None:
-    if BLOB_DIR.exists():
-        shutil.rmtree(BLOB_DIR)
+async def reap_orphan_blobs() -> None:
+    # startup: keep only blobs for docs still in flight (QUEUED/PROCESSING) so a crashed run's recovery can finish them;
+    # drop terminal-doc and unknown (wiped-DB) blobs. NEVER a blanket wipe — that deletes other in-flight docs' sources
+    # and hangs them forever (render/tabular find no source, the page is never recorded, no watchdog recovers it).
     BLOB_DIR.mkdir(parents=True, exist_ok=True)
+    async with get_sessionmaker()() as session:
+        active = set(
+            await session.scalars(
+                select(Document.id).where(Document.status.in_((DocumentStatus.QUEUED, DocumentStatus.PROCESSING)))
+            )
+        )
+    for path in BLOB_DIR.iterdir():
+        if not (path.name.isdigit() and int(path.name) in active):
+            path.unlink(missing_ok=True)
+
+
+async def _doc_terminal(doc_id: str) -> bool:
+    async with get_sessionmaker()() as session:
+        status = await session.scalar(select(Document.status).where(Document.id == int(doc_id)))
+    return status not in {DocumentStatus.QUEUED, DocumentStatus.PROCESSING}
 
 
 # ---- orchestrator side ----------------------------------------------------------------
@@ -297,6 +362,11 @@ async def handle_paginate(fields: dict[str, str]) -> None:
         await redis.hset(f"doc:{doc_id}", "mode", "tabular")
         if kind == "xlsx":
             names = await asyncio.to_thread(sheet_names, await asyncio.to_thread(blob_path(doc_id).read_bytes))
+            if not names:  # workbook with no sheets: no unit jobs would fire, so drive straight to merge
+                await redis.hset(f"doc:{doc_id}", "page_count", 0)
+                await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
+                logger.info("paginate file=%s sheets=0 → merge", fields["filename"])
+                return
             await redis.hset(f"doc:{doc_id}", "page_count", len(names))
             for sheet_no in range(1, len(names) + 1):
                 await redis.xadd(STREAM_TABLES, {"doc_id": doc_id, "kind": kind, "sheet_no": sheet_no})
@@ -307,8 +377,12 @@ async def handle_paginate(fields: dict[str, str]) -> None:
             logger.info("paginate file=%s kind=%s", fields["filename"], kind)
         return
     dpi = DIGITAL_RENDER_DPI if kind == "office-pdf" else RENDER_DPI
-    loop = asyncio.get_running_loop()
-    count = await loop.run_in_executor(get_paginate_pool(), count_pdf_pages, str(blob_path(doc_id)))
+    count = await _run_pool(get_paginate_pool(), count_pdf_pages, str(blob_path(doc_id)), timeout=RENDER_TIMEOUT)
+    if count <= 0:  # empty/unreadable pdf: no page units will ever be recorded, so drive the doc straight to merge
+        await redis.hset(f"doc:{doc_id}", "page_count", 0)
+        await get_redis().xadd(STREAM_MERGE, {"doc_id": doc_id})
+        logger.info("paginate file=%s pages=0 → merge", fields["filename"])
+        return
     await redis.hset(f"doc:{doc_id}", "page_count", count)
     pipe = redis.pipeline(transaction=False)
     for idx in range(count):
@@ -324,13 +398,15 @@ async def handle_render(fields: dict[str, str]) -> None:
     page_idx = int(fields["page_idx"])
     dpi = int(fields["dpi"])
     path = blob_path(doc_id)
-    if not path.exists():  # source already cleaned up (doc finished) → a reclaimed render job is a no-op
-        return
+    if not path.exists():
+        if not await _doc_terminal(doc_id):  # source gone while the doc is still in flight → fail the page, don't hang
+            msg = f"source blob missing for in-flight doc {doc_id}"
+            raise FileNotFoundError(msg)
+        return  # doc already finished → a reclaimed render job is a safe no-op
     redis = get_redis()
     await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
-    loop = asyncio.get_running_loop()
-    image_bytes, digital = await asyncio.wait_for(
-        loop.run_in_executor(get_paginate_pool(), render_pdf_page, str(path), page_idx, dpi), RENDER_TIMEOUT
+    image_bytes, digital = await _run_pool(
+        get_paginate_pool(), render_pdf_page, str(path), page_idx, dpi, timeout=RENDER_TIMEOUT
     )
     await redis.xadd(
         STREAM_PAGES,
@@ -373,6 +449,25 @@ def _record_unit() -> AsyncScript:
     return get_redis().register_script(_RECORD_UNIT_LUA)
 
 
+# requeue the bumped copy, ack the old, and delete the old as ONE server-side op, so a crash mid-retry can never leave
+# both the retry copy and the still-pending original (which would double-process the job on the next recovery)
+_REQUEUE_LUA = """
+redis.call('XADD', KEYS[1], '*', unpack(ARGV, 3))
+redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
+redis.call('XDEL', KEYS[1], ARGV[2])
+"""
+
+
+@lru_cache
+def _requeue() -> AsyncScript:
+    return get_redis().register_script(_REQUEUE_LUA)
+
+
+async def requeue_message(stream: str, msg_id: str, fields: dict[bytes, bytes]) -> None:
+    flat = [item for pair in fields.items() for item in pair]
+    await _requeue()(keys=[stream], args=[GROUP, msg_id, *flat])
+
+
 async def record_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
     await _record_unit()(
         keys=[f"blocks:{doc_id}", f"doc:{doc_id}", STREAM_MERGE],
@@ -389,6 +484,25 @@ async def record_sheet(doc_id: str, sheet_no: int) -> None:
     await _record_unit()(keys=[f"sheets:{doc_id}", f"doc:{doc_id}", STREAM_MERGE], args=[str(sheet_no), "1", doc_id])
 
 
+_SHEETS_CACHE: OrderedDict[str, list[SheetExtraction]] = OrderedDict()
+_SHEETS_LOCK = asyncio.Lock()
+SHEETS_CACHE_MAX = 4  # workbooks kept parsed at once; every sheet of a doc reuses one parse instead of re-loading it
+
+
+async def _get_sheet(doc_id: str, sheet_no: int) -> SheetExtraction:
+    async with _SHEETS_LOCK:
+        sheets = _SHEETS_CACHE.get(doc_id)
+        if sheets is None:
+            data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
+            sheets = await asyncio.to_thread(load_all_sheets, data)
+            _SHEETS_CACHE[doc_id] = sheets
+            while len(_SHEETS_CACHE) > SHEETS_CACHE_MAX:
+                _SHEETS_CACHE.popitem(last=False)
+        else:
+            _SHEETS_CACHE.move_to_end(doc_id)
+    return sheets[sheet_no - 1]
+
+
 async def handle_tabular(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     kind = fields["kind"]
@@ -396,14 +510,17 @@ async def handle_tabular(fields: dict[str, str]) -> None:
     redis = get_redis()
     await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
     path = blob_path(doc_id)
-    if not path.exists():  # source already cleaned up (doc finished) → a reclaimed sheet job is a no-op
-        return
-    data = await asyncio.to_thread(path.read_bytes)
+    if not path.exists():
+        if not await _doc_terminal(doc_id):  # source gone while the doc is still in flight → fail, don't hang
+            msg = f"source blob missing for in-flight doc {doc_id}"
+            raise FileNotFoundError(msg)
+        return  # doc already finished → a reclaimed sheet job is a safe no-op
     if kind == "xlsx":
-        sheet = await asyncio.to_thread(extract_sheet_no, data, sheet_no)
+        sheet = await _get_sheet(doc_id, sheet_no)
         tables = await extract_tables(sheet)
         sheet_name = sheet.sheet_name
     else:
+        data = await asyncio.to_thread(path.read_bytes)
         filename = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
         if kind == "json":
             tables = await asyncio.to_thread(extract_json_tables, data, filename.rsplit(".", 1)[0] or "root")
@@ -570,13 +687,13 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         text_blocks = [cb for cb in content_blocks if cb.type in LAYER_TYPES]
         path = blob_path(doc_id)
         if text_blocks and path.exists():
-            loop = asyncio.get_running_loop()
-            layer = await loop.run_in_executor(
-                get_paginate_pool(),
+            layer = await _run_pool(
+                get_layer_pool(),
                 extract_layer_by_bbox,
                 str(path),
                 page_idx,
                 [list(cb.bbox) for cb in text_blocks],
+                timeout=RENDER_TIMEOUT,
             )
             for cb, text in zip(text_blocks, layer, strict=True):
                 if text:
@@ -683,6 +800,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
 
 async def cleanup(doc_id: str) -> None:
     redis = get_redis()
+    _SHEETS_CACHE.pop(doc_id, None)  # doc finished → drop its parsed workbook
     await redis.delete(f"blocks:{doc_id}", f"sheets:{doc_id}")
     blob_path(doc_id).unlink(missing_ok=True)  # the doc's source file is freed the moment it finishes
     await redis.expire(f"doc:{doc_id}", 3600)  # keep final status briefly, then auto-evict — no accumulation

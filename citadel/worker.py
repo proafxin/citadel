@@ -1,10 +1,12 @@
 import asyncio
 import logging
+import signal
 import traceback
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+from citadel.db import get_engine
 from citadel.services.ingestion import (
     GROUP,
     MAX_ATTEMPTS,
@@ -33,7 +35,9 @@ from citadel.services.ingestion import (
     handle_render,
     handle_tabular,
     make_profile_pool,
-    reset_blob_dir,
+    reap_orphan_blobs,
+    requeue_message,
+    shutdown,
 )
 from citadel.tabular.infer import HEADER_WORKERS
 from config import CPU_QUARTER, configure_logging, get_settings
@@ -93,6 +97,17 @@ async def _settle(stream: str, msg_id: str) -> None:
     await redis.xdel(stream, msg_id)  # acked entries (and page blobs) never accumulate
 
 
+async def _decode_or_settle(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> dict[str, str] | None:
+    # a structurally-unprocessable (non-UTF-8) entry can never be handled: drop it so it doesn't stay pending and
+    # re-crash on every recovery. the binary image field is carried separately, so it is excluded from the decode.
+    try:
+        return {key.decode(): value.decode() for key, value in raw.items() if key != b"image"}
+    except UnicodeDecodeError:
+        logger.exception("undecodable entry stream=%s id=%s → dropped", stream, msg_id)
+        await _settle(stream, msg_id)
+        return None
+
+
 def _done(task: asyncio.Task[None]) -> None:
     _tasks.discard(task)
     if not task.cancelled() and task.exception() is not None:
@@ -109,13 +124,12 @@ async def _retry_or_fail(
     stream: str, msg_id: str, raw: dict[bytes, bytes], giveup: Callable[[], Awaitable[None]]
 ) -> None:
     # the handler RAISED (worker is alive, it knows it failed): requeue with a bumped attempt, or give up
-    redis = get_redis()
     attempt = int(raw.get(b"attempt", b"0")) + 1
     if attempt > MAX_ATTEMPTS:
-        await giveup()
+        await giveup()  # idempotent; if we crash before the settle below, recovery re-runs it then settles
+        await _settle(stream, msg_id)
     else:
-        await redis.xadd(stream, {**raw, b"attempt": str(attempt).encode()})
-    await _settle(stream, msg_id)
+        await requeue_message(stream, msg_id, {**raw, b"attempt": str(attempt).encode()})
 
 
 async def _recover(stream: str, consumer: str, cap: _Capacity, spawn: Spawn) -> None:
@@ -175,7 +189,9 @@ async def _normalize_job(cap: _Capacity, profiles: asyncio.Queue[str], msg_id: s
     stream = STREAM_INGEST
     profile = await profiles.get()  # one dedicated libreoffice profile per in-flight normalize job
     try:
-        fields = {k.decode(): v.decode() for k, v in raw.items()}
+        fields = await _decode_or_settle(stream, msg_id, raw)
+        if fields is None:
+            return
         work = asyncio.create_task(handle_normalize(fields, profile))
         await asyncio.wait({work})
         if work.exception() is None:
@@ -191,7 +207,9 @@ async def _normalize_job(cap: _Capacity, profiles: asyncio.Queue[str], msg_id: s
 async def _paginate_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_NORMALIZED
     try:
-        fields = {k.decode(): v.decode() for k, v in raw.items()}
+        fields = await _decode_or_settle(stream, msg_id, raw)
+        if fields is None:
+            return
         work = asyncio.create_task(handle_paginate(fields))
         await asyncio.wait({work})
         if work.exception() is None:
@@ -206,7 +224,9 @@ async def _paginate_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) ->
 async def _render_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_RENDER
     try:
-        fields = {k.decode(): v.decode() for k, v in raw.items()}
+        fields = await _decode_or_settle(stream, msg_id, raw)
+        if fields is None:
+            return
         work = asyncio.create_task(handle_render(fields))
         await asyncio.wait({work})
         if work.exception() is None:
@@ -221,7 +241,9 @@ async def _render_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> N
 async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_PAGES
     try:
-        fields = {k.decode(): v.decode() for k, v in raw.items() if k != b"image"}
+        fields = await _decode_or_settle(stream, msg_id, raw)
+        if fields is None:
+            return
         work = asyncio.create_task(handle_ocr(fields, raw.get(b"image", b"")))
         await asyncio.wait({work})
         if work.exception() is None:
@@ -236,7 +258,9 @@ async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None
 async def _gapfill_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_GAPFILL
     try:
-        fields = {k.decode(): v.decode() for k, v in raw.items() if k != b"image"}
+        fields = await _decode_or_settle(stream, msg_id, raw)
+        if fields is None:
+            return
         work = asyncio.create_task(handle_gapfill(fields, raw.get(b"image", b"")))
         await asyncio.wait({work})
         if work.exception() is None:
@@ -252,7 +276,9 @@ async def _gapfill_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> 
 async def _merge_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_MERGE
     try:
-        fields = {k.decode(): v.decode() for k, v in raw.items()}
+        fields = await _decode_or_settle(stream, msg_id, raw)
+        if fields is None:
+            return
         work = asyncio.create_task(handle_merge(fields))
         await asyncio.wait({work})
         if work.exception() is not None:
@@ -268,7 +294,9 @@ async def _merge_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> No
 async def _tabular_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_TABLES
     try:
-        fields = {k.decode(): v.decode() for k, v in raw.items()}
+        fields = await _decode_or_settle(stream, msg_id, raw)
+        if fields is None:
+            return
         work = asyncio.create_task(handle_tabular(fields))
         await asyncio.wait({work})
         if work.exception() is None:
@@ -337,12 +365,26 @@ async def tabular() -> None:
 
 
 async def _main() -> None:
-    await asyncio.gather(normalize(), paginate(), render(), ocr(), gapfill(), merge(), tabular())
+    await reap_orphan_blobs()
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+    stages = (normalize, paginate, render, ocr, gapfill, merge, tabular)
+    consumers = [asyncio.create_task(stage()) for stage in stages]
+    stop_task = asyncio.create_task(stop.wait())
+    try:
+        await asyncio.wait([stop_task, *consumers], return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (stop_task, *consumers):
+            task.cancel()
+        await asyncio.gather(stop_task, *consumers, return_exceptions=True)
+        await shutdown()
+        await get_engine().dispose()
 
 
 def main() -> None:
     configure_logging()
-    reset_blob_dir()
     asyncio.run(_main())
 
 

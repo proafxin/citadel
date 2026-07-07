@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import traceback
@@ -17,6 +18,7 @@ from citadel.db import get_sessionmaker
 from citadel.llm import (
     SLM_MAX_TOKENS,
     count_tokens,
+    count_tokens_batch,
     reformulate,
     select_evidence,
     synthesize,
@@ -35,7 +37,9 @@ BUDGET = CTX_TOKENS - OUT_TOKENS - 2048
 EARLY_STOP_N = 3
 UNIFY_MAX_ITEMS = 64
 SCHEMA_SAMPLES = 3
+SQL_ROW_CAP = 10_000  # hard ceiling on rows any generated query may return, so a broad SELECT can't pull a whole table
 _PG = postgresql.dialect()
+_REL_REF = re.compile(r"\b(?:from|join)\s+(\"?[A-Za-z_][A-Za-z0-9_$]*\"?)", re.IGNORECASE)
 _DTYPE_SA: dict[str, type[TypeEngine[Any]]] = {
     "integer": BigInteger,
     "float": DOUBLE_PRECISION,
@@ -58,6 +62,14 @@ class SqlResult:
 
 def _safe_sql(sql: str) -> bool:
     return sql.strip().lower().startswith("select")
+
+
+def _references_only_views(sql: str, n_tables: int) -> bool:
+    # every FROM/JOIN in the generated SQL (subqueries included) must target one of our per-request t0..tn views — never
+    # a base table (content, table_rows, documents, pg_*), so a prompt-injected query can't read another library's data
+    allowed = {f"t{index}" for index in range(n_tables)}
+    refs = [match.group(1).strip('"').lower() for match in _REL_REF.finditer(sql)]
+    return bool(refs) and all(ref in allowed for ref in refs)
 
 
 def _view_select(table: TableCand) -> Select[Any]:
@@ -111,13 +123,13 @@ async def _run_sql(session: AsyncSession, tables: list[TableCand], sql: str) -> 
     await session.execute(text("SET TRANSACTION READ ONLY"))
     await session.execute(text("SELECT set_config('statement_timeout', :ms, true)"), {"ms": str(STATEMENT_TIMEOUT_MS)})
     connection = await session.connection()
-    result = await connection.exec_driver_sql(cte + " " + sql)
+    result = await connection.exec_driver_sql(f"{cte} SELECT * FROM ({sql}) AS _capped LIMIT {SQL_ROW_CAP}")
     return list(result.keys()), [list(row) for row in result.fetchall()]
 
 
 async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
     sql = sql.strip().rstrip(";").strip()
-    if not _safe_sql(sql):
+    if not _safe_sql(sql) or not _references_only_views(sql, len(tables)):
         return None
     try:
         async with get_sessionmaker()() as session, session.begin():
@@ -142,21 +154,23 @@ async def _aggregate(question: str, tables: list[TableCand]) -> list[SqlResult]:
     return results
 
 
-def _fit(items: list[str], budget: int) -> int:
+def _fit(counts: list[int], start: int, budget: int) -> int:
+    # how many items from `start` fit in `budget`, using token counts computed ONCE up front (no re-tokenization)
     used = 0
-    for count, item in enumerate(items):
-        used += count_tokens(item)
+    for offset in range(start, len(counts)):
+        used += counts[offset]
         if used > budget:
-            return count
-    return len(items)
+            return offset - start
+    return len(counts) - start
 
 
 async def _filter(question: str, items: list[str]) -> list[int]:
+    counts = await asyncio.to_thread(count_tokens_batch, items)
     kept: list[int] = []
     start = 0
     empty = 0
     while start < len(items):
-        size = max(1, _fit(items[start:], BUDGET))
+        size = max(1, _fit(counts, start, BUDGET))
         chosen = await select_evidence(question, items[start : start + size])
         if chosen:
             kept.extend(start + index for index in chosen)
@@ -233,10 +247,11 @@ async def _unify(
     question: str, passages: list[str], results: list[SqlResult]
 ) -> tuple[list[tuple[str, int]], list[tuple[SqlResult, int]]]:
     items = passages + [_result_summary(result) for result in results]
+    counts = await asyncio.to_thread(count_tokens_batch, items)
     tiers: list[tuple[int, int]] = []
     start = 0
     while start < len(items):
-        size = min(max(1, _fit(items[start:], BUDGET)), UNIFY_MAX_ITEMS)
+        size = min(max(1, _fit(counts, start, BUDGET)), UNIFY_MAX_ITEMS)
         batch = await unify_evidence(question, items[start : start + size])
         tiers.extend((start + index, tier) for index, tier in batch)
         start += size
