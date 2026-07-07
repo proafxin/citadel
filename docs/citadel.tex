@@ -39,21 +39,21 @@
 \setbeamercolor{block body}{fg=CitadelTextLight, bg=CitadelBlue!50!black}
 
 \setbeamertemplate{navigation symbols}{}
-\setbeamertemplate{headline}{\vspace{0.4cm}\hspace{0.7cm}{\tiny\color{muted}\textbf{CITADEL}}\par}
+\setbeamertemplate{headline}{\vspace{0.3cm}\hspace{0.7cm}{\tiny\color{muted}\textbf{CITADEL}}\par}
 \setbeamertemplate{footline}{
-	\vspace{0.4cm}
+	\vspace{0.3cm}
 	\hspace{0.7cm}{\tiny\color{muted}\insertshorttitle}
 	\hfill
 	{\tiny\color{muted}\insertframenumber}
-	\hspace{0.7cm}\vspace{0.4cm}
+	\hspace{0.7cm}\vspace{0.3cm}
 }
 
 \setbeamersize{text margin left=7mm,text margin right=7mm}
-\setbeamerfont{frametitle}{series=\bfseries,size=\large} % Fixed missing backslash causing raw "large" print
+\setbeamerfont{frametitle}{series=\bfseries,size=\large}
 \setbeamerfont{title}{series=\bfseries}
 \setbeamerfont{block title}{series=\bfseries}
 
-\setlength{\parskip}{0.5em}
+\setlength{\parskip}{0.4em}
 \linespread{1.1}
 
 % ====================================================
@@ -72,81 +72,109 @@
 		{\large\bfseries\color{text} The Knowledge Compilation Layer for Enterprise AI} \\[0.1cm]
 		{\small\color{muted} Making domain-specific AI infrastructure obsolete}
 
-		\vskip 0.6cm
-		\hrule height 0.5pt depth 0pt width \textwidth \color{panel}
 		\vskip 0.4cm
+		\hrule height 0.5pt depth 0pt width \textwidth \color{panel}
+		\vskip 0.3cm
 
 		\begin{columns}[T]
-			\column{0.5\textwidth}
+			\column{0.49\textwidth}
 			\textbf{\small The Architectural Void} \\
-			{\color{text!85!white}\scriptsize Enterprise knowledge remains trapped inside human-centric visual formats (PDFs, spreadsheets, reports). Existing systems optimize for locating files as raw artifacts, rather than computing over their underlying structure.}
+			{\color{text!85!white}\scriptsize Enterprise knowledge remains trapped inside human-centric visual formats (PDFs, spreadsheets, reports). Existing systems optimize for storing and retrieving artifacts, not executing over knowledge.}
 
-			\column{0.5\textwidth}
+			\column{0.49\textwidth}
 			\textbf{\small The Universal Primitive} \\
 			{\color{accent}\scriptsize Citadel introduces the missing system layer: compiling unstructured syntax into a persistent, high-fidelity computational substrate so that AI applications can seamlessly execute native data workflows.}
 		\end{columns}
 		\vfill
 	\end{frame}
 
-	% --- Slide 2: The Missing Architecture Layer ---
+	% --- Slide 2: Macro Inflection Point (Why Now) ---
+	\begin{frame}
+		\frametitle{The Intelligence Layer Arrived Before the Knowledge Layer}
+		The core data bottlenecks of the enterprise have shifted over the last decade.
+
+		\begin{columns}[T]
+			\column{0.49\textwidth}
+			\textbf{The Historical Baseline}
+			\begin{itemize}
+				\item Unstructured files were treated as passive, static archives.
+				\item Computation was strictly siloed within relational, manually defined database tables.
+				\item Enterprise search systems were built exclusively for human information retrieval.
+			\end{itemize}
+
+			\column{0.49\textwidth}
+			\textbf{The Current Convergence}
+			\begin{itemize}
+				\item Foundation models natively process deep contextual reasoning and logic.
+				\item However, models lack a structured, reliable, and deterministic representation of reality.
+				\item \textbf{The Paradigm Shift:} A dedicated knowledge compilation layer has become an architectural necessity.
+			\end{itemize}
+		\end{columns}
+		\vfill
+		\centering
+		{\color{accent}\bfseries We have built scalable reasoning models. We have not built the infrastructure layer to feed them.}
+	\end{frame}
+
+	% --- Slide 3: The Missing Architecture Layer (Re-architected) ---
 	\begin{frame}
 		\frametitle{The Missing Systems Tier for Enterprise Intelligence}
+		Citadel serves as the stable computational foundation layer, transforming raw inputs into invariant state.
 		\begin{center}
 			\begin{tikzpicture}[
 				box/.style={
 					draw=text,
 					rounded corners,
 					minimum width=6.2cm,
-					minimum height=0.7cm,
+					minimum height=0.6cm,
 					align=center,
 					font=\small
 				}
 				]
-				\node[box] (apps) {Downstream Enterprise AI Workflows};
-				\node[box, below=0.35cm of apps] (llm) {Probabilistic Reasoning Engines (LLMs) \\ \scriptsize Reasoning engine $\cdot$ Not an authoritative database};
-				\node[box, below=0.35cm of llm, draw=accent, fill=CitadelBlue] (missing) {\bfseries\color{accent} Citadel Knowledge Compiler \& Substrate};
-				\node[box, below=0.35cm of missing] (storage) {Raw Enterprise Storage Layers \\ \scriptsize PDFs, matrices, document streams, files};
+				\node[box] (apps) {Downstream Enterprise AI Workflows \& Custom Interfaces};
+				\node[box, below=0.25cm of apps] (llm) {Reasoning Layer (LLMs) \\ \scriptsize Reasoning engine $\cdot$ Not an authoritative database};
+				\node[box, below=0.25cm of llm, draw=accent, fill=CitadelBlue, thick] (missing) {\bfseries\color{accent} Knowledge Substrate Layer (Citadel)};
+				\node[box, below=0.25cm of missing] (storage) {Enterprise Reality \\ \scriptsize Multi-format documentation, structural data, multi-modal files};
 
 				\draw[-{Latex[length=2mm]}] (storage)--(missing);
-				\draw[-{Latex[length=2mm]}] (missing)--(llm);
+				\draw[-{Latex[length=2mm]}, accent, thick] (missing)--(llm);
 				\draw[-{Latex[length=2mm]}] (llm)--(apps);
 			\end{tikzpicture}
 		\end{center}
 		\vfill
 		\begin{columns}[T]
-			\column{0.33\textwidth} \centering {\color{muted}\small Storage preserves raw bytes.}
-			\column{0.33\textwidth} \centering {\color{accent}\bfseries Citadel normalizes logical state.}
-			\column{0.33\textwidth} \centering {\color{muted}\small AI orchestrates the intent.}
+			\column{0.33\textwidth} \centering {\color{muted}\small Raw data contains fragments.}
+			\column{0.33\textwidth} \centering {\color{accent}\bfseries Citadel restores computational structure.}
+			\column{0.33\textwidth} \centering {\color{muted}\small Models reason over it.}
 		\end{columns}
 	\end{frame}
 
-	% --- Slide 3: Fragmentation / Market Collapse ---
+	% --- Slide 4: Fragmentation / Market Collapse ---
 	\begin{frame}
 		\frametitle{Collapsing the Redundant Ingestion CapEx}
 		\begin{center}
 			\begin{tikzpicture}[
-				node distance=0.12cm and 1.2cm,
-				app/.style={draw=muted, rounded corners, minimum width=2.4cm, minimum height=0.55cm, font=\scriptsize\bfseries, align=center},
-				layer/.style={draw=muted!50, rounded corners, minimum width=2.6cm, minimum height=0.4cm, font=\tiny, align=center, fill=CitadelBlue!40}
+				node distance=0.08cm and 1.1cm,
+				app/.style={draw=muted, rounded corners, minimum width=2.4cm, minimum height=0.5cm, font=\scriptsize\bfseries, align=center},
+				layer/.style={draw=muted!50, rounded corners, minimum width=2.5cm, minimum height=0.35cm, font=\tiny, align=center, fill=CitadelBlue!40}
 				]
 
 				% --- Stack 1: Legal ---
 				\node[app] (legal) {Legal AI};
 				\node[layer, right=of legal] (l1) {Knowledge Ingestion};
 				\node[layer, below=of l1] (l2) {Knowledge Representation};
-				\node[layer, below=of l2] (l3) {Domain Reasoning Layer};
+				\node[layer, below=of l2] (l3) {Application Logic};
 
 				% --- Stack 2: Finance ---
-				\node[app, below=1.1cm of legal] (finance) {Financial AI};
+				\node[app, below=0.9cm of legal] (finance) {Financial AI};
 				\node[layer, right=of finance] (f1) {Knowledge Ingestion};
 				\node[layer, below=of f1] (f2) {Knowledge Representation};
-				\node[layer, below=of f2] (f3) {Domain Reasoning Layer};
+				\node[layer, below=of f2] (f3) {Application Logic};
 
 				% --- Stack 3: Compliance ---
-				\node[app, below=1.1cm of finance] (compliance) {Compliance AI};
+				\node[app, below=0.9cm of finance] (compliance) {Compliance AI};
 				\node[layer, right=of compliance] (c1) {Knowledge Ingestion};
 				\node[layer, below=of c1] (c2) {Knowledge Representation};
-				\node[layer, below=of c2] (c3) {Domain Reasoning Layer};
+				\node[layer, below=of c2] (c3) {Application Logic};
 
 				% --- Orderly Entry Arrows ---
 				\draw[-{Latex[length=1.5mm]}] (legal) -- (l1);
@@ -154,13 +182,13 @@
 				\draw[-{Latex[length=1.5mm]}] (compliance) -- (c1);
 
 				% --- Centered Collapse Target ---
-				\node[draw=accent, fill=CitadelBlue, rounded corners, minimum width=3.4cm, minimum height=1.8cm, align=center, right=5.2cm of f1] (citadel) {
+				\node[draw=accent, fill=CitadelBlue, rounded corners, minimum width=3.2cm, minimum height=1.6cm, align=center, right=4.8cm of f1] (citadel) {
 					\bfseries\color{accent} Citadel \\
-					\vspace{0.15cm}
+					\vspace{0.1cm}
 					\scriptsize Shared, Invariant \\ Knowledge Substrate
 				};
 
-				% --- Massive Collapse Arrow from the center of the mess ---
+				% --- Massive Collapse Arrow ---
 				\draw[-{Latex[length=2.5mm]}, accent, ultra thick] ($(f1.east) + (0.4, -0.2)$) -- ($(citadel.west) - (0.1, 0)$)
 				node[midway, above=0.1cm, font=\tiny\bfseries, color=accent] {COLLAPSE};
 
@@ -168,14 +196,14 @@
 		\end{center}
 		\vfill
 		\centering
-		{\color{accent}\bfseries Why should every vertical AI startup build its own document intelligence stack?}
+		{\color{accent}\bfseries Why should every vertical AI startup rebuild the same knowledge infrastructure?}
 	\end{frame}
 
-	% --- Slide 4: Eliminating Domain Intelligence Stacks ---
+	% --- Slide 5: Eliminating Domain Intelligence Stacks ---
 	\begin{frame}
 		\frametitle{One Universal Substrate Replaces Thousands of Vertical Stacks}
 		\begin{columns}[T]
-			\column{0.48\textwidth}
+			\column{0.49\textwidth}
 			\begin{block}{The Capital-Inefficient Past}
 				\begin{itemize}
 					\item Every vertical verticalizes processing workflows.
@@ -184,12 +212,12 @@
 				\end{itemize}
 			\end{block}
 
-			\column{0.48\textwidth}
+			\column{0.49\textwidth}
 			\begin{block}{The Citadel Architecture}
 				\begin{itemize}
-					\item Single universal knowledge compiler.
+					\item Single universal knowledge compiler handles foundational data orientation.
 					\item Domain context and logic emerge dynamically directly from the underlying data.
-					\item Verticals shrink into hyper-thin reasoning layers on top of shared knowledge infrastructure.
+					\item Citadel transforms domain AI from infrastructure plays into pure application plays.
 				\end{itemize}
 			\end{block}
 		\end{columns}
@@ -198,14 +226,13 @@
 		{\color{CitadelHighlight}\bfseries Legal, Financial, Compliance, and Ops AI become mere configurations on top of a single database primitive.}
 	\end{frame}
 
-	% --- Slide 5: Knowledge Compiler (The Observable Properties) ---
+	% --- Slide 6: Knowledge Compiler (The Observable Properties) ---
 	\begin{frame}
-		\frametitle{The Asset: Definitively Compiling Unstructured State}
+		\frametitle{Compiling Unstructured State into Persistent Knowledge}
 		Citadel compiles raw enterprise syntax into a persistent computational representation with clear, observable properties:
 
-		\vspace{0.2cm}
 		\begin{columns}[T]
-			\column{0.48\textwidth}
+			\column{0.49\textwidth}
 			\textbf{Observable Properties of the Substrate}
 			\begin{itemize}
 				\item \textbf{Lossless Structural Lineage:} Every heading, footnote, margin, page orientation, and nested block relationship is fully mapped.
@@ -213,42 +240,41 @@
 				\item \textbf{Complete Deterministic Provenance:} Every downstream computational block carries absolute, verifiable boundaries of origin.
 			\end{itemize}
 
-			\column{0.48\textwidth}
+			\column{0.49\textwidth}
 			\textbf{The Invariant Output}
 			\begin{itemize}
-				\item Superfluous formatting syntax is thoroughly stripped.
+				\item Presentation syntax is safely removed while structural meaning and explicit lineage remain entirely intact.
 				\item Inherent structural and spatial relations are preserved.
 				\item The resulting layer becomes universally machine-queryable via automated code execution.
 			\end{itemize}
 		\end{columns}
 	\end{frame}
 
-	% --- Slide 6: Systems Attack on Chunking ---
+	% --- Slide 7: Systems Attack on Chunking ---
 	\begin{frame}
 		\frametitle{Retrieval Cannot Recover What Structurally Disappeared}
-		Similarity-based retrieval cannot recover knowledge relationships that were removed before retrieval began.
+		Retrieval systems operate on representations. If the representation discards structure, downstream retrieval cannot mathematically reconstruct it.
 
-		\vspace{0.2cm}
 		\begin{columns}[T]
-			\column{0.48\textwidth}
+			\column{0.49\textwidth}
 			\textbf{The Retrieval Failure Mode}
 			\begin{center}
-				\begin{tikzpicture}[node/.style={draw=muted, rounded corners, font=\scriptsize, minimum width=4.5cm, minimum height=0.45cm}]
+				\begin{tikzpicture}[node/.style={draw=muted, rounded corners, font=\scriptsize, minimum width=4.5cm, minimum height=0.4cm}]
 					\node[node] (doc) {Original High-Context Knowledge};
-					\node[node, below=0.2cm of doc] (chunk) {Arbitrary Chunks / Overlapping Snippets};
-					\node[node, below=0.2cm of chunk] (lost) {\color{accent}Destruction of Layout \& Tabular Continuity};
-					\node[node, below=0.2cm of lost] (ret) {Probabilistic Guessing / Incomplete Context};
+					\node[node, below=0.15cm of doc] (chunk) {Arbitrary Chunks / Overlapping Snippets};
+					\node[node, below=0.15cm of chunk] (lost) {\color{accent}Destruction of Layout \& Tabular Continuity};
+					\node[node, below=0.15cm of lost] (ret) {Similarity over a Lossy Representation};
 					\draw[-{Latex[length=1.5mm]}] (doc)--(chunk)--(lost)--(ret);
 				\end{tikzpicture}
 			\end{center}
 
-			\column{0.48\textwidth}
+			\column{0.49\textwidth}
 			\textbf{The Citadel Paradigm}
 			\begin{center}
-				\begin{tikzpicture}[node/.style={draw=text, rounded corners, font=\scriptsize, minimum width=4.5cm, minimum height=0.45cm}]
+				\begin{tikzpicture}[node/.style={draw=text, rounded corners, font=\scriptsize, minimum width=4.5cm, minimum height=0.4cm}]
 					\node[node, draw=accent, fill=CitadelBlue] (doc2) {Original High-Context Knowledge};
-					\node[node, below=0.2cm of doc2] (rep) {Deterministic Schema Abstraction};
-					\node[node, below=0.2cm of rep] (exec) {Lossless Executable Representation};
+					\node[node, below=0.25cm of doc2] (rep) {Deterministic Schema Abstraction};
+					\node[node, below=0.25cm of rep] (exec) {Lossless Executable Representation};
 					\draw[-{Latex[length=1.5mm]}, accent] (doc2)--(rep)--(exec);
 				\end{tikzpicture}
 			\end{center}
@@ -256,13 +282,13 @@
 		\vfill
 	\end{frame}
 
-	% --- Slide 7: Planning vs Execution ---
+	% --- Slide 8: Planning vs Execution ---
 	\begin{frame}
 		\frametitle{A Clear Separation of Concerns: Planning vs. Execution}
 		Large Language Models excel at resolving ambiguity and planning tasks, but collapse when handling precise state maintenance.
 
 		\begin{columns}[T]
-			\column{0.48\textwidth}
+			\column{0.49\textwidth}
 			\textbf{The Reasoning Layer (AI Models)}
 			\begin{itemize}
 				\item Decodes semantic user intent.
@@ -270,12 +296,12 @@
 				\item Selects core computational milestones.
 			\end{itemize}
 
-			\column{0.48\textwidth}
+			\column{0.49\textwidth}
 			\textbf{The Execution Substrate (Citadel)}
 			\begin{itemize}
 				\item Executes queries mathematically over structured assets.
 				\item Validates layout, table data, and cell alignment.
-				\item Eliminates hallucinated computation with reproducible outputs.
+				\item Eliminates computational hallucination with reproducible outputs.
 			\end{itemize}
 		\end{columns}
 		\vfill
@@ -283,17 +309,17 @@
 		{\color{CitadelHighlight}\bfseries Reasoning remains probabilistic. Knowledge execution remains deterministic.}
 	\end{frame}
 
-	% --- Slide 8: Compile Once ---
+	% --- Slide 9: Compile Continuously ---
 	\begin{frame}
-		\frametitle{Amortized Ingestion: Compile Once, Query Indefinitely}
-		Citadel shifts enterprise compute costs away from runtime evaluation. Heavy transformation happens just once.
+		\frametitle{Continuous Compilation, Amortized Intelligence}
+		Citadel shifts enterprise compute costs away from runtime evaluation. Heavy structural transformation happens asynchronously on stream.
 
 		\begin{center}
 			\begin{tikzpicture}[
 				box/.style={draw=text, rounded corners, minimum width=2.8cm, minimum height=0.7cm, align=center, font=\small}
 				]
 				\node[box] (source) {Heterogeneous \\ Enterprise Data};
-				\node[box, right=0.9cm of source] (compile) {Citadel \\ Compiler};
+				\node[box, right=0.9cm of source] (compile) {Streaming \\ Compiler};
 				\node[box, right=0.9cm of compile, draw=accent, fill=CitadelBlue] (layer) {\bfseries Knowledge Substrate};
 				\node[box, right=0.9cm of layer, font=\scriptsize] (apps) {Unified \\ Knowledge Interface};
 
@@ -304,18 +330,18 @@
 		\end{center}
 		\vfill
 		\begin{columns}[T]
-			\column{0.5\textwidth}\centering \color{muted}\small One-time structural compilation step.
-			\column{0.5\textwidth}\centering \color{accent}\bfseries Unlimited downstream reasoning applications.
+			\column{0.5\textwidth}\centering \color{muted}\scriptsize Compilation runs continuously through an asynchronous streaming architecture.
+			\column{0.5\textwidth}\centering \color{accent}\bfseries Unlimited downstream queries over variant state updates.
 		\end{columns}
 	\end{frame}
 
-	% --- Slide 9: Platform Thesis & Developer Bridge ---
+	% --- Slide 10: Platform Thesis & Developer Bridge ---
 	\begin{frame}
 		\frametitle{Collapsing Developer Friction and Pipeline Overhead}
 		By offering a single platform interface, Citadel shifts developer attention from brittle ingestion tasks to pristine software creation.
 
 		\begin{columns}[T]
-			\column{0.48\textwidth}
+			\column{0.49\textwidth}
 			\textbf{The Traditional Engineering Burden}
 			\begin{itemize}
 				\item Build custom PDF parsers per distinct template format.
@@ -324,11 +350,11 @@
 				\item Mitigate prompt context limits and sequence loss.
 			\end{itemize}
 
-			\column{0.48\textwidth}
+			\column{0.49\textwidth}
 			\textbf{The Citadel Workflow Abstraction}
 			\begin{itemize}
 				\item Consume through a unified knowledge interface.
-				\item Focus exclusively on custom domain workflows.
+				\item \textbf{The Core Directive:} Developers build domain intelligence without rebuilding document intelligence.
 				\item Build complex products natively on top of compiled state.
 			\end{itemize}
 		\end{columns}
@@ -337,12 +363,11 @@
 		{\color{CitadelHighlight}\bfseries Citadel does not compete with vertical products. It makes building thousands of them trivial.}
 	\end{frame}
 
-	% --- Slide 10: Enterprise Data Evolution ---
+	% --- Slide 11: Enterprise Data Evolution ---
 	\begin{frame}
 		\frametitle{The Missing Infrastructure Primitive for the AI Era}
 		Every historical computation shift succeeded only after a definitive data abstraction layer emerged.
 
-		\vspace{0.2cm}
 		\begin{columns}[T]
 			\column{0.5\textwidth}
 			\begin{description}
@@ -355,67 +380,135 @@
 			\begin{block}{The Native AI Era Paradigm}
 				\centering
 				{\bfseries\color{accent} Knowledge Substrate}
-				\vspace{0.2cm}
-				{\small A lossless structural layer enabling computational enterprise understanding across company history.}
+				\vspace{0.15cm}
+				{\small Citadel introduces a new infrastructure primitive designed to make unstructured enterprise knowledge computational.}
 			\end{block}
 		\end{columns}
 	\end{frame}
 
-	% --- Slide 11: Mission Critical Proof Points ---
+	% --- Slide 12: Mission Critical Proof Points ---
 	\begin{frame}
 		\frametitle{Chatbots Retrieve Context. Citadel Computes Over Knowledge.}
-		Citadel is built to execute cross-document operations where absolute structural and mathematical precision is non-negotiable.
+		Citadel executes multi-document operations where absolute structural and mathematical precision is non-negotiable.
 
-		\vspace{0.2cm}
 		\begin{columns}[T]
-			\column{0.48\textwidth}
+			\column{0.49\textwidth}
 			\textbf{Complex Structural Queries}
 			\begin{itemize}
 				\item \textit{"Compare contractual penalty terms across 500 vendor agreements and flag clauses violating changing regional compliance rules."}
 				\item \textit{"Audit and reconcile lines between invoice line-items, nested ledger bills, and actual bank transactions."}
 			\end{itemize}
 
-			\column{0.48\textwidth}
-			\textbf{The Computational Result}
+			\column{0.49\textwidth}
+			\textbf{Core Architectural Capabilities}
 			\begin{itemize}
-				\item Evaluates complete document sets rather than slicing individual sections.
-				\item Delivers exact mathematical aggregations across tables.
-				\item Surfaces clean, auditable lineages with zero verification loss.
+				\item \textbf{Document-Set Scope:} Evaluates complete functional corpuses rather than slicing single isolated pages.
+				\item \textbf{Matrix Precision:} Retains multi-dimensional cells to support direct code execution over tabular arrays.
+				\item \textbf{Auditable Lineage:} Maps granular, immutable provenance strings back to physical origin.
 			\end{itemize}
 		\end{columns}
 		\vfill
 	\end{frame}
 
-	% --- Slide 12: NEW PROOF / VALIDATION SLIDE ---
+	% --- Slide 13: FIXED DEMO / VALIDATION SLIDE ---
 	\begin{frame}
-		\frametitle{Built Today: Universal Multi-Format Compilation}
-		This is not a theoretical system blueprint. Citadel translates unstructured multi-source formats into queryable state out of the box.
+		\frametitle{Built Today: Live Interface Mapping \& Tracing}
+		Citadel parses and validates production-grade enterprise matrix files into executable structures instantly.
 
-		\vspace{0.2cm}
 		\begin{center}
 			\begin{tikzpicture}[
-				box/.style={draw=muted, rounded corners, minimum width=2.8cm, minimum height=1.3cm, font=\scriptsize, align=center}
+				node distance=0.6cm,
+				pane/.style={draw=muted, rounded corners, minimum height=1.6cm, align=left, font=\tiny}
 				]
-				% Left Box: Inputs
-				\node[box] (input) {\textbf{Unified Input Engine} \\ PDF $\cdot$ XLSX $\cdot$ CSV \\ HTML $\cdot$ Office Docs \\ Scanned Images};
+				% Left Pane: Raw Document Emulation
+				\node[pane, text width=3.7cm] (raw) {
+					\textbf{[Production PDF Invoices]} \\
+					$\rightarrow$ Multi-page layout data \\
+					$\rightarrow$ Incompatible nested tables \\
+					$\rightarrow$ Rasterized layout matrix
+				};
 
-				% Center Box: Citadel Core
-				\node[box, right=1.2cm of input, draw=accent, fill=CitadelBlue, minimum width=3.2cm] (core) {\bfseries\color{accent} Citadel Core Pipeline \\ \scriptsize Production Ingestion \\ \& Live Compiler};
+				% Center Pane: Citadel Substrate (Conceptualized to secure trade secrets)
+				\node[pane, right=of raw, draw=accent, fill=CitadelBlue, text width=4.3cm] (sub) {
+					\textbf{[Knowledge Object Graph]} \\
+					$\bullet$ Full Document Hierarchy Extraction \\
+					$\bullet$ Spatial Relationship Coordinates \\
+					$\bullet$ Cross-Reference Association Maps \\
+					$\bullet$ Immutable Provenance Tracking
+				};
 
-				% Right Box: Output Queries
-				\node[box, right=1.2cm of core] (output) {\textbf{Deterministic Outputs} \\ Multi-Matrix Reconcile \\ Cross-Doc Audit \\ Lineage Mapping};
+				% Right Pane: Execution Output
+				\node[pane, right=of sub, text width=3.9cm] (out) {
+					\textbf{[Verified Computational Output]} \\
+					\texttt{Query:} Find ledger discrepancies \\
+					\texttt{Result:} Row 12, Column 4 mismatch \\
+					\texttt{Lineage:} Page 4, Invoice \#9821
+				};
 
-				% Connectors
-				\draw[-{Latex[length=2mm]}, thick] (input) -- (core);
-				\draw[-{Latex[length=2mm]}, accent, thick] (core) -- (output);
+				% Paths
+				\draw[-{Latex[length=2mm]}, thick] (raw) -- (sub);
+				\draw[-{Latex[length=2mm]}, accent, thick] (sub) -- (out);
 			\end{tikzpicture}
 		\end{center}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries Ingestion-ready matrix logic processing live corporate repositories today.}
+		{\color{CitadelHighlight}\bfseries Converting raw visual layout syntax into direct traceable business data answers dynamically.}
 	\end{frame}
 
-	% --- Slide 13: Model Independence ---
+	% --- Slide 14: Market Wedge & Economic Engine ---
+	\begin{frame}
+		\frametitle{The Initial GTM Wedge and Economic Model}
+		\begin{columns}[T]
+			\column{0.49\textwidth}
+			\begin{block}{The Initial Market Wedge}
+				Targeting enterprise segments where accuracy failure is catastrophic and documents are highly dense:
+				\begin{itemize}
+					\item \textbf{Regulatory Compliance:} Asynchronous monitoring of multi-jurisdictional rules.
+					\item \textbf{Corporate Law:} Massive multi-contract analysis.
+					\item \textbf{Financial Auditing:} Reconciliation over nested multi-page matrix records.
+				\end{itemize}
+			\end{block}
+
+			\column{0.49\textwidth}
+			\begin{block}{Infrastructure Economics}
+				A business model closely tied to data scaling and architectural utilization primitives:
+				\begin{itemize}
+					\item \textbf{Ingestion Volume Base:} Pricing mapped directly to workspace data footprint.
+					\item \textbf{Compilation Tiers:} Scaling with compilation complexity requirements.
+					\item \textbf{Execution Interface Fees:} Tiered by analytical query throughput volume.
+				\end{itemize}
+			\end{block}
+		\end{columns}
+		\vfill
+	\end{frame}
+
+	% --- Slide 15: The Accumulated Moat ---
+	\begin{frame}
+		\frametitle{The Core Defensive Infrastructure Moat}
+		\begin{columns}[T]
+			\column{0.55\textwidth}
+			\textbf{The Moat is the Compiled Substrate, Not the Model}
+			\begin{itemize}
+				\item \textbf{Enterprise Sticky Layer:} Once an enterprise compiles its organizational knowledge into Citadel, the layer acts as an internal state engine. Changing it requires an entire infrastructure overhaul.
+				\item \textbf{Continuous Ingestion Network Effect:} As more downstream applications hook into Citadel's APIs, the value of the centralized substrate grows exponentially.
+				\item \textbf{Data Security Airgap:} Secure, airgapped compilation guarantees proprietary enterprise metadata stays locked within Citadel.
+			\end{itemize}
+
+			\column{0.41\textwidth}
+			\begin{block}{The Venture Asymmetry}
+				\centering
+				\vskip 0.1cm
+				{\small Models iterate weekly.}
+				\vskip 0.1cm
+				{\small Applications pivot monthly.}
+				\vskip 0.1cm
+				{\bfseries\color{accent} Infrastructure persists for decades.}
+			\end{block}
+		\end{columns}
+		\vfill
+	\end{frame}
+
+	% --- Slide 16: Model Independence ---
 	\begin{frame}
 		\frametitle{Models Improve. Citadel Multiplies in Capability.}
 		\begin{center}
@@ -423,8 +516,8 @@
 				box/.style={draw=text, rounded corners, minimum width=4.5cm, minimum height=0.6cm, align=center, font=\small}
 				]
 				\node[box] (models) {Rapidly Evolving External AI Models \\ \scriptsize (Reasoning, Multi-Modal Systems, Autonomous Agents)};
-				\node[box, below=0.6cm of models, draw=accent, fill=CitadelBlue] (citadel) {\bfseries Citadel Persistent Knowledge Substrate};
-				\node[box, below=0.6cm of citadel] (apps) {Infinite Enterprise AI Application Ecosystem};
+				\node[box, below=0.45cm of models, draw=accent, fill=CitadelBlue] (citadel) {\bfseries Citadel Persistent Knowledge Substrate};
+				\node[box, below=0.45cm of citadel] (apps) {Infinite Enterprise AI Application Ecosystem};
 
 				\draw[-{Latex[length=2mm]}] (models)--(citadel);
 				\draw[-{Latex[length=2mm]}, accent] (citadel)--(apps);
@@ -432,7 +525,7 @@
 		\end{center}
 		\vfill
 		\centering
-		{\color{accent}\bfseries Citadel is model-independent. Every advancement in AI models expands the capability of Citadel applications.}
+		{\color{accent}\bfseries As foundation models improve, Citadel inherits those advancements cleanly without rebuilding the knowledge layer.}
 	\end{frame}
 
 \end{document}
