@@ -65,864 +65,375 @@
 
 \begin{document}
 	\maketitle
-	% ====================================================
-	% Part 1: Slides 1-4
-	% ====================================================
 
 	% --- Slide 1: Title ---
 	\begin{frame}[plain]
 		\vfill
-
 		{\Large\bfseries\color{accent} Citadel} \\[0.2cm]
-		{\large\color{text} The Knowledge Compiler for Enterprise AI}
-
+		{\large\color{text} The Universal Knowledge Abstraction Layer for Enterprise AI}
 		\vfill
-
 		\begin{columns}[T]
 			\column{0.62\textwidth}
 			{\small\color{muted}
 				Every enterprise stores knowledge.\\
-				No existing system provides a universal representation where AI can compute over it.
+				No existing system provides a native, unified primitive where AI can compute over it.
 			}
-
 			\column{0.38\textwidth}
 			\hfill
 			{\small\color{accent}\bfseries
-				Citadel changes this.
+				Citadel introduces that primitive.
 			}
 		\end{columns}
-
 		\vfill
 	\end{frame}
-
 
 	% --- Slide 2: The Core Problem ---
 	\begin{frame}
 		\frametitle{Enterprise Knowledge Is Trapped Inside Human Formats}
-
 		\begin{columns}[T]
-
 			\column{0.48\textwidth}
-
 			\textbf{The Enterprise Reality}
-
 			\vskip0.1cm
-
 			{\color{muted}\small
-				Critical business knowledge exists across incompatible representations:
+				Critical corporate assets are locked away in incompatible human-centric syntax:
 			}
-
 			\begin{itemize}
-				\item PDFs and scanned documents
-				\item Presentations and reports
-				\item Spreadsheets and operational data
-				\item Forms, contracts, and records
+				\item Multi-page PDFs and scanned records
+				\item Complex spreadsheets and financial reports
+				\item Dynamic operational logs and legal filings
 			\end{itemize}
-
 
 			\column{0.48\textwidth}
-
-			\textbf{The AI Limitation}
-
+			\textbf{The AI Bottleneck}
 			\begin{itemize}
-				\item Existing systems optimize for storage or retrieval.
-				\item They preserve files, not executable knowledge.
-				\item AI systems must reconstruct structure after information has already been lost.
+				\item Existing storage and indices optimize for file retrieval, not file execution.
+				\item They preserve appearance, not logical state.
+				\item AI applications are forced to reconstruct layout data after the structure has already been lost.
 			\end{itemize}
-
 			\vspace{0.3cm}
-
 			{\color{accent}\bfseries
-				The missing primitive is not another search layer.\\
-				It is a computational representation of enterprise knowledge.
+				The industry does not need another search engine. It needs a computational representation of unstructured knowledge.
 			}
-
 		\end{columns}
-
 	\end{frame}
-
 
 	% --- Slide 3: The Missing Architecture Layer ---
 	\begin{frame}
-		\frametitle{The Missing Execution Layer for Enterprise Knowledge}
-
+		\frametitle{The Missing Systems Tier for Enterprise Intelligence}
 		\begin{center}
-
 			\begin{tikzpicture}[
 				box/.style={
 					draw=text,
 					rounded corners,
-					minimum width=5.5cm,
+					minimum width=6.0cm,
 					minimum height=0.7cm,
 					align=center,
 					font=\small
 				}
 				]
+				\node[box] (apps) {Downstream Enterprise AI Workflows};
+				\node[box, below=0.35cm of apps] (llm) {Probabilistic Reasoning Engines (LLMs) \\ \scriptsize Excellent planning $\cdot$ Poor data integrity};
+				\node[box, below=0.35cm of llm, draw=accent, fill=CitadelBlue] (missing) {\bfseries\color{accent} Citadel Knowledge Compiler \& Substrate};
+				\node[box, below=0.35cm of missing] (storage) {Raw Enterprise Storage Layers \\ \scriptsize PDFs, matrices, document streams, files};
 
-				\node[box] (apps)
-				{Enterprise AI Applications};
-
-				\node[box, below=0.35cm of apps] (llm)
-				{Language Models\\
-					\scriptsize Reasoning, planning, intent};
-
-				\node[box,
-				below=0.35cm of llm,
-				draw=accent,
-				fill=CitadelBlue] (missing)
-				{\bfseries\color{accent}
-					Citadel Knowledge Compiler};
-
-				\node[box,
-				below=0.35cm of missing] (storage)
-				{Enterprise Data Sources\\
-					\scriptsize Documents, tables, files};
-
-
-				\draw[-{Latex[length=2mm]}]
-				(storage)--(missing);
-
-				\draw[-{Latex[length=2mm]}]
-				(missing)--(llm);
-
-				\draw[-{Latex[length=2mm]}]
-				(llm)--(apps);
-
+				\draw[-{Latex[length=2mm]}] (storage)--(missing);
+				\draw[-{Latex[length=2mm]}] (missing)--(llm);
+				\draw[-{Latex[length=2mm]}] (llm)--(apps);
 			\end{tikzpicture}
-
 		\end{center}
-
 		\vfill
-
 		\begin{columns}[T]
-
-			\column{0.33\textwidth}
-			\centering
-			{\color{muted}\small
-				Storage preserves artifacts.
-			}
-
-			\column{0.33\textwidth}
-			\centering
-			{\color{accent}\bfseries
-				Citadel compiles knowledge.
-			}
-
-			\column{0.33\textwidth}
-			\centering
-			{\color{muted}\small
-				AI reasons over outcomes.
-			}
-
+			\column{0.33\textwidth} \centering {\color{muted}\small Storage preserves raw bytes.}
+			\column{0.33\textwidth} \centering {\color{accent}\bfseries Citadel normalizes logical state.}
+			\column{0.33\textwidth} \centering {\color{muted}\small AI orchestrates the intent.}
 		\end{columns}
-
 	\end{frame}
 
-
-	% --- Slide 4: Fragmentation ---
+	% --- Slide 4: Fragmentation / Market Collapse ---
+	% --- Slide 4: Fragmentation / Market Collapse ---
 	\begin{frame}
-		\frametitle{Every AI Application Rebuilds the Same Missing Layer}
-
+		\frametitle{Collapsing the Redundant Ingestion CapEx}
 		\begin{center}
-
 			\begin{tikzpicture}[
-				app/.style={
-					draw=muted,
-					rounded corners,
-					minimum width=2.2cm,
-					minimum height=0.45cm,
-					font=\scriptsize,
-					align=center
-				},
-				layer/.style={
-					draw=muted,
-					rounded corners,
-					minimum width=2.2cm,
-					minimum height=0.35cm,
-					font=\scriptsize,
-					align=center,
-					fill=CitadelBlue!30
-				}
+				node distance=0.15cm and 1.2cm,
+				app/.style={draw=muted, rounded corners, minimum width=2.4cm, minimum height=0.6cm, font=\scriptsize\bfseries, align=center},
+				layer/.style={draw=muted!50, rounded corners, minimum width=2.4cm, minimum height=0.45cm, font=\tiny, align=center, fill=CitadelBlue!40}
 				]
 
-				% --- Applications ---
-				\node[app] (legal) at (0,2.2)
-				{Legal AI};
+				% --- Stack 1: Legal ---
+				\node[app] (legal) {Legal AI};
+				\node[layer, right=of legal] (l1) {OCR / Parsing};
+				\node[layer, below=of l1] (l2) {Custom Retrieval};
+				\node[layer, below=of l2] (l3) {Hardcoded Prompts};
 
-				\node[app] (finance) at (0,0.9)
-				{Financial AI};
+				% --- Stack 2: Finance ---
+				\node[app, below=1.1cm of legal] (finance) {Financial AI};
+				\node[layer, right=of finance] (f1) {OCR / Parsing};
+				\node[layer, below=of f1] (f2) {Custom Retrieval};
+				\node[layer, below=of f2] (f3) {Hardcoded Prompts};
 
-				\node[app] (compliance) at (0,-0.4)
-				{Compliance AI};
+				% --- Stack 3: Compliance ---
+				\node[app, below=1.1cm of finance] (compliance) {Compliance AI};
+				\node[layer, right=of compliance] (c1) {OCR / Parsing};
+				\node[layer, below=of c1] (c2) {Custom Retrieval};
+				\node[layer, below=of c2] (c3) {Hardcoded Prompts};
 
+				% --- Orderly Entry Arrows ---
+				\draw[-{Latex[length=1.5mm]}] (legal) -- (l1);
+				\draw[-{Latex[length=1.5mm]}] (finance) -- (f1);
+				\draw[-{Latex[length=1.5mm]}] (compliance) -- (c1);
 
-				% --- duplicated stacks ---
-				\node[layer] (legalstack1)
-				at (3,2.65)
-				{Parsing};
-
-				\node[layer] (legalstack2)
-				at (3,2.15)
-				{Retrieval};
-
-				\node[layer] (legalstack3)
-				at (3,1.65)
-				{Domain Logic};
-
-
-				\node[layer] (finstack1)
-				at (3,1.35)
-				{Parsing};
-
-				\node[layer] (finstack2)
-				at (3,0.85)
-				{Retrieval};
-
-				\node[layer] (finstack3)
-				at (3,0.35)
-				{Domain Logic};
-
-
-				\node[layer] (compstack1)
-				at (3,0.05)
-				{Parsing};
-
-				\node[layer] (compstack2)
-				at (3,-0.45)
-				{Retrieval};
-
-				\node[layer] (compstack3)
-				at (3,-0.95)
-				{Domain Logic};
-
-
-				% arrows
-				\draw[-{Latex[length=1.5mm]}]
-				(legal)--(legalstack1);
-
-				\draw[-{Latex[length=1.5mm]}]
-				(finance)--(finstack1);
-
-				\draw[-{Latex[length=1.5mm]}]
-				(compliance)--(compstack1);
-
-
-				% collapse arrow
-				\draw[-{Latex[length=2mm]}, accent, thick]
-				(4.5,0.9)--(6,0.9);
-
-
-				% Citadel
-				\node[
-				draw=accent,
-				fill=CitadelBlue,
-				rounded corners,
-				minimum width=2.8cm,
-				minimum height=1.5cm,
-				align=center
-				] (citadel)
-				at (7.3,0.9)
-				{
-					\bfseries\color{accent}
-					Citadel\\
-					\vspace{0.1cm}
-					\scriptsize
-					Universal Knowledge\\
-					Layer
+				% --- Centered Collapse Target ---
+				\node[draw=accent, fill=CitadelBlue, rounded corners, minimum width=3.4cm, minimum height=1.8cm, align=center, right=5.2cm of f1] (citadel) {
+					\bfseries\color{accent} Citadel \\
+					\vspace{0.15cm}
+					\scriptsize Shared, Invariant \\ Knowledge Substrate
 				};
 
+				% --- Massive Collapse Arrow from the center of the mess ---
+				\draw[-{Latex[length=2.5mm]}, accent, ultra thick] ($(f1.east) + (0.4, -0.2)$) -- ($(citadel.west) - (0.1, 0)$)
+				node[midway, above=0.1cm, font=\tiny\bfseries, color=accent] {COLLAPSE};
+
 			\end{tikzpicture}
-
 		\end{center}
-
 		\vfill
-
 		\centering
-
-		{\color{accent}\bfseries
-			The industry is rebuilding domain-specific intelligence stacks instead of sharing one universal knowledge layer.
-		}
-
+		{\color{accent}\bfseries Why should every vertical AI startup build its own document intelligence stack?}
 	\end{frame}
-
-	% ====================================================
-	% Part 2: Slides 5-8
-	% ====================================================
-
 
 	% --- Slide 5: Eliminating Domain Intelligence Stacks ---
 	\begin{frame}
-		\frametitle{One Knowledge Layer Replaces Thousands of Domain Stacks}
-
+		\frametitle{One Universal Substrate Replaces Thousands of Vertical Stacks}
 		\begin{columns}[T]
-
 			\column{0.48\textwidth}
-
-			\begin{block}{The Current AI Landscape}
-
+			\begin{block}{The Capital-Inefficient Past}
 				\begin{itemize}
-					\item Every vertical rebuilds document intelligence.
-					\item Domain assumptions are encoded into application logic.
-					\item Each product requires its own extraction and retrieval stack.
+					\item Every vertical verticalizes document processing.
+					\item Brittle domain assumptions are hardcoded into local application code.
+					\item Massive operational overhead building point-to-point data ingestion pipelines.
 				\end{itemize}
-
 			\end{block}
 
-
 			\column{0.48\textwidth}
-
-			\begin{block}{The Citadel Model}
-
+			\begin{block}{The Citadel Architecture}
 				\begin{itemize}
-					\item Universal knowledge compilation layer.
-					\item Domain interpretation emerges from the data itself.
-					\item Applications become thin reasoning interfaces.
+					\item Single universal knowledge compiler.
+					\item Domain context and logic emerge dynamically directly from the underlying data.
+					\item Verticals shrink into hyper-thin reasoning skins.
 				\end{itemize}
-
 			\end{block}
-
 		\end{columns}
-
 		\vfill
-
 		\centering
-
-		{\color{CitadelHighlight}\bfseries
-			Legal, compliance, finance, and operations AI become applications over the same knowledge substrate.
-		}
-
+		{\color{CitadelHighlight}\bfseries Legal, Financial, Compliance, and Ops AI become mere configurations on top of a single database primitive.}
 	\end{frame}
 
-
-
-	% --- Slide 6: Knowledge Compiler ---
+	% --- Slide 6: Knowledge Compiler (The Observable Properties) ---
 	\begin{frame}
-		\frametitle{Citadel: The Universal Knowledge Compiler}
+		\frametitle{The Asset: Definitively Compiling Unstructured State}
+		Citadel decompiles raw enterprise syntax and materializes a single, persistent asset with exact, observable properties:
 
-		Citadel transforms enterprise artifacts into a persistent computational representation.
-
-		\vspace{0.4cm}
-
-		\begin{center}
-
-			\begin{tikzpicture}[
-				box/.style={
-					draw=text,
-					rounded corners,
-					minimum width=2.5cm,
-					minimum height=0.8cm,
-					align=center,
-					font=\scriptsize
-				}
-				]
-
-				\node[box]
-				(source)
-				{
-					Enterprise Artifacts\\
-					\scriptsize PDF, XLSX, HTML, JSON, Scans
-				};
-
-				\node[box,
-				right=1cm of source,
-				draw=accent,
-				fill=CitadelBlue,
-				minimum width=3cm]
-				(compiler)
-				{
-					\bfseries\color{accent}
-					Citadel Compiler\\
-					\scriptsize Structure recovery + normalization
-				};
-
-				\node[box,
-				right=1cm of compiler,
-				minimum width=3cm]
-				(runtime)
-				{
-					Knowledge Substrate Layer\\
-					\scriptsize Search/reasoning/computation
-				};
-
-
-				\draw[-{Latex[length=2mm]}]
-				(source)--(compiler);
-
-				\draw[-{Latex[length=2mm]}, accent]
-				(compiler)--(runtime);
-
-			\end{tikzpicture}
-
-		\end{center}
-
-
-		\vspace{0.4cm}
-
-		\begin{itemize}
-			\item \textbf{Lossless representation:} preserves structure, relationships, and provenance.
-			\item \textbf{Universal abstraction:} formats disappear; knowledge remains.
-		\end{itemize}
-
-	\end{frame}
-
-
-
-	% --- Slide 7: Representation Before Retrieval ---
-	\begin{frame}
-		\frametitle{The Problem With Retrieval-Centric AI}
-
+		\vspace{0.2cm}
 		\begin{columns}[T]
+			\column{0.48\textwidth}
+			\textbf{Observable Properties of the Substrate}
+			\begin{itemize}
+				\item \textbf{Lossless Structural Lineage:} Every heading, footnote, page orientation, and nested block relationship is fully mapped.
+				\item \textbf{Invariant Matrix Layouts:} Multi-dimensional tabular cells remain intact without flattened textual corruption.
+				\item \textbf{Immutable Provenance Vectors:} Every downstream computational item carries absolute, unalterable proof of origin.
+			\end{itemize}
 
 			\column{0.48\textwidth}
-
-			\textbf{Retrieval-Centric AI}
-
-			\vspace{0.1cm}
-
-			\begin{center}
-
-				\begin{tikzpicture}[
-					node/.style={
-						draw=muted,
-						rounded corners,
-						font=\scriptsize,
-						minimum width=3cm,
-						minimum height=0.45cm
-					}
-					]
-
-					\node[node] (doc)
-					{Original Knowledge};
-
-					\node[node, below=0.25cm of doc]
-					(chunk)
-					{Arbitrary Chunks};
-
-					\node[node, below=0.25cm of chunk]
-					(embed)
-					{Similarity Representation};
-
-					\node[node, below=0.25cm of embed]
-					(retrieve)
-					{Retrieved Fragments};
-
-					\draw[-{Latex[length=1.5mm]}]
-					(doc)--(chunk)--(embed)--(retrieve);
-
-				\end{tikzpicture}
-
-			\end{center}
-
-
-			\column{0.48\textwidth}
-
-			\textbf{Citadel}
-
-			\vspace{0.1cm}
-
-			\begin{center}
-
-				\begin{tikzpicture}[
-					node/.style={
-						draw=text,
-						rounded corners,
-						font=\scriptsize,
-						minimum width=3cm,
-						minimum height=0.45cm
-					}
-					]
-
-					\node[node, draw=accent, fill=CitadelBlue]
-					{Original Knowledge};
-
-					\node[node, below=0.25cm of doc]
-					(rep)
-					{Structured Representation};
-
-					\node[node, below=0.25cm of rep]
-					(exec)
-					{Executable Knowledge};
-
-					\draw[-{Latex[length=1.5mm]}, accent]
-					(doc)--(rep)--(exec);
-
-				\end{tikzpicture}
-
-			\end{center}
-
+			\textbf{The Invariant Output}
+			\begin{itemize}
+				\item Formats are thoroughly stripped.
+				\item Inherent spatial data relations are preserved.
+				\item The resulting layer becomes universally machine-queryable via automated code execution.
+			\end{itemize}
 		\end{columns}
-
-
-		\vfill
-
-		\centering
-
-		{\color{accent}\bfseries
-			You cannot reliably retrieve knowledge after destroying its structure.
-		}
-
 	\end{frame}
 
+	% --- Slide 7: Systems Attack on Chunking ---
+	\begin{frame}
+		\frametitle{Retrieval Cannot Recover What Structurally Disappeared}
+		Vector search strategies fail because chunking mechanically isolates data fragments and breaks contextual integrity.
 
+		\vspace{0.2cm}
+		\begin{columns}[T]
+			\column{0.48\textwidth}
+			\textbf{The Retrieval Failure Mode}
+			\begin{center}
+				\begin{tikzpicture}[node/.style={draw=muted, rounded corners, font=\scriptsize, minimum width=4.5cm, minimum height=0.45cm}]
+					\node[node] (doc) {Original High-Context Knowledge};
+					\node[node, below=0.2cm of doc] (chunk) {Arbitrary Chunks / Overlapping Snippets};
+					\node[node, below=0.2cm of chunk] (lost) {\color{accent}Destruction of Layout \& Tabular Continuity};
+					\node[node, below=0.2cm of lost] (ret) {Probabilistic Guessing / Incomplete Context};
+					\draw[-{Latex[length=1.5mm]}] (doc)--(chunk)--(lost)--(ret);
+				\end{tikzpicture}
+			\end{center}
+
+			\column{0.48\textwidth}
+			\textbf{The Citadel Paradigm}
+			\begin{center}
+				\begin{tikzpicture}[node/.style={draw=text, rounded corners, font=\scriptsize, minimum width=4.5cm, minimum height=0.45cm}]
+					\node[node, draw=accent, fill=CitadelBlue] (doc2) {Original High-Context Knowledge};
+					\node[node, below=0.2cm of doc2] (rep) {Deterministic Schema Abstraction};
+					\node[node, below=0.2cm of rep] (exec) {Lossless Executable Representation};
+					\draw[-{Latex[length=1.5mm]}, accent] (doc2)--(rep)--(exec);
+				\end{tikzpicture}
+			\end{center}
+		\end{columns}
+		\vfill
+	\end{frame}
 
 	% --- Slide 8: Planning vs Execution ---
 	\begin{frame}
-		\frametitle{Separate Reasoning From Knowledge Execution}
+		\frametitle{A Clear Separation of Concerns: Planning vs. Execution}
+		Large Language Models excel at resolving ambiguity and planning tasks, but collapse when handling precise state maintenance.
 
 		\begin{columns}[T]
-
 			\column{0.48\textwidth}
-
-			\textbf{AI Models}
-
+			\textbf{The Reasoning Layer (AI Models)}
 			\begin{itemize}
-				\item Understand intent.
-				\item Plan complex tasks.
-				\item Interpret ambiguous requests.
-				\item Select relevant evidence.
+				\item Decodes semantic user intent.
+				\item Formulates comprehensive declarative plans.
+				\item Selects core computational milestones.
 			\end{itemize}
 
-
 			\column{0.48\textwidth}
-
-			\textbf{Citadel Runtime}
-
+			\textbf{The Execution Substrate (Citadel)}
 			\begin{itemize}
-				\item Executes over structured knowledge.
-				\item Preserves provenance.
-				\item Performs exact computation.
-				\item Returns verifiable results.
+				\item Executes queries mathematically over structured assets.
+				\item Validates layout, table data, and cell alignment.
+				\item Delivers reproducible data outputs with zero hallucination risk.
 			\end{itemize}
-
 		\end{columns}
-
 		\vfill
-
 		\centering
-
-		{\color{CitadelHighlight}\bfseries
-			Models reason about intent. Citadel executes over knowledge.
-		}
-
+		{\color{CitadelHighlight}\bfseries Reasoning remains probabilistic. Knowledge execution remains deterministic.}
 	\end{frame}
-
-	% ====================================================
-	% Part 3: Slides 9-13
-	% ====================================================
-
 
 	% --- Slide 9: Compile Once ---
 	\begin{frame}
-		\frametitle{Compile Once. Query Indefinitely.}
-
-		Citadel transforms enterprise artifacts into a persistent knowledge layer that can power unlimited future interactions.
-
-		\vspace{0.4cm}
+		\frametitle{Amortized Ingestion: Compile Once, Query Indefinitely}
+		Citadel shifts enterprise compute costs away from runtime evaluation. Heavy transformation happens just once.
 
 		\begin{center}
-
 			\begin{tikzpicture}[
-				box/.style={
-					draw=text,
-					rounded corners,
-					minimum width=2.7cm,
-					minimum height=0.7cm,
-					align=center,
-					font=\small
-				}
+				box/.style={draw=text, rounded corners, minimum width=2.8cm, minimum height=0.7cm, align=center, font=\small}
 				]
+				\node[box] (source) {Heterogeneous \\ Enterprise Data};
+				\node[box, right=0.9cm of source] (compile) {Citadel \\ Compiler};
+				\node[box, right=0.9cm of compile, draw=accent, fill=CitadelBlue] (layer) {\bfseries Knowledge Substrate};
+				\node[box, right=0.9cm of layer, font=\scriptsize] (apps) {Unified \\ Knowledge Interface};
 
-				\node[box]
-				(source)
-				{
-					Enterprise Data\\
-					\scriptsize Documents + Tables + Files
-				};
-
-				\node[box,
-				right=0.8cm of source]
-				(compile)
-				{
-					Citadel\\
-					Compiler
-				};
-
-				\node[box,
-				right=0.8cm of compile,
-				draw=accent,
-				fill=CitadelBlue]
-				(layer)
-				{
-					\bfseries
-					Knowledge Layer
-				};
-
-
-				\node[box,
-				right=0.8cm of layer,
-				font=\scriptsize]
-				(apps)
-				{
-					Unlimited\\
-					AI Applications
-				};
-
-				\draw[-{Latex[length=2mm]}]
-				(source)--(compile);
-
-				\draw[-{Latex[length=2mm]}, accent]
-				(compile)--(layer);
-
-				\draw[-{Latex[length=2mm]}, accent]
-				(layer)--(apps);
-
+				\draw[-{Latex[length=2mm]}] (source)--(compile);
+				\draw[-{Latex[length=2mm]}, accent] (compile)--(layer);
+				\draw[-{Latex[length=2mm]}, accent] (layer)--(apps);
 			\end{tikzpicture}
-
 		\end{center}
-
 		\vfill
-
-		\centering
-
-		{\color{accent}\bfseries
-			The expensive transformation happens once. The knowledge layer creates continuous value.
-		}
-
+		\begin{columns}[T]
+			\column{0.5\textwidth}\centering \color{muted}\small One-time structural compilation step.
+			\column{0.5\textwidth}\centering \color{accent}\bfseries Multi-model application layer scaling.
+		\end{columns}
 	\end{frame}
 
-
-
-	% --- Slide 10: Platform Thesis ---
+	% --- Slide 10: Platform Thesis & Developer Bridge ---
 	\begin{frame}
-		\frametitle{From AI Applications to AI Infrastructure}
+		\frametitle{Collapsing Developer Friction and Pipeline Overhead}
+		By offering a single platform interface, Citadel shifts developer attention from brittle ingestion tasks to pristine software creation.
 
 		\begin{columns}[T]
-
 			\column{0.48\textwidth}
-
-			\textbf{Before Citadel}
-
+			\textbf{The Traditional Engineering Burden}
 			\begin{itemize}
-				\item Each AI product builds its own knowledge pipeline.
-				\item Each domain requires custom extraction logic.
-				\item Every application repeats the same infrastructure work.
+				\item Build custom PDF parsers per format.
+				\item Clean, parse, chunk, and embed strings.
+				\item Manually tune vector top-K similarity boundaries.
+				\item Mitigate prompt leakage and context loss.
 			\end{itemize}
 
-
 			\column{0.48\textwidth}
-
-			\textbf{With Citadel}
-
+			\textbf{The Citadel Workflow Abstraction}
 			\begin{itemize}
-				\item One universal knowledge layer.
-				\item Any domain becomes immediately accessible.
-				\item Applications become thin reasoning interfaces.
+				\item Consume through a unified knowledge interface.
+				\item Focus exclusively on custom domain workflows.
+				\item Build complex products natively on top of compiled state.
 			\end{itemize}
-
 		\end{columns}
-
 		\vfill
-
 		\centering
-
-		{\color{CitadelHighlight}\bfseries
-			Citadel does not build one vertical AI product. It enables an entire ecosystem of them.
-		}
-
+		{\color{CitadelHighlight}\bfseries Citadel does not compete with vertical products. It makes building thousands of them trivial.}
 	\end{frame}
-
-
 
 	% --- Slide 11: Enterprise Data Evolution ---
 	\begin{frame}
-		\frametitle{The Next Enterprise Data Primitive}
+		\frametitle{The Missing Infrastructure Primitive for the AI Era}
+		Every historical computation shift succeeded only after a definitive data abstraction layer emerged.
 
-		Every major computing era introduced a new abstraction for working with information.
-
-		\vspace{0.3cm}
-
+		\vspace{0.2cm}
 		\begin{columns}[T]
-
 			\column{0.48\textwidth}
-
 			\begin{description}
-				\item[1980s] Relational databases\\
-				Structured transactions
-
-				\item[2000s] Data warehouses\\
-				Enterprise analytics
-
-				\item[2010s] Search systems\\
-				Information discovery
+				\item[1980s $\cdot$ Relational DBs] Abstraction for structured transactional entries.
+				\item[2000s $\cdot$ Data Warehouses] Abstraction for aggregated historical analytical profiles.
+				\item[2010s $\cdot$ Enterprise Search] Abstraction for simple unstructured file discovery.
 			\end{description}
 
+			\column{0.48\textwidth}
+			\begin{block}{The Native AI Era Paradigm}
+				\centering
+				{\bfseries\color{accent} The Executable Knowledge Substrate}
+				\vspace{0.2cm}
+				{\small A lossless structural layer enabling probabilistic machines to execute deterministic computations natively across enterprise history.}
+			\end{block}
+		\end{columns}
+	\end{frame}
+
+	% --- Slide 12: Mission Critical Proof Points ---
+	\begin{frame}
+		\frametitle{A Chatbot Guesses Answers. Citadel Computes Truth.}
+		Citadel is built to execute cross-document operations where absolute structural and mathematical precision is non-negotiable.
+
+		\vspace{0.2cm}
+		\begin{columns}[T]
+			\column{0.48\textwidth}
+			\textbf{Complex Structural Queries}
+			\begin{itemize}
+				\item \textit{"Compare contractual penalty terms across 500 vendor agreements and flag clauses violating changing regional compliance rules."}
+				\item \textit{"Audit and reconcile lines between invoice line-items, nested ledger bills, and actual bank transactions."}
+			\end{itemize}
 
 			\column{0.48\textwidth}
-
-			\begin{block}{The AI Era}
-
-				\centering
-
-				{\bfseries\color{accent}
-					Executable Knowledge Layer
-				}
-
-				\vspace{0.2cm}
-
-				{\small
-					A universal representation allowing AI systems to compute over enterprise knowledge.
-				}
-
-			\end{block}
-
-		\end{columns}
-
-	\end{frame}
-
-
-
-	% --- Slide 12: Product Proof / Demo ---
-	\begin{frame}
-		\frametitle{From Enterprise Files to Computable Knowledge}
-
-		\begin{center}
-
-			\begin{tikzpicture}[
-				box/.style={
-					draw=text,
-					rounded corners,
-					minimum width=3cm,
-					minimum height=0.8cm,
-					align=center,
-					font=\small
-				}
-				]
-
-				\node[box]
-				(input)
-				{
-					Enterprise Files\\
-					\scriptsize PDF, XLSX, CSV, HTML, Scans
-				};
-
-				\node[box,
-				right=1cm of input,
-				draw=accent,
-				fill=CitadelBlue]
-				(citadel)
-				{
-					\bfseries Citadel\\
-					\scriptsize Knowledge Compilation
-				};
-
-				\node[box,
-				right=1cm of citadel]
-				(answer)
-				{
-					AI Interaction\\
-					\scriptsize Questions + Answers + Evidence
-				};
-
-				\draw[-{Latex[length=2mm]}]
-				(input)--(citadel);
-
-				\draw[-{Latex[length=2mm]}, accent]
-				(citadel)--(answer);
-
-			\end{tikzpicture}
-
-		\end{center}
-
-		\vspace{0.5cm}
-
-		\begin{columns}[T]
-
-			\column{0.45\textwidth}
-
-			\textbf{Example Questions}
-
+			\textbf{The Computational Result}
 			\begin{itemize}
-				\item Analyze financial performance.
-				\item Compare contracts.
-				\item Identify inconsistencies.
+				\item Evaluates complete document sets rather than slicing individual sections.
+				\item Delivers exact mathematical aggregations across tables.
+				\item Surfaces clean, auditable lineages with zero hallucination.
 			\end{itemize}
-
-
-			\column{0.45\textwidth}
-
-			\textbf{Citadel Provides}
-
-			\begin{itemize}
-				\item Structured understanding.
-				\item Computable answers.
-				\item Evidence-backed results.
-			\end{itemize}
-
 		\end{columns}
-
+		\vfill
 	\end{frame}
-
-
 
 	% --- Slide 13: Model Independence ---
 	\begin{frame}
-		\frametitle{Models Improve. Citadel Gains Capability.}
-
+		\frametitle{Models Improve. Citadel Multiplies in Capability.}
 		\begin{center}
-
 			\begin{tikzpicture}[
-				box/.style={
-					draw=text,
-					rounded corners,
-					minimum width=3cm,
-					minimum height=0.6cm,
-					align=center,
-					font=\small
-				}
+				box/.style={draw=text, rounded corners, minimum width=4.5cm, minimum height=0.6cm, align=center, font=\small}
 				]
+				\node[box] (models) {Rapidly Evolving External AI Models \\ \scriptsize (Reasoning, Multi-Modal Systems, Autonomous Agents)};
+				\node[box, below=0.6cm of models, draw=accent, fill=CitadelBlue] (citadel) {\bfseries Citadel Persistent Knowledge Substrate};
+				\node[box, below=0.6cm of citadel] (apps) {Infinite Enterprise AI Application Ecosystem};
 
-				\node[box]
-				(models)
-				{
-					Evolving AI Models\\
-					\scriptsize Vision + Language + Retrieval
-				};
-
-				\node[box,
-				below=0.8cm of models,
-				draw=accent,
-				fill=CitadelBlue]
-				(citadel)
-				{
-					\bfseries Citadel\\
-					Knowledge Layer
-				};
-
-				\node[box,
-				below=0.8cm of citadel]
-				(apps)
-				{
-					Enterprise AI Applications
-				};
-
-				\draw[-{Latex[length=2mm]}]
-				(models)--(citadel);
-
-				\draw[-{Latex[length=2mm]}, accent]
-				(citadel)--(apps);
-
+				\draw[-{Latex[length=2mm]}] (models)--(citadel);
+				\draw[-{Latex[length=2mm]}, accent] (citadel)--(apps);
 			\end{tikzpicture}
-
 		\end{center}
-
 		\vfill
-
 		\centering
-
-		{\color{accent}\bfseries
-			Citadel is not tied to a model generation.\\
-			Every improvement in AI models expands Citadel's capabilities.
-		}
-
+		{\color{accent}\bfseries Citadel is model-independent. Every advancement in foundation model logic directly scales the value of our compiled substrate.}
 	\end{frame}
+
 \end{document}
