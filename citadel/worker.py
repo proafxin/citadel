@@ -36,7 +36,7 @@ from citadel.services.ingestion import (
     reset_blob_dir,
 )
 from citadel.tabular.infer import HEADER_WORKERS
-from config import CPU_QUARTER, CPU_THIRD, configure_logging, get_settings
+from config import CPU_QUARTER, configure_logging, get_settings
 
 logger = logging.getLogger(__name__)
 

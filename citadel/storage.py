@@ -4,7 +4,12 @@ from config import get_settings
 
 
 def _object_path(key: str) -> Path:
-    return get_settings().tree_store_dir / key
+    base = get_settings().tree_store_dir.resolve()
+    path = (base / key).resolve()
+    if not path.is_relative_to(base):
+        msg = f"object key escapes store: {key}"
+        raise ValueError(msg)
+    return path
 
 
 def put_object(key: str, data: bytes) -> None:

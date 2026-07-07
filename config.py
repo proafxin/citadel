@@ -10,7 +10,9 @@ from sentence_transformers import SentenceTransformer
 logger = logging.getLogger(__name__)
 
 CPU_THIRD = max((os.cpu_count() or 3) // 3, 1)  # per-worker CPU stages: a third of the cores, at least 1
-CPU_QUARTER = max((os.cpu_count() or 4) // 4, 1)  # pdfium render pool: fewer, fatter workers (render outruns OCR anyway)
+CPU_QUARTER = max(
+    (os.cpu_count() or 4) // 4, 1
+)  # pdfium render pool: fewer, fatter workers (render outruns OCR anyway)
 
 QWEN_MODEL = "qwen"
 QWEN_HF_REPO = "Qwen/Qwen3.5-4B"
@@ -45,7 +47,7 @@ class Settings(BaseSettings):
 
     tree_store_dir: Path = Path("data/trees")
 
-    worker_id: str = "0"  # stable per-replica id → deterministic Redis consumer names; set distinctly per replica
+    worker_id: str  # stable per-replica id → deterministic Redis consumer names; REQUIRED, set distinctly per replica
 
     @property
     def mineru_base_url(self) -> str:

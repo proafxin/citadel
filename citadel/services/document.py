@@ -3,6 +3,7 @@ import io
 import json
 import zipfile
 from datetime import UTC, datetime
+from itertools import starmap
 
 import zstandard
 from fastapi import HTTPException
@@ -139,7 +140,12 @@ async def mark_library_ready(library_id: int) -> None:
 
 
 async def _describe_one(
-    content_id: str, columns: list[dict], sample_rows: list[list], metadata: dict, filename: str, search_text: str | None
+    content_id: str,
+    columns: list[dict],
+    sample_rows: list[list],
+    metadata: dict,
+    filename: str,
+    search_text: str | None,
 ) -> tuple[str, str, str]:
     description = await describe_table(
         [Column(**column) for column in columns], sample_rows, metadata.get("sheet") or filename
@@ -167,7 +173,7 @@ async def describe_library_tables(library_id: int) -> int:
         )
     if not rows:
         return 0
-    described = await asyncio.gather(*(_describe_one(*row) for row in rows))
+    described = await asyncio.gather(*starmap(_describe_one, rows))
     async with get_sessionmaker()() as session, session.begin():
         for content_id, description, combined in described:
             await session.execute(update(Table).where(Table.content_id == content_id).values(description=description))
