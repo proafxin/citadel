@@ -1,7 +1,8 @@
 import asyncio
-import contextlib
 import logging
+import signal
 import time
+import traceback
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -19,7 +20,7 @@ from citadel.services.document import (
     mark_library_ready,
 )
 from citadel.services.ingestion import shutdown as shutdown_resources
-from citadel.services.retrieval import embed_library, pending_libraries
+from citadel.services.retrieval import calibrate_embedder, embed_library, pending_libraries
 from config import configure_logging, get_embedder, get_settings
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,9 @@ async def _finalize(library_id: int, tag: str) -> None:
         _finalizing.discard(library_id)
 
 
-async def _drain_embeds(queue: asyncio.Queue[int]) -> None:
+async def finalize_libraries(queue: asyncio.Queue[int]) -> None:
+    # consume library ids signalled ready (NOTIFY 'embed' → _listen enqueues them) and finalize each in turn:
+    # describe its tables + embed. one library at a time (GPU embed is concurrency-1 anyway).
     while True:
         library_id = await queue.get()
         await _finalize(library_id, "finalized")
@@ -91,18 +94,34 @@ async def _listen(queue: asyncio.Queue[int]) -> None:
             conn.terminate()
 
 
+def _fatal_on_worker_death(task: asyncio.Task[None]) -> None:
+    # these workers must never die silently. asyncio parks a detached task's exception (never retrieved), which is
+    # exactly how the embed failure hid for hours. instead: the moment one ends for any reason other than shutdown
+    # cancellation, log the full traceback and SIGTERM ourselves — the process exits loudly instead of serving on with
+    # finalization dead. a supervisor (or your dev restart) then re-hits the real error until it is actually fixed.
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.critical("finalization worker died — exiting\n%s", "".join(traceback.format_exception(exc)))
+    else:
+        logger.critical("finalization worker returned unexpectedly — exiting")
+    signal.raise_signal(signal.SIGTERM)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     await asyncio.to_thread(get_embedder)
+    calibrate_embedder()
     queue: asyncio.Queue[int] = asyncio.Queue()
-    tasks = [asyncio.create_task(_drain_embeds(queue)), asyncio.create_task(_listen(queue))]
+    tasks = [asyncio.create_task(finalize_libraries(queue)), asyncio.create_task(_listen(queue))]
+    for task in tasks:
+        task.add_done_callback(_fatal_on_worker_death)
     yield
     for task in tasks:
         task.cancel()
-    for task in tasks:
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+    await asyncio.gather(*tasks, return_exceptions=True)
     await shutdown_resources()
     await get_engine().dispose()
 

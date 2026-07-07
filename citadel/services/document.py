@@ -32,6 +32,7 @@ from citadel.services.tree import (
     split_paratext,
 )
 from citadel.storage import delete_object, get_object, put_object
+from config import EMBED_MAX_TOKENS, get_embed_tokenizer
 
 
 async def create_documents(library_id: int, filenames: list[str]) -> list[int]:
@@ -181,7 +182,9 @@ async def describe_library_tables(library_id: int) -> int:
         for content_id, description, combined in described:
             await session.execute(update(Table).where(Table.content_id == content_id).values(description=description))
             await session.execute(
-                update(ContentNode).where(ContentNode.content_id == content_id).values(search_text=combined)
+                update(ContentNode)
+                .where(ContentNode.content_id == content_id)
+                .values(search_text=combined, token_count=_token_count(combined))
             )
     return len(described)
 
@@ -209,6 +212,13 @@ async def _resolve_tables(blocks: list[Block]) -> tuple[dict[int, int], list[Mat
     return counts, queue
 
 
+def _token_count(text: str | None) -> int:
+    # exact BGE-M3 token count (capped at the model ceiling), computed at ingestion so embedding reads it off the row
+    if not text:
+        return 0
+    return min(EMBED_MAX_TOKENS, len(get_embed_tokenizer()(text, add_special_tokens=True)["input_ids"]))
+
+
 def _node_row(spec: NodeSpec, doc_id: int, search: str | None) -> dict[str, object]:
     return {
         "content_id": spec.content_id,
@@ -220,6 +230,7 @@ def _node_row(spec: NodeSpec, doc_id: int, search: str | None) -> dict[str, obje
         "label": spec.text if spec.kind == "heading" else None,
         "bbox": spec.bbox,
         "search_text": search,
+        "token_count": _token_count(search),
     }
 
 
@@ -376,6 +387,7 @@ async def save_sheet_tables(
                 ordinal=ordinal,
                 type="table",
                 search_text=node_search,
+                token_count=_token_count(node_search),
             )
             session.add(node)
             await session.flush()

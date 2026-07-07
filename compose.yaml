@@ -135,6 +135,14 @@ services:
       - postgres
       - -c
       - max_connections=200
+      # reap a backend whose client vanished (hard-killed app) even mid-statement, so its locks don't strand the next
+      # run: send keepalives after 30s idle, retry every 10s x3 → dead peer detected and rolled back within ~60s.
+      - -c
+      - tcp_keepalives_idle=30
+      - -c
+      - tcp_keepalives_interval=10
+      - -c
+      - tcp_keepalives_count=3
     ports:
       - "${CITADEL_POSTGRES_PORT:-5432}:5432"
     volumes:

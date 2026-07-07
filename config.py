@@ -6,6 +6,7 @@ from pathlib import Path
 from loguru import logger as loguru_logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ QWEN_HF_REPO = "Qwen/Qwen3.5-4B"
 QWEN_CACHE_DIR = Path.home() / ".cache" / "citadel-qwen" / "hub"
 EMBED_MODEL = "BAAI/bge-m3"
 EMBED_DEVICE = "cuda"
+EMBED_MAX_TOKENS = 8192  # BGE-M3 context ceiling — token counts are capped here (the encoder truncates past it)
 
 
 def configure_logging() -> None:
@@ -80,6 +82,16 @@ def get_settings() -> Settings:
 @lru_cache
 def get_embedder() -> SentenceTransformer:
     logger.info("loading embedder model=%s device=%s", EMBED_MODEL, EMBED_DEVICE)
-    model = SentenceTransformer(EMBED_MODEL, device=EMBED_DEVICE, model_kwargs={"torch_dtype": "bfloat16"})
+    model = SentenceTransformer(
+        EMBED_MODEL,
+        device=EMBED_DEVICE,
+        model_kwargs={"torch_dtype": "bfloat16", "attn_implementation": "sdpa"},
+    )
     logger.info("embedder loaded model=%s", EMBED_MODEL)
     return model
+
+
+@lru_cache
+def get_embed_tokenizer() -> PreTrainedTokenizerBase:
+    # standalone BGE-M3 tokenizer (no model weights, no GPU) so the worker can count tokens at ingestion
+    return AutoTokenizer.from_pretrained(EMBED_MODEL)

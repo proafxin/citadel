@@ -11,6 +11,7 @@ from alembic import context
 from citadel.models.base import Base
 from citadel.models.content import Code, ContentNode, Equation, ListBlock, Paragraph
 from citadel.models.document import Document
+from citadel.models.embedding import Embedding
 from citadel.models.library import Library
 from citadel.models.table import Table, TableRow
 from config import get_settings
@@ -28,9 +29,9 @@ target_metadata = Base.metadata
 
 
 def render_item(type_, obj, autogen_context):
-    if type_ == "type" and isinstance(obj, pgvector.sqlalchemy.Vector):
+    if type_ == "type" and isinstance(obj, (pgvector.sqlalchemy.Vector, pgvector.sqlalchemy.HALFVEC)):
         autogen_context.imports.add("import pgvector.sqlalchemy")
-        return f"pgvector.sqlalchemy.Vector(dim={obj.dim})"
+        return f"pgvector.sqlalchemy.{type(obj).__name__}(dim={obj.dim})"
     return False
 
 # other values from the config, defined by the needs of env.py,

@@ -1,4 +1,3 @@
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import ForeignKey, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -24,7 +23,7 @@ class ContentNode(Base):
     label: Mapped[str | None] = mapped_column(default=None)
     bbox: Mapped[list[float] | None] = mapped_column(JSONB, default=None)
     search_text: Mapped[str | None] = mapped_column(Text, default=None)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBED_DIM), default=None)
+    token_count: Mapped[int | None] = mapped_column(default=None)  # BGE-M3 tokens in search_text, set at ingestion
 
 
 class Paragraph(Base):
