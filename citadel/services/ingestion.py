@@ -7,8 +7,8 @@ import multiprocessing
 import re
 import shutil
 import tempfile
+import threading
 import time
-from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -18,6 +18,7 @@ from typing import TypeVar
 import cv2
 import numpy as np
 import redis.asyncio as aioredis
+from cachetools import LRUCache
 from fastapi import HTTPException, UploadFile
 from mineru_vl_utils import MinerUClient
 from mineru_vl_utils.structs import ContentBlock, ExtractResult
@@ -133,9 +134,15 @@ def get_mineru_client() -> MinerUClient:
 
 
 @lru_cache
-def get_rapidocr() -> RapidOCR:
-    # CPU PP-OCR; 1 intra-op thread per call so a bounded pool controls total cores (no oversubscription)
+def _thread_rapidocr(_thread_id: int) -> RapidOCR:
+    # one RapidOCR per pool thread: the wrapper isn't guaranteed re-entrant, so sharing one instance across the thread
+    # pool could race and garble output. keying the cache on thread id gives each worker its own engine (the fixed
+    # RapidOCR pool → only a bounded few). 1 intra-op thread per engine so the pool still controls total cores.
     return RapidOCR(intra_op_num_threads=1)
+
+
+def get_rapidocr() -> RapidOCR:
+    return _thread_rapidocr(threading.get_ident())
 
 
 @lru_cache
@@ -492,22 +499,18 @@ async def record_sheet(doc_id: str, sheet_no: int) -> None:
     )
 
 
-_SHEETS_CACHE: OrderedDict[str, list[SheetExtraction]] = OrderedDict()
-_SHEETS_LOCK = asyncio.Lock()
 SHEETS_CACHE_MAX = 4  # workbooks kept parsed at once; every sheet of a doc reuses one parse instead of re-loading it
+_SHEETS_CACHE: LRUCache[str, list[SheetExtraction]] = LRUCache(maxsize=SHEETS_CACHE_MAX)
+_SHEETS_LOCK = asyncio.Lock()
 
 
 async def _get_sheet(doc_id: str, sheet_no: int) -> SheetExtraction:
-    async with _SHEETS_LOCK:
+    async with _SHEETS_LOCK:  # serialize the load so concurrent sheets of one doc parse the workbook once
         sheets = _SHEETS_CACHE.get(doc_id)
         if sheets is None:
             data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
             sheets = await asyncio.to_thread(load_all_sheets, data)
-            _SHEETS_CACHE[doc_id] = sheets
-            while len(_SHEETS_CACHE) > SHEETS_CACHE_MAX:
-                _SHEETS_CACHE.popitem(last=False)
-        else:
-            _SHEETS_CACHE.move_to_end(doc_id)
+            _SHEETS_CACHE[doc_id] = sheets  # LRUCache evicts the least-recently-used workbook past maxsize
     return sheets[sheet_no - 1]
 
 

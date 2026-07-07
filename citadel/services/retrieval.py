@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 import torch
 from sqlalchemy import ColumnElement, bindparam, case, or_, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
 from citadel.models.content import ContentNode
@@ -21,6 +20,7 @@ EMBED_TTL = 86_400
 
 RRF_K = 60
 CANDIDATES = 1000
+RETRIEVAL_CONCURRENCY = 8  # cap concurrent dense/sparse searches so a many-variant query can't exhaust the DB pool
 
 VRAM_HEADROOM = 0.7  # fraction of free VRAM to spend on one embedding batch
 BYTES_PER_TOKEN = 220_000  # BGE-M3 peak activation per token (~64MB at ~300 tok); calibrate with a benchmark
@@ -101,9 +101,12 @@ def _like(term: str) -> str:
     return f"%{escaped}%"
 
 
-async def _dense(
-    session: AsyncSession, channel: ColumnElement[bool], vector: list[float], library_id: int
-) -> list[str]:
+@functools.lru_cache
+def _search_semaphore() -> asyncio.Semaphore:
+    return asyncio.Semaphore(RETRIEVAL_CONCURRENCY)
+
+
+async def _dense(channel: ColumnElement[bool], vector: list[float], library_id: int) -> list[str]:
     stmt = (
         select(ContentNode.content_id)
         .join(Document, ContentNode.document_id == Document.id)
@@ -111,10 +114,11 @@ async def _dense(
         .order_by(ContentNode.embedding.cosine_distance(vector))
         .limit(CANDIDATES)
     )
-    return list(await session.scalars(stmt))
+    async with _search_semaphore(), get_sessionmaker()() as session:
+        return list(await session.scalars(stmt))
 
 
-async def _sparse(session: AsyncSession, channel: ColumnElement[bool], terms: list[str], library_id: int) -> list[str]:
+async def _sparse(channel: ColumnElement[bool], terms: list[str], library_id: int) -> list[str]:
     if not terms:
         return []
     conditions = [ContentNode.search_text.ilike(_like(term), escape="\\") for term in terms]
@@ -126,7 +130,8 @@ async def _sparse(session: AsyncSession, channel: ColumnElement[bool], terms: li
         .order_by(hits.desc())
         .limit(CANDIDATES)
     )
-    return list(await session.scalars(stmt))
+    async with _search_semaphore(), get_sessionmaker()() as session:
+        return list(await session.scalars(stmt))
 
 
 def _rrf(rankings: list[list[str]]) -> list[str]:
@@ -138,11 +143,13 @@ def _rrf(rankings: list[list[str]]) -> list[str]:
 
 
 async def _channel(
-    session: AsyncSession, channel: ColumnElement[bool], vectors: list[list[float]], terms: list[str], library_id: int
+    channel: ColumnElement[bool], vectors: list[list[float]], terms: list[str], library_id: int
 ) -> list[str]:
-    lists = [await _dense(session, channel, vector, library_id) for vector in vectors]
-    lists.append(await _sparse(session, channel, terms, library_id))
-    return _rrf(lists)
+    # every dense (one per query variant) and the sparse search run concurrently, each on its own session, bounded by
+    # the shared search semaphore — one question fans out into a single concurrent batch instead of serial round-trips
+    searches = [_dense(channel, vector, library_id) for vector in vectors]
+    searches.append(_sparse(channel, terms, library_id))
+    return _rrf(await asyncio.gather(*searches))
 
 
 async def _pending_node_ids(library_id: int) -> list[int]:
@@ -212,9 +219,10 @@ async def pending_libraries() -> list[int]:
 async def retrieve(queries: list[str], library_id: int) -> Retrieval:
     vectors = await _embed(queries)
     terms = _terms(queries)
-    async with get_sessionmaker()() as session:
-        text = await _channel(session, TEXT_CHANNEL, vectors, terms, library_id)
-        tables = await _channel(session, TABLE_CHANNEL, vectors, terms, library_id)
+    text, tables = await asyncio.gather(
+        _channel(TEXT_CHANNEL, vectors, terms, library_id),
+        _channel(TABLE_CHANNEL, vectors, terms, library_id),
+    )
     return Retrieval(text=text[:CANDIDATES], tables=tables[:CANDIDATES])
 
 

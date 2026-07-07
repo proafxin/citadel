@@ -1,27 +1,29 @@
 import io
-from collections import OrderedDict
 
 import pypdfium2 as pdfium
+from cachetools import LRUCache
 from PIL import Image
 
 MAX_IMAGE_SIDE = 2500
 PDF_CACHE_MAX = 4  # open pdfium handles kept per (long-lived) pool worker; mmap-cheap, so repeat pages skip the reparse
 
-_pdf_cache: OrderedDict[str, pdfium.PdfDocument] = OrderedDict()
+
+class _PdfCache(LRUCache[str, pdfium.PdfDocument]):
+    def popitem(self) -> tuple[str, pdfium.PdfDocument]:
+        key, pdf = super().popitem()
+        pdf.close()  # close the evicted handle so a long-lived worker never accumulates open pdfium documents
+        return key, pdf
+
+
+# one process runs one pool task at a time, so this per-process cache needs no lock
+_pdf_cache: _PdfCache = _PdfCache(maxsize=PDF_CACHE_MAX)
 
 
 def _open_pdf(path: str) -> pdfium.PdfDocument:
-    # one process runs one pool task at a time, so this per-process cache needs no lock. bounded + close-on-evict so a
-    # long-lived worker never accumulates handles (also caps the leak a hung/abandoned doc could otherwise cause)
-    cached = _pdf_cache.get(path)
-    if cached is not None:
-        _pdf_cache.move_to_end(path)
-        return cached
-    pdf = pdfium.PdfDocument(path)
-    _pdf_cache[path] = pdf
-    while len(_pdf_cache) > PDF_CACHE_MAX:
-        _, evicted = _pdf_cache.popitem(last=False)
-        evicted.close()
+    pdf = _pdf_cache.get(path)
+    if pdf is None:
+        pdf = pdfium.PdfDocument(path)
+        _pdf_cache[path] = pdf  # LRUCache evicts + closes the least-recently-used handle past maxsize
     return pdf
 
 
