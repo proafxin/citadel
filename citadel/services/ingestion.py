@@ -68,6 +68,9 @@ STREAM_GAPFILL = "gapfill"  # decoupled CPU stage: scanned pages do RapidOCR gap
 
 
 MAX_ATTEMPTS = 3
+DOC_TTL = 86_400  # safety expiry on doc/blocks/sheets keys: set at submit, refreshed on every recorded unit, so a doc
+# that somehow never reaches merge (and so never hits cleanup) still self-evicts instead of accumulating in Redis
+# forever. far longer than any single doc's processing, so it never evicts live state; cleanup shortens it on finish.
 LAYER_TYPES = ("text", "title")  # filled from the PDF text layer on born-digital pages (skip VLM recognition)
 
 MINERU_CLIENTS = (
@@ -252,6 +255,7 @@ async def submit_documents(files: list[UploadFile], library_id: int) -> IngestRe
             f"doc:{doc_id}",
             mapping={"state": "queued", "filename": name, "library_id": library_id, "done_count": 0, "t0": now},
         )
+        pipe.expire(f"doc:{doc_id}", DOC_TTL)  # safety net so a doc that never reaches merge still self-evicts
         pipe.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": name})
     await pipe.execute()
     logger.info("ingest library=%s files=%d doc_ids=%s", library_id, len(files), doc_ids)
@@ -320,12 +324,12 @@ async def handle_normalize(fields: dict[str, str], profile_dir: str) -> None:
 
 
 def _cap_image_bytes(image_bytes: bytes) -> bytes:
-    img = Image.open(io.BytesIO(image_bytes))
-    if max(img.size) <= MAX_IMAGE_SIDE:
-        return image_bytes
-    out = io.BytesIO()
-    downscale(img).save(out, format="PNG")
-    return out.getvalue()
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        if max(img.size) <= MAX_IMAGE_SIDE:
+            return image_bytes
+        out = io.BytesIO()
+        downscale(img).save(out, format="PNG")
+        return out.getvalue()
 
 
 async def handle_paginate(fields: dict[str, str]) -> None:
@@ -434,6 +438,8 @@ def map_content_block(block: object, page_idx: int) -> Block:
 # re-runs it, HSETNX returns 0, no double-count) and merge fires exactly once even across worker restarts.
 _RECORD_UNIT_LUA = """
 if redis.call('HSETNX', KEYS[1], ARGV[1], ARGV[2]) == 0 then return 0 end
+redis.call('EXPIRE', KEYS[1], ARGV[4])
+redis.call('EXPIRE', KEYS[2], ARGV[4])
 local done = redis.call('HINCRBY', KEYS[2], 'done_count', 1)
 local expected = tonumber(redis.call('HGET', KEYS[2], 'page_count'))
 if expected ~= nil and done == expected then
@@ -471,7 +477,7 @@ async def requeue_message(stream: str, msg_id: str, fields: dict[bytes, bytes]) 
 async def record_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
     await _record_unit()(
         keys=[f"blocks:{doc_id}", f"doc:{doc_id}", STREAM_MERGE],
-        args=[str(page_idx), json.dumps([b.model_dump() for b in blocks]), doc_id],
+        args=[str(page_idx), json.dumps([b.model_dump() for b in blocks]), doc_id, str(DOC_TTL)],
     )
 
 
@@ -481,7 +487,9 @@ async def fail_page(doc_id: str, page_idx: int) -> None:
 
 
 async def record_sheet(doc_id: str, sheet_no: int) -> None:
-    await _record_unit()(keys=[f"sheets:{doc_id}", f"doc:{doc_id}", STREAM_MERGE], args=[str(sheet_no), "1", doc_id])
+    await _record_unit()(
+        keys=[f"sheets:{doc_id}", f"doc:{doc_id}", STREAM_MERGE], args=[str(sheet_no), "1", doc_id, str(DOC_TTL)]
+    )
 
 
 _SHEETS_CACHE: OrderedDict[str, list[SheetExtraction]] = OrderedDict()
@@ -577,17 +585,26 @@ async def _vlm_recover(client: MinerUClient, img: Image.Image, blocks: list[Cont
         img.crop((int(b.bbox[0] * width), int(b.bbox[1] * height), int(b.bbox[2] * width), int(b.bbox[3] * height)))
         for b in blocks
     ]
-    recovered = await client.aio_batch_content_extract(crops, types="text")
-    for block, text in zip(blocks, recovered, strict=True):
-        clean = str(text or "").strip()
-        if clean and not _is_vlm_refusal(clean):
-            block.content = clean
+    try:
+        recovered = await client.aio_batch_content_extract(crops, types="text")
+        for block, text in zip(blocks, recovered, strict=True):
+            clean = str(text or "").strip()
+            if clean and not _is_vlm_refusal(clean):
+                block.content = clean
+    finally:
+        for crop in crops:
+            crop.close()
+
+
+@lru_cache
+def _qr_detector() -> cv2.QRCodeDetector:
+    return cv2.QRCodeDetector()
 
 
 def _qr_payload(crop: Image.Image) -> str | None:
     # a QR/barcode has no prose; the VLM would narrate it ("...no textual content can be extracted"). detect it
     # deterministically: None = not a QR (let the VLM read seal/stamp text), else the decoded payload ("" if unreadable)
-    text, points, _ = cv2.QRCodeDetector().detectAndDecode(np.asarray(crop.convert("RGB")))
+    text, points, _ = _qr_detector().detectAndDecode(np.asarray(crop.convert("RGB")))
     return text if points is not None else None
 
 
@@ -600,7 +617,11 @@ async def ocr_empty_blocks(client: MinerUClient, img: Image.Image, content_block
         if cb.type != "image" or (cb.content or "").strip():
             continue
         b = cb.bbox
-        payload = _qr_payload(img.crop((int(b[0] * width), int(b[1] * height), int(b[2] * width), int(b[3] * height))))
+        crop = img.crop((int(b[0] * width), int(b[1] * height), int(b[2] * width), int(b[3] * height)))
+        try:
+            payload = _qr_payload(crop)
+        finally:
+            crop.close()
         if payload is None:
             to_ocr.append(cb)  # not a QR → VLM-crop reads the seal/stamp/figure text
         elif payload:
@@ -679,33 +700,33 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     doc_id = fields["doc_id"]
     page_idx = int(fields["page_idx"])
     digital = fields.get("digital") == "1"
-    img = Image.open(io.BytesIO(image))
     client = get_mineru_client()  # one of the pooled clients, round-robin — its httpx pool is reused, not per-page
-    if digital:
-        # born-digital page: VLM does layout + recognizes only non-text; text/title come from the exact text layer
-        content_blocks = await client.aio_two_step_extract(img, not_extract_list=list(LAYER_TYPES))
-        text_blocks = [cb for cb in content_blocks if cb.type in LAYER_TYPES]
-        path = blob_path(doc_id)
-        if text_blocks and path.exists():
-            layer = await _run_pool(
-                get_layer_pool(),
-                extract_layer_by_bbox,
-                str(path),
-                page_idx,
-                [list(cb.bbox) for cb in text_blocks],
-                timeout=RENDER_TIMEOUT,
-            )
-            for cb, text in zip(text_blocks, layer, strict=True):
-                if text:
-                    cb.content = text
-        # digital only: the VLM never read these text blocks (we used the layer), so a focused crop is a fresh
-        # attempt that can catch handwriting the layer lacks. on scanned pages the VLM already read them, so a
-        # re-crop only risks re-introducing the same drop and slightly degrading the text — skip it there.
-        fill_crops = await recover_fillin_blocks(client, img, content_blocks)
-    else:
-        content_blocks = await client.aio_two_step_extract(img)  # VLM reads the scanned text (primary, good quality)
-        fill_crops = 0
-    img_crops = await ocr_empty_blocks(client, img, content_blocks)  # image blocks (seals/stamps/figures) → VLM-crop
+    with Image.open(io.BytesIO(image)) as img:
+        if digital:
+            # born-digital page: VLM does layout + recognizes only non-text; text/title come from the exact text layer
+            content_blocks = await client.aio_two_step_extract(img, not_extract_list=list(LAYER_TYPES))
+            text_blocks = [cb for cb in content_blocks if cb.type in LAYER_TYPES]
+            path = blob_path(doc_id)
+            if text_blocks and path.exists():
+                layer = await _run_pool(
+                    get_layer_pool(),
+                    extract_layer_by_bbox,
+                    str(path),
+                    page_idx,
+                    [list(cb.bbox) for cb in text_blocks],
+                    timeout=RENDER_TIMEOUT,
+                )
+                for cb, text in zip(text_blocks, layer, strict=True):
+                    if text:
+                        cb.content = text
+            # digital only: the VLM never read these text blocks (we used the layer), so a focused crop is a fresh
+            # attempt that can catch handwriting the layer lacks. on scanned pages the VLM already read them, so a
+            # re-crop only risks re-introducing the same drop and slightly degrading the text — skip it there.
+            fill_crops = await recover_fillin_blocks(client, img, content_blocks)
+        else:
+            content_blocks = await client.aio_two_step_extract(img)  # VLM reads the scanned text (primary)
+            fill_crops = 0
+        img_crops = await ocr_empty_blocks(client, img, content_blocks)  # empty image blocks → VLM-crop
     blocks = [map_content_block(cb, page_idx) for cb in content_blocks]
     if img_crops + fill_crops >= CROP_LOG_THRESHOLD:  # surface only crop-heavy pages — no per-page spam over thousands
         logger.info(
@@ -742,7 +763,8 @@ async def handle_gapfill(fields: dict[str, str], image: bytes) -> None:
     # decoupled CPU stage: RapidOCR adds the lines the VLM dropped on a scanned page, then the page is finalized
     page_idx = int(fields["page_idx"])
     blocks = _load_blocks(fields["blocks"])
-    await recover_scanned_gaps(Image.open(io.BytesIO(image)), blocks, page_idx)
+    with Image.open(io.BytesIO(image)) as img:
+        await recover_scanned_gaps(img, blocks, page_idx)
     await _emit_page(fields["doc_id"], page_idx, blocks)
 
 
@@ -807,8 +829,6 @@ async def cleanup(doc_id: str) -> None:
 
 
 # ---- stage wiring (used by the worker entrypoint) -------------------------------------
-
-STREAMS = (STREAM_INGEST, STREAM_NORMALIZED, STREAM_RENDER, STREAM_PAGES, STREAM_GAPFILL, STREAM_MERGE, STREAM_TABLES)
 
 
 async def ensure_group(stream: str) -> None:

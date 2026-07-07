@@ -61,9 +61,33 @@ async def _drain_embeds(queue: asyncio.Queue[int]) -> None:
         await _finalize(library_id, "finalized")
 
 
-async def _catchup() -> None:
-    for library_id in await pending_libraries():
-        await _finalize(library_id, "catch-up finalized")
+LISTEN_HEALTH_S = 30  # probe the LISTEN connection this often so a silently dead/partitioned socket is detected
+LISTEN_RETRY_S = 2  # backoff between reconnect attempts while the DB is unreachable
+_LISTEN_ERRORS = (OSError, asyncpg.PostgresError, asyncpg.InterfaceError)
+
+
+async def _listen(queue: asyncio.Queue[int]) -> None:
+    # own the embed LISTEN connection: reconnect on drop and re-sweep pending_libraries on every (re)connect, so a PG
+    # restart/blip can't silently strand finalization. the periodic SELECT surfaces a dead socket the driver hasn't
+    # noticed yet; catch-up recovers any NOTIFY missed during the gap.
+    while True:
+        try:
+            conn = await asyncpg.connect(get_settings().pg_dsn)
+        except _LISTEN_ERRORS:
+            logger.warning("embed listener cannot connect — retrying")
+            await asyncio.sleep(LISTEN_RETRY_S)
+            continue
+        try:
+            await conn.add_listener("embed", lambda _conn, _pid, _channel, payload: queue.put_nowait(int(payload)))
+            for library_id in await pending_libraries():
+                queue.put_nowait(library_id)
+            while True:
+                await asyncio.sleep(LISTEN_HEALTH_S)
+                await conn.execute("SELECT 1")
+        except _LISTEN_ERRORS:
+            logger.warning("embed listener connection lost — reconnecting")
+        finally:
+            conn.terminate()
 
 
 @asynccontextmanager
@@ -71,16 +95,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     await asyncio.to_thread(get_embedder)
     queue: asyncio.Queue[int] = asyncio.Queue()
-    conn = await asyncpg.connect(get_settings().pg_dsn)
-    await conn.add_listener("embed", lambda _conn, _pid, _channel, payload: queue.put_nowait(int(payload)))
-    tasks = [asyncio.create_task(_drain_embeds(queue)), asyncio.create_task(_catchup())]
+    tasks = [asyncio.create_task(_drain_embeds(queue)), asyncio.create_task(_listen(queue))]
     yield
     for task in tasks:
         task.cancel()
     for task in tasks:
         with contextlib.suppress(asyncio.CancelledError):
             await task
-    await conn.close()
     await shutdown_resources()
     await get_engine().dispose()
 

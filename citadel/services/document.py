@@ -34,14 +34,6 @@ from citadel.services.tree import (
 from citadel.storage import delete_object, get_object, put_object
 
 
-async def create_document(library_id: int, filename: str) -> int:
-    async with get_sessionmaker()() as session, session.begin():
-        document = Document(library_id=library_id, filename=filename, status=DocumentStatus.QUEUED)
-        session.add(document)
-        await session.flush()
-        return document.id
-
-
 async def create_documents(library_id: int, filenames: list[str]) -> list[int]:
     async with get_sessionmaker()() as session, session.begin():
         documents = [Document(library_id=library_id, filename=name, status=DocumentStatus.QUEUED) for name in filenames]

@@ -37,29 +37,41 @@ def count_pdf_pages(path: str) -> int:
 
 
 def render_pdf_page(path: str, page_idx: int, dpi: int) -> tuple[bytes, bool]:
+    # the pdf handle is cache-owned (never closed here); page/bitmap/textpage are per-call and released even on error,
+    # so a raise mid-render can't strand a large bitmap buffer in the long-lived pool worker
     pdf = _open_pdf(path)
     page = pdf[page_idx]
-    scale = min(dpi / 72, MAX_IMAGE_SIDE / max(page.get_size()))  # cap BEFORE render → never alloc an oversized bitmap
-    bitmap = page.render(scale=scale)
-    bio = io.BytesIO()
-    bitmap.to_pil().save(bio, format="PNG")
-    bitmap.close()
-    textpage = page.get_textpage()
-    digital = page.get_rotation() == 0 and textpage.count_chars() > 16
-    textpage.close()
-    page.close()
-    return bio.getvalue(), digital
+    try:
+        scale = min(dpi / 72, MAX_IMAGE_SIDE / max(page.get_size()))  # cap BEFORE render → never alloc oversized bitmap
+        bitmap = page.render(scale=scale)
+        try:
+            bio = io.BytesIO()
+            bitmap.to_pil().save(bio, format="PNG")
+        finally:
+            bitmap.close()
+        textpage = page.get_textpage()
+        try:
+            digital = page.get_rotation() == 0 and textpage.count_chars() > 16
+        finally:
+            textpage.close()
+        return bio.getvalue(), digital
+    finally:
+        page.close()
 
 
 def extract_layer_by_bbox(path: str, page_idx: int, bboxes: list[list[float]]) -> list[str]:
     pdf = _open_pdf(path)
     page = pdf[page_idx]
-    width, height = page.get_size()
-    textpage = page.get_textpage()
-    out: list[str] = []
-    for x0, y0, x1, y1 in bboxes:
-        left, right, bottom, top = x0 * width, x1 * width, (1 - y1) * height, (1 - y0) * height
-        out.append(textpage.get_text_bounded(left=left, bottom=bottom, right=right, top=top).strip())
-    textpage.close()
-    page.close()
-    return out
+    try:
+        width, height = page.get_size()
+        textpage = page.get_textpage()
+        try:
+            out: list[str] = []
+            for x0, y0, x1, y1 in bboxes:
+                left, right, bottom, top = x0 * width, x1 * width, (1 - y1) * height, (1 - y0) * height
+                out.append(textpage.get_text_bounded(left=left, bottom=bottom, right=right, top=top).strip())
+            return out
+        finally:
+            textpage.close()
+    finally:
+        page.close()

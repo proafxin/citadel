@@ -117,14 +117,21 @@ def extract_sheet(worksheet: Worksheet, sheet_no: int) -> SheetExtraction:
 
 
 def sheet_names(data: bytes) -> list[str]:
-    return openpyxl.load_workbook(BytesIO(data), read_only=True).sheetnames
+    workbook = openpyxl.load_workbook(BytesIO(data), read_only=True)
+    try:
+        return workbook.sheetnames
+    finally:
+        workbook.close()  # read_only mode holds the archive open until closed
 
 
 def load_all_sheets(data: bytes) -> list[SheetExtraction]:
     # parse the workbook ONCE and extract every sheet: styles need the full (non-read_only) load, so re-loading per
     # sheet would re-parse the whole file N times. callers cache the result per document and index by sheet_no.
     workbook = openpyxl.load_workbook(BytesIO(data), data_only=True)
-    return [extract_sheet(worksheet, sheet_no) for sheet_no, worksheet in enumerate(workbook.worksheets, start=1)]
+    try:
+        return [extract_sheet(worksheet, sheet_no) for sheet_no, worksheet in enumerate(workbook.worksheets, start=1)]
+    finally:
+        workbook.close()
 
 
 def _runs(indices: list[int]) -> list[tuple[int, int]]:

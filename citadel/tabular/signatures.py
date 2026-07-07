@@ -115,7 +115,3 @@ class LineSignature:
 
     def __post_init__(self) -> None:
         self.non_null = [cell for cell in self.cells if not cell.null]
-
-
-def line_signature(row: list[str]) -> LineSignature:
-    return LineSignature(cells=[cell_signature(value) for value in row])
