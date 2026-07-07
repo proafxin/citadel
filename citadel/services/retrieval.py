@@ -134,6 +134,12 @@ class Retrieval:
 
 
 @dataclass
+class Passage:
+    content_id: str
+    text: str
+
+
+@dataclass
 class _PendingNode:
     content_id: str
     search_text: str
@@ -322,7 +328,7 @@ async def retrieve(queries: list[str], library_id: int) -> Retrieval:
     return Retrieval(text=text[:CANDIDATES], tables=tables[:CANDIDATES])
 
 
-async def load_passages(content_ids: list[str]) -> list[str]:
+async def load_passages(content_ids: list[str]) -> list[Passage]:
     if not content_ids:
         return []
     async with get_sessionmaker()() as session:
@@ -334,12 +340,12 @@ async def load_passages(content_ids: list[str]) -> list[str]:
             )
         )
     lookup = {row.content_id: row for row in rows}
-    passages: list[str] = []
+    passages: list[Passage] = []
     for content_id in content_ids:
         row = lookup.get(content_id)
         if row is not None and row.search_text:
             page = f" p{row.page_no}" if row.page_no else ""
-            passages.append(f"[{row.filename}{page}] {row.search_text}")
+            passages.append(Passage(content_id, f"[{row.filename}{page}] {row.search_text}"))
     return passages
 
 

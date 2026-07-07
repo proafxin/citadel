@@ -26,7 +26,7 @@ from citadel.llm import (
     write_queries,
 )
 from citadel.models.table import TableRow
-from citadel.services.retrieval import TableCand, load_passages, load_tables, retrieve
+from citadel.services.retrieval import Passage, TableCand, load_passages, load_tables, retrieve
 
 logger = logging.getLogger(__name__)
 
@@ -223,9 +223,9 @@ def _fit_results(results: list[SqlResult], budget: int) -> list[SqlResult]:
 
 
 def _fit_evidence(
-    passages: list[tuple[str, int]], results: list[tuple[SqlResult, int]], budget: int
-) -> tuple[list[str], list[SqlResult]]:
-    final_passages: list[str] = []
+    passages: list[tuple[Passage, int]], results: list[tuple[SqlResult, int]], budget: int
+) -> tuple[list[Passage], list[SqlResult]]:
+    final_passages: list[Passage] = []
     final_results: list[SqlResult] = []
     used = 0
     for tier in (1, 2):
@@ -235,7 +235,7 @@ def _fit_evidence(
         for passage, rank in passages:
             if rank != tier:
                 continue
-            cost = count_tokens(passage)
+            cost = count_tokens(passage.text)
             if used + cost > budget:
                 break
             final_passages.append(passage)
@@ -244,9 +244,9 @@ def _fit_evidence(
 
 
 async def _unify(
-    question: str, passages: list[str], results: list[SqlResult]
-) -> tuple[list[tuple[str, int]], list[tuple[SqlResult, int]]]:
-    items = passages + [_result_summary(result) for result in results]
+    question: str, passages: list[Passage], results: list[SqlResult]
+) -> tuple[list[tuple[Passage, int]], list[tuple[SqlResult, int]]]:
+    items = [passage.text for passage in passages] + [_result_summary(result) for result in results]
     counts = await asyncio.to_thread(count_tokens_batch, items)
     tiers: list[tuple[int, int]] = []
     start = 0
@@ -265,7 +265,7 @@ async def answer(question: str, library_id: int) -> AsyncIterator[str]:
     hits = await retrieve(queries, library_id)
     passages = await load_passages(hits.text)
     candidates = await load_tables(hits.tables)
-    kept_passages = [passages[index] for index in await _filter(question, passages)]
+    kept_passages = [passages[index] for index in await _filter(question, [passage.text for passage in passages])]
     kept_tables = [candidates[index] for index in await _filter(question, [_table_rep(table) for table in candidates])]
     results = await _aggregate(question, kept_tables)
     logger.info(
@@ -278,9 +278,20 @@ async def answer(question: str, library_id: int) -> AsyncIterator[str]:
         len(kept_tables),
         len(results),
     )
+    logger.info(
+        "kept passage_ids=%s table_ids=%s",
+        [passage.content_id for passage in kept_passages],
+        [table.content_id for table in kept_tables],
+    )
     passages_t, results_t = await _unify(question, kept_passages, results)
     final_passages, final_results = _fit_evidence(passages_t, results_t, BUDGET)
     rendered = [_result_render(result) for result in final_results]
-    logger.info("synthesis passages=%d results=%d", len(final_passages), len(final_results))
-    async for token in synthesize(question, final_passages, rendered):
+    logger.info(
+        "synthesis passages=%d results=%d passage_ids=%s sources=%s",
+        len(final_passages),
+        len(final_results),
+        [passage.content_id for passage in final_passages],
+        [result.label for result in final_results],
+    )
+    async for token in synthesize(question, [passage.text for passage in final_passages], rendered):
         yield token
