@@ -31,6 +31,7 @@ async def _finalize(library_id: int, tag: str) -> None:
     if library_id in _finalizing:  # catch-up and the live NOTIFY can target the same library — run it once
         return
     _finalizing.add(library_id)
+    logger.info("finalizing library=%d", library_id)
     try:
         await mark_finalize_started(library_id)
         t = time.time()

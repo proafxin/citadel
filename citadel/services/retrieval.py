@@ -1,5 +1,6 @@
 import asyncio
 import functools
+import logging
 import operator
 import time
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ from citadel.models.status import DocumentStatus
 from citadel.models.table import Table
 from citadel.services.ingestion import get_redis
 from config import get_embedder
+
+logger = logging.getLogger(__name__)
 
 EMBED_TTL = 86_400
 
@@ -196,9 +199,16 @@ async def embed_library(library_id: int) -> int:
     await redis.hset(f"embed:{library_id}", "t_start", time.time())
     await redis.expire(f"embed:{library_id}", EMBED_TTL)
     node_ids = await _pending_node_ids(library_id)
+    total = len(node_ids)
+    logger.info("embed library=%d nodes=%d batches=%d", library_id, total, -(-total // EMBED_BATCH))
     embedded = 0
-    for start in range(0, len(node_ids), EMBED_BATCH):
+    started = time.time()
+    for start in range(0, total, EMBED_BATCH):
         embedded += await _embed_batch(node_ids[start : start + EMBED_BATCH])
+        elapsed = time.time() - started
+        rate = embedded / elapsed if elapsed > 0 else 0.0
+        await redis.hset(f"embed:{library_id}", mapping={"done": embedded, "total": total})
+        logger.info("embed library=%d %d/%d nodes %.1fs %.0f nodes/s", library_id, embedded, total, elapsed, rate)
     await _mark_documents_embedded(library_id)
     await redis.hset(f"embed:{library_id}", mapping={"t_done": time.time(), "nodes": embedded})
     return embedded
