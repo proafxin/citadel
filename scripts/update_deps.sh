@@ -44,7 +44,10 @@ with open(sys.argv[1], "rb") as fh:
     data = tomllib.load(fh)
 for pkg in data.get("package", []):
     name = re.sub(r"[-_.]+", "-", pkg["name"]).lower()  # PEP 503 normalization
-    print(f"{name}\t{pkg.get('version', '')}")
+    # Drop the local segment (e.g. "2.13.0+cu130" -> "2.13.0"): PEP 440 forbids
+    # local versions in `>=` specifiers, and the index pin already selects the variant.
+    version = pkg.get("version", "").partition("+")[0]
+    print(f"{name}\t{version}")
 PY
 }
 

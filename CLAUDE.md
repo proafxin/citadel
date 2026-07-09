@@ -1,4 +1,4 @@
-# Citadel — coding rules
+# Coding rules
 
 Mandatory. These persist across sessions and devices because this file is committed to the repo and auto-loaded every session.
 

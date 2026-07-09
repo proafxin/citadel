@@ -153,6 +153,28 @@ def extract_html_table(html: str) -> MaterializedTable:
     return _grid_table(grid, _header_count(table), caption)
 
 
+_LATEX_MARKERS = ("\\(", "\\[", "\\frac", "\\sum", "\\int", "\\sqrt", "\\left", "\\leq", "\\geq", "$$")
+
+
+def grid_from_html(html: str) -> list[list[str]]:
+    table = BeautifulSoup(html, "lxml").find("table")
+    return _grid(table) if isinstance(table, Tag) else []
+
+
+def classify_grid(grid: list[list[str]]) -> str:
+    # the visual model tags displayed math, prose blocks and empty regions as "table". structuring those yields a
+    # degenerate col0..colN relation that pollutes the table store and the retrieval table channel, and there is no
+    # header to find because there is no table. decide what the region really is, deterministically, before structuring
+    cells = [cell for row in grid for cell in row if cell.strip()]
+    if not cells:
+        return "empty"
+    if sum(1 for cell in cells if any(marker in cell for marker in _LATEX_MARKERS)) * 2 >= len(cells):
+        return "equation"
+    if max(len(row) for row in grid) <= 1:  # a single column is never a relation — it is prose, a list or math
+        return "prose"
+    return "table"
+
+
 def _grid_cell(grid: list[list[str]], row: int, col: int) -> str:
     return grid[row][col] if 0 <= row < len(grid) and 0 <= col < len(grid[row]) else ""
 
@@ -195,8 +217,12 @@ async def structure_html_tables(html: str) -> list[MaterializedTable]:
     if not grid:
         return []
     mask = await predict_pooled(grid)
-    tables = [apply_grid_structure(grid, spec) for spec in structure_from_mask(grid, mask)]
-    return tables or [extract_html_table(html)]
+    # a structure that yields no data rows is not a table — drop it rather than storing an empty relation
+    tables = [t for t in (apply_grid_structure(grid, spec) for spec in structure_from_mask(grid, mask)) if t.n_rows]
+    if tables:
+        return tables
+    fallback = extract_html_table(html)
+    return [fallback] if fallback.n_rows else []
 
 
 async def structure_csv_tables(data: bytes, separator: str) -> list[MaterializedTable]:

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from itertools import starmap
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Numeric, Select, Text, cast, select, text
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Numeric, Select, Text, case, cast, func, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION
 from sqlalchemy.exc import SQLAlchemyError
@@ -50,6 +50,32 @@ _DTYPE_SA: dict[str, type[TypeEngine[Any]]] = {
     "string": Text,
 }
 _TABLE_REF = re.compile(r"\bt(\d+)\b")
+# stored cells are OCR/parse text; a numeric or date column routinely holds a "NULL" literal, a blank, or garbage.
+# casting that straight to bigint/date THROWS and the whole generated query is dropped — so guard every non-text cast:
+# cast only cells that match the type, else NULL. dates have no safe regex over OCR variance, so only their sentinels
+# are nulled. this makes the typed projection total — a bad cell degrades to NULL, never an error.
+_INT_RE = r"^[[:space:]]*[-+]?[[:digit:]]+[[:space:]]*$"
+_FLOAT_RE = r"^[[:space:]]*[-+]?([[:digit:]]+[.]?[[:digit:]]*|[.][[:digit:]]+)([eE][-+]?[[:digit:]]+)?[[:space:]]*$"
+_BOOL_RE = r"^[[:space:]]*(true|false|t|f|yes|no|y|n|0|1)[[:space:]]*$"
+_CELL_SENTINELS = ("", "NULL", "null", "Null", "NaN", "nan", "N/A", "n/a", "None", "none", "-", "—")
+
+
+def _typed_column(index: int, dtype: str) -> Any:
+    raw = TableRow.values.op("->>")(index)
+    label = f"c{index}"
+    sa_type = _DTYPE_SA.get(dtype, Text)
+    if sa_type is Text:
+        return raw.label(label)
+    if sa_type is BigInteger:
+        return case((raw.op("~")(_INT_RE), cast(raw, sa_type)), else_=None).label(label)
+    if sa_type in (DOUBLE_PRECISION, Numeric):
+        return case((raw.op("~")(_FLOAT_RE), cast(raw, sa_type)), else_=None).label(label)
+    if sa_type is Boolean:
+        return case((raw.op("~*")(_BOOL_RE), cast(raw, sa_type)), else_=None).label(label)
+    cleaned: Any = raw  # date / datetime: null the sentinels, then cast what remains
+    for sentinel in _CELL_SENTINELS:
+        cleaned = func.nullif(cleaned, sentinel)
+    return cast(cleaned, sa_type).label(label)
 
 
 @dataclass
@@ -73,10 +99,7 @@ def _references_only_views(sql: str, n_tables: int) -> bool:
 
 
 def _view_select(table: TableCand) -> Select[Any]:
-    columns = [
-        cast(TableRow.values.op("->>")(index), _DTYPE_SA.get(column.get("dtype", "string"), Text)).label(f"c{index}")
-        for index, column in enumerate(table.columns)
-    ]
+    columns = [_typed_column(index, column.get("dtype", "string")) for index, column in enumerate(table.columns)]
     return select(*columns).where(TableRow.table_id == table.table_id)
 
 

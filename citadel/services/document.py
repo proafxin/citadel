@@ -21,7 +21,7 @@ from citadel.models.table import Table, TableRow
 from citadel.schemas.content import Block
 from citadel.schemas.table import Column
 from citadel.services.excel import MaterializedTable
-from citadel.services.tabular import stitch_tables, structure_html_tables
+from citadel.services.tabular import classify_grid, grid_from_html, stitch_tables, structure_html_tables
 from citadel.services.tree import (
     NodeSpec,
     build_search_text,
@@ -201,6 +201,28 @@ def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:
             session.add(Paragraph(content_id=spec.content_id, text=spec.text or ""))
 
 
+def _reclassify_regions(blocks: list[Block]) -> list[Block]:
+    # the visual model labels displayed math, prose and empty regions as "table". re-type each to the leaf it really is
+    # (equation / paragraph / dropped) so it never reaches table structuring, where it would become a col0..colN relation
+    kept: list[Block] = []
+    for block in blocks:
+        if block.type != "table":
+            kept.append(block)
+            continue
+        grid = grid_from_html(block.text or "")
+        text = " ".join(cell for row in grid for cell in row if cell.strip())
+        match classify_grid(grid):
+            case "empty":
+                continue
+            case "equation":
+                kept.append(block.model_copy(update={"type": "equation", "text": text}))
+            case "prose":
+                kept.append(block.model_copy(update={"type": "text", "text": text}))
+            case _:
+                kept.append(block)
+    return kept
+
+
 async def _resolve_tables(blocks: list[Block]) -> tuple[dict[int, int], list[MaterializedTable]]:
     counts: dict[int, int] = {}
     queue: list[MaterializedTable] = []
@@ -306,6 +328,7 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentS
         library = await session.get_one(Library, document.library_id)
         library_id, filename, library_name = document.library_id, document.filename, library.name
     content_blocks, paratext = split_paratext(blocks)
+    content_blocks = _reclassify_regions(content_blocks)  # math/prose/empty must not reach table structuring
     stitched = stitch_tables(content_blocks)
     table_counts, table_queue = await _resolve_tables(stitched)
     specs = list(build_tree(stitched, library_id, doc_id, table_counts))
