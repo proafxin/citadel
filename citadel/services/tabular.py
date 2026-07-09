@@ -11,7 +11,7 @@ from bs4.element import Tag
 from citadel.schemas.content import Block
 from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
 from citadel.services.excel import SAMPLE_TABLE_ROWS, MaterializedTable
-from citadel.tabular.infer import predict_pooled, structure_from_mask
+from citadel.tabular.infer import merge_spurious_splits, predict_pooled, structure_from_mask
 
 _INT = re.compile(r"-?\d+")
 _FLOAT = re.compile(r"-?\d+\.\d+")
@@ -254,8 +254,9 @@ async def structure_html_tables(html: str) -> list[MaterializedTable]:
     if not grid:
         return []
     mask = await predict_pooled(grid)
+    structures = merge_spurious_splits(grid, structure_from_mask(grid, mask))
     # a structure that yields no data rows is not a table — drop it rather than storing an empty relation
-    tables = [t for t in (apply_grid_structure(grid, spec) for spec in structure_from_mask(grid, mask)) if t.n_rows]
+    tables = [t for t in (apply_grid_structure(grid, spec) for spec in structures) if t.n_rows]
     if tables:
         return tables
     fallback = extract_html_table(html)

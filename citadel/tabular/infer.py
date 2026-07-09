@@ -2,6 +2,7 @@ import asyncio
 import functools
 import multiprocessing
 import os
+import re
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -51,6 +52,50 @@ def structure_from_mask(grid: list[list[str]], mask: list[bool]) -> list[TableSt
             )
         )
     return structures
+
+
+_NUMERIC = re.compile(r"^[-+]?\d[\d,]*\.?\d*([eE][-+]?\d+)?$")
+_DATEISH = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _coarse_dtype(values: list[str]) -> str:
+    present = [value.strip() for value in values if value and value.strip()]
+    if not present:
+        return "empty"
+    if all(_NUMERIC.match(value) for value in present):
+        return "number"
+    if all(_DATEISH.match(value) for value in present):
+        return "date"
+    return "string"
+
+
+def _cell(grid: list[list[str]], row: int, col: int) -> str:
+    return grid[row][col] if 0 <= row < len(grid) and 0 <= col < len(grid[row]) else ""
+
+
+def _profile(grid: list[list[str]], structure: TableStructure) -> tuple[int, tuple[str, ...]]:
+    count = structure.col_end - structure.col_start + 1
+    rows = range(structure.data_start, structure.data_end + 1)
+    return count, tuple(
+        _coarse_dtype([_cell(grid, row, structure.col_start + index) for row in rows]) for index in range(count)
+    )
+
+
+def merge_spurious_splits(grid: list[list[str]], structures: list[TableStructure]) -> list[TableStructure]:
+    # a predicted header row only starts a NEW table when the schema actually changes: "a run of rows with consistent
+    # columns is one table; a schema change starts a new one". splitting on EVERY predicted header hands the table
+    # boundary to the header model — one false positive mid-sheet both fragments the table AND promotes a data row to
+    # the next fragment's header. identical schema on both sides ⇒ that header was a data row: absorb it back as data.
+    if len(structures) <= 1:
+        return structures
+    merged = [structures[0]]
+    for candidate in structures[1:]:
+        previous = merged[-1]
+        if _profile(grid, previous) == _profile(grid, candidate):
+            merged[-1] = previous.model_copy(update={"data_end": candidate.data_end})
+        else:
+            merged.append(candidate)
+    return merged
 
 
 @functools.lru_cache(maxsize=1)

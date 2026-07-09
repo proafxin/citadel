@@ -7,7 +7,7 @@ from openpyxl.cell.cell import Cell as OpenpyxlCell
 from openpyxl.worksheet.worksheet import Worksheet
 
 from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
-from citadel.tabular.infer import predict_pooled, structure_from_mask
+from citadel.tabular.infer import merge_spurious_splits, predict_pooled, structure_from_mask
 
 type RawCellValue = str | int | float | bool | datetime | None
 
@@ -295,7 +295,7 @@ async def extract_tables(sheet: SheetExtraction) -> list[tuple[int, Materialized
     for region in find_regions(sheet):
         grid = region_grid(sheet, region)
         mask = await predict_pooled(grid)
-        for structure in structure_from_mask(grid, mask):
+        for structure in merge_spurious_splits(grid, structure_from_mask(grid, mask)):
             ordinal += 1
             tables.append((ordinal, apply_structure(region, structure, sheet.sheet_no)))
     return tables
