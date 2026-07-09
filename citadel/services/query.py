@@ -68,7 +68,7 @@ def _typed_column(index: int, dtype: str) -> Any:
         return raw.label(label)
     if sa_type is BigInteger:
         return case((raw.op("~")(_INT_RE), cast(raw, sa_type)), else_=None).label(label)
-    if sa_type in (DOUBLE_PRECISION, Numeric):
+    if sa_type in {DOUBLE_PRECISION, Numeric}:
         return case((raw.op("~")(_FLOAT_RE), cast(raw, sa_type)), else_=None).label(label)
     if sa_type is Boolean:
         return case((raw.op("~*")(_BOOL_RE), cast(raw, sa_type)), else_=None).label(label)

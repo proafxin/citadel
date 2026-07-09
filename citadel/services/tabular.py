@@ -154,6 +154,8 @@ def extract_html_table(html: str) -> MaterializedTable:
 
 
 _LATEX_MARKERS = ("\\(", "\\[", "\\frac", "\\sum", "\\int", "\\sqrt", "\\left", "\\leq", "\\geq", "$$")
+_MATH_CHARS = frozenset("∑∫≤≥≠±∞√αβγδεφζηθλμπσωτχψ→∈∀∃∂∇⊂⊆∪∩·×÷")
+_EQ_NUMBER = re.compile(r"^\(\d+\)$")  # displayed-equation numbering, e.g. "(483)" — a cell of its own in math texts
 
 
 def grid_from_html(html: str) -> list[list[str]]:
@@ -161,14 +163,23 @@ def grid_from_html(html: str) -> list[list[str]]:
     return _grid(table) if isinstance(table, Tag) else []
 
 
+def _is_math_cell(cell: str) -> bool:
+    value = cell.strip()
+    if any(marker in value for marker in _LATEX_MARKERS) or _EQ_NUMBER.match(value):
+        return True
+    return sum(1 for char in value if char in _MATH_CHARS) >= 2  # unicode math without any LaTeX command
+
+
 def classify_grid(grid: list[list[str]]) -> str:
     # the visual model tags displayed math, prose blocks and empty regions as "table". structuring those yields a
     # degenerate col0..colN relation that pollutes the table store and the retrieval table channel, and there is no
-    # header to find because there is no table. decide what the region really is, deterministically, before structuring
+    # header to find because there is no table. decide what the region really is, deterministically, before structuring.
+    # equation requires EVERY cell to be math: a real table may hold math in its cells (a place-value table of 10^n, a
+    # symbol/definition table) but always carries at least one word-y cell — a header or a gloss. majority would eat it.
     cells = [cell for row in grid for cell in row if cell.strip()]
     if not cells:
         return "empty"
-    if sum(1 for cell in cells if any(marker in cell for marker in _LATEX_MARKERS)) * 2 >= len(cells):
+    if all(_is_math_cell(cell) for cell in cells):
         return "equation"
     if max(len(row) for row in grid) <= 1:  # a single column is never a relation — it is prose, a list or math
         return "prose"
@@ -184,11 +195,37 @@ def _grid_header(grid: list[list[str]], header_rows: list[int], col: int) -> str
     return " ".join(parts) or None
 
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_data_token(cell: str) -> bool:
+    value = cell.strip()
+    return bool(_EMAIL_RE.match(value) or _ISO_DATE_RE.match(value))
+
+
+def _plausible_header_rows(grid: list[list[str]], header_rows: list[int]) -> list[int]:
+    # a header NAMES the columns; it is never the data itself. emails and ISO dates are never column names, so a
+    # predicted header row made mostly of them is a data row the model promoted (its cells then get space-joined into
+    # "103 104" / two emails). bare numbers are deliberately NOT a data signal: wide sheets legitimately use years as
+    # headers (Country Name | ... | 1960 | 1961 | ...), and rejecting those would destroy a correct schema.
+    kept: list[int] = []
+    for row in header_rows:
+        cells = [cell for cell in (grid[row] if row < len(grid) else []) if cell.strip()]
+        if cells and sum(1 for cell in cells if _is_data_token(cell)) * 2 > len(cells):
+            continue
+        kept.append(row)
+    return kept
+
+
 def apply_grid_structure(grid: list[list[str]], structure: TableStructure) -> MaterializedTable:
     count = structure.col_end - structure.col_start + 1
-    header_rows = structure.header_rows or []
+    header_rows = _plausible_header_rows(grid, structure.header_rows or [])
+    # a rejected header row is data the model ate — pull data_start back so those rows are kept as rows, not lost
+    rejected = set(structure.header_rows or []) - set(header_rows)
+    data_start = min([structure.data_start, *rejected]) if rejected else structure.data_start
     collected: list[list[str]] = []
-    for offset in range(structure.data_start, structure.data_end + 1):
+    for offset in range(data_start, structure.data_end + 1):
         raw = [_grid_cell(grid, offset, structure.col_start + index) for index in range(count)]
         if all(value == "" for value in raw):
             continue
