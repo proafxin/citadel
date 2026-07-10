@@ -405,7 +405,7 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentS
                 table = next(tables)
                 table_pairs.append((spec.content_id, table))
                 node_rows[spec.content_id] = _node_row(
-                    spec, doc_id, _table_search(spec, table, library_name, filename, paratext)
+                    spec, doc_id, _table_search(spec, table, library_name, filename, prepared.paratext)
                 )
             else:
                 node_rows[spec.content_id] = _node_row(spec, doc_id, search_text.get(spec.content_id))

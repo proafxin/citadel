@@ -12,7 +12,8 @@ from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL, get_settings
 
 SLM_TIMEOUT = 180
 SLM_CONCURRENCY = 32  # concurrent SLM calls; keep <= qwen --max-num-seqs (bounded by GDN Mamba cache blocks)
-SLM_MAX_TOKENS = 4096
+STRUCT_MAX_TOKENS = 4096  # structured calls emit short JSON (indices, a concise merge summary, SQL)
+SYNTH_MAX_TOKENS = 8192  # the streamed answer; the evidence budget reserves this much of the context window for it
 
 
 @functools.lru_cache
@@ -50,7 +51,7 @@ async def _chat(prompt: str, schema: dict) -> str:
         "model": QWEN_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
-        "max_tokens": SLM_MAX_TOKENS,
+        "max_tokens": STRUCT_MAX_TOKENS,
         "response_format": {"type": "json_schema", "json_schema": {"name": "output", "schema": schema}},
         "chat_template_kwargs": {"enable_thinking": False},
     }
@@ -106,7 +107,7 @@ async def _chat_stream(prompt: str) -> AsyncIterator[str]:
         "model": QWEN_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.3,
-        "max_tokens": SLM_MAX_TOKENS,
+        "max_tokens": SYNTH_MAX_TOKENS,
         "stream": True,
         "chat_template_kwargs": {"enable_thinking": False},
     }
@@ -146,48 +147,52 @@ async def reformulate(query: str) -> list[str]:
     return out
 
 
+MIN_SCORE = 1
+MAX_SCORE = 3
+
 _SELECT_SCHEMA = {
     "type": "object",
-    "properties": {"relevant": {"type": "array", "items": {"type": "integer"}}},
+    "properties": {
+        "relevant": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"index": {"type": "integer"}, "score": {"type": "integer"}},
+                "required": ["index", "score"],
+            },
+        }
+    },
     "required": ["relevant"],
 }
 
 
-async def select_evidence(query: str, items: list[str]) -> list[int]:
+async def select_evidence(query: str, items: list[str]) -> list[tuple[int, int]]:
     if not items:
         return []
     listing = "\n\n".join(f"[{index}] {item}" for index, item in enumerate(items))
     data = await call_slm(f"{load_prompt('evidence_filter')}\nquestion: {query}\nevidence:\n{listing}", _SELECT_SCHEMA)
-    return [index for index in data.get("relevant", []) if isinstance(index, int) and 0 <= index < len(items)]
+    out: list[tuple[int, int]] = []
+    for entry in data.get("relevant", []):
+        if not isinstance(entry, dict):
+            continue
+        index, score = entry.get("index"), entry.get("score")
+        if isinstance(index, int) and 0 <= index < len(items):
+            graded = score if isinstance(score, int) else MIN_SCORE
+            out.append((index, min(max(graded, MIN_SCORE), MAX_SCORE)))
+    return out
 
 
-_UNIFY_SCHEMA = {
+_MERGE_SCHEMA = {
     "type": "object",
-    "properties": {
-        "selected": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"id": {"type": "integer"}, "tier": {"type": "integer"}},
-                "required": ["id", "tier"],
-            },
-        }
-    },
-    "required": ["selected"],
+    "properties": {"summary": {"type": "string"}},
+    "required": ["summary"],
 }
 
 
-async def unify_evidence(query: str, items: list[str]) -> list[tuple[int, int]]:
-    if not items:
-        return []
+async def merge_evidence(query: str, items: list[str]) -> str:
     listing = "\n\n".join(f"[{index}] {item}" for index, item in enumerate(items))
-    data = await call_slm(f"{load_prompt('evidence_unify')}\nquestion: {query}\nevidence:\n{listing}", _UNIFY_SCHEMA)
-    out: list[tuple[int, int]] = []
-    for entry in data.get("selected", []):
-        index, tier = entry.get("id"), entry.get("tier")
-        if isinstance(index, int) and 0 <= index < len(items) and tier in {1, 2}:
-            out.append((index, tier))
-    return out
+    data = await call_slm(f"{load_prompt('evidence_merge')}\nquestion: {query}\npassages:\n{listing}", _MERGE_SCHEMA)
+    return str(data.get("summary", ""))
 
 
 _QUERIES_SCHEMA = {

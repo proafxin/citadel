@@ -3,7 +3,7 @@ import logging
 import re
 import traceback
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import starmap
 from typing import Any
 
@@ -16,13 +16,13 @@ from sqlalchemy.types import TypeEngine
 
 from citadel.db import get_sessionmaker
 from citadel.llm import (
-    SLM_MAX_TOKENS,
+    SYNTH_MAX_TOKENS,
     count_tokens,
     count_tokens_batch,
+    merge_evidence,
     reformulate,
     select_evidence,
     synthesize,
-    unify_evidence,
     write_queries,
 )
 from citadel.models.table import TableRow
@@ -32,10 +32,10 @@ logger = logging.getLogger(__name__)
 
 STATEMENT_TIMEOUT_MS = 3000
 CTX_TOKENS = 32768
-OUT_TOKENS = SLM_MAX_TOKENS
+OUT_TOKENS = SYNTH_MAX_TOKENS
 BUDGET = CTX_TOKENS - OUT_TOKENS - 2048
+RESULTS_BUDGET = BUDGET // 2  # tabular results are exact: reserve up to half the window before reducing text
 EARLY_STOP_N = 3
-UNIFY_MAX_ITEMS = 64
 SCHEMA_SAMPLES = 3
 SQL_ROW_CAP = 10_000  # hard ceiling on rows any generated query may return, so a broad SELECT can't pull a whole table
 _PG = postgresql.dialect()
@@ -187,16 +187,16 @@ def _fit(counts: list[int], start: int, budget: int) -> int:
     return len(counts) - start
 
 
-async def _filter(question: str, items: list[str]) -> list[int]:
+async def _filter(question: str, items: list[str]) -> list[tuple[int, int]]:
     counts = await asyncio.to_thread(count_tokens_batch, items)
-    kept: list[int] = []
+    kept: list[tuple[int, int]] = []
     start = 0
     empty = 0
     while start < len(items):
         size = max(1, _fit(counts, start, BUDGET))
         chosen = await select_evidence(question, items[start : start + size])
         if chosen:
-            kept.extend(start + index for index in chosen)
+            kept.extend((start + index, score) for index, score in chosen)
             empty = 0
         else:
             empty += 1
@@ -214,12 +214,6 @@ def _result_render(result: SqlResult) -> str:
     shown = len(result.rows)
     head = f"[{result.label}]" if shown >= result.total else f"[{result.label}] showing {shown} of {result.total} rows"
     return "\n".join([head, " | ".join(result.columns), *(_row_text(row) for row in result.rows)])
-
-
-def _result_summary(result: SqlResult) -> str:
-    sample = result.rows[:SCHEMA_SAMPLES]
-    header = f"[{result.label}] {result.total} rows"
-    return "\n".join([header, " | ".join(result.columns), *(_row_text(row) for row in sample)])
 
 
 def _fit_results(results: list[SqlResult], budget: int) -> list[SqlResult]:
@@ -245,42 +239,97 @@ def _fit_results(results: list[SqlResult], budget: int) -> list[SqlResult]:
     return [SqlResult(r.label, r.columns, kept[index], r.total) for index, r in enumerate(results) if kept[index]]
 
 
-def _fit_evidence(
-    passages: list[tuple[Passage, int]], results: list[tuple[SqlResult, int]], budget: int
-) -> tuple[list[Passage], list[SqlResult]]:
-    final_passages: list[Passage] = []
-    final_results: list[SqlResult] = []
+@dataclass
+class _Evidence:
+    text: str
+    sources: list[str]
+    tokens: int
+    score: int
+    section_id: int | None
+    document_id: int
+
+
+def _group_key(evidence: _Evidence, level: int) -> object:
+    # level 0 merges within a section (siblings), level 1 within a document, level 2+ merges anything. escalating the
+    # grain only when a finer merge did not free enough keeps "do not summarize a summary" as far as the budget allows
+    if level == 0:
+        return evidence.section_id
+    if level == 1:
+        return evidence.document_id
+    return 0
+
+
+def _chunk_by_tokens(items: list[_Evidence], budget: int) -> list[list[_Evidence]]:
+    # a sibling group larger than one merge call's context is split so each call fits; an item bigger than budget on
+    # its own goes alone (a single oversized passage is summarized by itself). all chunks stay within the one group
+    chunks: list[list[_Evidence]] = []
+    current: list[_Evidence] = []
     used = 0
-    for tier in (1, 2):
-        fitted = _fit_results([result for result, rank in results if rank == tier], budget - used)
-        final_results.extend(fitted)
-        used += sum(count_tokens(_result_render(result)) for result in fitted)
-        for passage, rank in passages:
-            if rank != tier:
-                continue
-            cost = count_tokens(passage.text)
-            if used + cost > budget:
-                break
-            final_passages.append(passage)
-            used += cost
-    return final_passages, final_results
+    for item in items:
+        if current and used + item.tokens > budget:
+            chunks.append(current)
+            current, used = [], 0
+        current.append(item)
+        used += item.tokens
+    if current:
+        chunks.append(current)
+    return chunks
 
 
-async def _unify(
-    question: str, passages: list[Passage], results: list[SqlResult]
-) -> tuple[list[tuple[Passage, int]], list[tuple[SqlResult, int]]]:
-    items = [passage.text for passage in passages] + [_result_summary(result) for result in results]
-    counts = await asyncio.to_thread(count_tokens_batch, items)
-    tiers: list[tuple[int, int]] = []
-    start = 0
-    while start < len(items):
-        size = min(max(1, _fit(counts, start, BUDGET)), UNIFY_MAX_ITEMS)
-        batch = await unify_evidence(question, items[start : start + size])
-        tiers.extend((start + index, tier) for index, tier in batch)
-        start += size
-    passages_t = [(passages[index], tier) for index, tier in tiers if index < len(passages)]
-    results_t = [(results[index - len(passages)], tier) for index, tier in tiers if index >= len(passages)]
-    return passages_t, results_t
+async def _merge_chunk(question: str, chunk: list[_Evidence]) -> _Evidence:
+    summary = await merge_evidence(question, [evidence.text for evidence in chunk])
+    sources = [source for evidence in chunk for source in evidence.sources]
+    if summary:
+        tokens = count_tokens(summary)
+    else:  # merge failed: concatenate verbatim so no source is lost (tokens do not shrink → reduce escalates)
+        summary = "\n".join(evidence.text for evidence in chunk)
+        tokens = sum(evidence.tokens for evidence in chunk)
+    return _Evidence(summary, sources, tokens, max(e.score for e in chunk), chunk[0].section_id, chunk[0].document_id)
+
+
+async def _reduce(question: str, evidences: list[_Evidence], budget: int, level: int) -> list[_Evidence]:
+    total = sum(evidence.tokens for evidence in evidences)
+    if total <= budget:
+        return evidences
+    overflow = total - budget
+    order = sorted(range(len(evidences)), key=lambda index: (evidences[index].score, -evidences[index].tokens))
+    # merging can only shrink, so freeing `overflow` needs at least `overflow` tokens of material on the table. mark the
+    # lowest-score evidence up to that; if the merge does not shrink enough, the recursion escalates and marks more
+    marked: set[int] = set()
+    marked_tokens = 0
+    for index in order:
+        marked.add(index)
+        marked_tokens += evidences[index].tokens
+        if marked_tokens >= overflow:
+            break
+    groups: dict[object, list[_Evidence]] = {}
+    for index in marked:
+        groups.setdefault(_group_key(evidences[index], level), []).append(evidences[index])
+    chunks = [chunk for items in groups.values() for chunk in _chunk_by_tokens(items, BUDGET)]
+    merged = await asyncio.gather(*(_merge_chunk(question, chunk) for chunk in chunks))
+    survivors = [evidences[index] for index in range(len(evidences)) if index not in marked]
+    combined = survivors + list(merged)
+    if sum(evidence.tokens for evidence in combined) >= total:  # no progress (merge produced nothing shorter) → stop
+        return combined
+    return await _reduce(question, combined, budget, level + 1)
+
+
+async def _reduce_passages(question: str, passages: list[Passage], budget: int) -> list[_Evidence]:
+    if not passages:
+        return []
+    counts = await asyncio.to_thread(count_tokens_batch, [passage.text for passage in passages])
+    evidences = [
+        _Evidence(
+            passage.text,
+            [passage.content_id],
+            counts[index],
+            passage.score,
+            passage.section_id,
+            passage.document_id,
+        )
+        for index, passage in enumerate(passages)
+    ]
+    return await _reduce(question, evidences, budget, 0)
 
 
 async def answer(question: str, library_id: int) -> AsyncIterator[str]:
@@ -289,8 +338,12 @@ async def answer(question: str, library_id: int) -> AsyncIterator[str]:
     hits = await retrieve(queries, library_id)
     passages = await load_passages(hits.text)
     candidates = await load_tables(hits.tables)
-    kept_passages = [passages[index] for index in await _filter(question, [passage.text for passage in passages])]
-    kept_tables = [candidates[index] for index in await _filter(question, [_table_rep(table) for table in candidates])]
+    kept_passages = [
+        replace(passages[index], score=score)
+        for index, score in await _filter(question, [passage.text for passage in passages])
+    ]
+    table_scores = await _filter(question, [_table_rep(table) for table in candidates])
+    kept_tables = [candidates[index] for index, _ in table_scores]
     results = await _aggregate(question, kept_tables)
     logger.info(
         "query %r variants=%d text_hits=%d table_hits=%d kept_passages=%d kept_tables=%d results=%d",
@@ -307,15 +360,21 @@ async def answer(question: str, library_id: int) -> AsyncIterator[str]:
         [passage.content_id for passage in kept_passages],
         [table.content_id for table in kept_tables],
     )
-    passages_t, results_t = await _unify(question, kept_passages, results)
-    final_passages, final_results = _fit_evidence(passages_t, results_t, BUDGET)
-    rendered = [_result_render(result) for result in final_results]
+    fitted_results = _fit_results(results, RESULTS_BUDGET)
+    rendered = [_result_render(result) for result in fitted_results]
+    passage_budget = max(BUDGET - sum(count_tokens(block) for block in rendered), 0)
+    evidences = await _reduce_passages(question, kept_passages, passage_budget)
+    covered = {source for evidence in evidences for source in evidence.sources}
+    uncovered = [passage.content_id for passage in kept_passages if passage.content_id not in covered]
+    if uncovered:
+        logger.error("reduction dropped sources uncovered=%d ids=%s", len(uncovered), uncovered)
     logger.info(
-        "synthesis passages=%d results=%d passage_ids=%s sources=%s",
-        len(final_passages),
-        len(final_results),
-        [passage.content_id for passage in final_passages],
-        [result.label for result in final_results],
+        "synthesis evidences=%d results=%d merged=%d source_count=%d uncovered=%d",
+        len(evidences),
+        len(fitted_results),
+        sum(1 for evidence in evidences if len(evidence.sources) > 1),
+        len(covered),
+        len(uncovered),
     )
-    async for token in synthesize(question, [passage.text for passage in final_passages], rendered):
+    async for token in synthesize(question, [evidence.text for evidence in evidences], rendered):
         yield token

@@ -137,6 +137,9 @@ class Retrieval:
 class Passage:
     content_id: str
     text: str
+    document_id: int
+    section_id: int | None
+    score: int = 0
 
 
 @dataclass
@@ -334,7 +337,14 @@ async def load_passages(content_ids: list[str]) -> list[Passage]:
     async with get_sessionmaker()() as session:
         rows = list(
             await session.execute(
-                select(ContentNode.content_id, Document.filename, ContentNode.page_no, ContentNode.search_text)
+                select(
+                    ContentNode.content_id,
+                    ContentNode.document_id,
+                    ContentNode.parent_id,
+                    ContentNode.page_no,
+                    ContentNode.search_text,
+                    Document.filename,
+                )
                 .join(Document, ContentNode.document_id == Document.id)
                 .where(ContentNode.content_id.in_(content_ids))
             )
@@ -345,7 +355,9 @@ async def load_passages(content_ids: list[str]) -> list[Passage]:
         row = lookup.get(content_id)
         if row is not None and row.search_text:
             page = f" p{row.page_no}" if row.page_no else ""
-            passages.append(Passage(content_id, f"[{row.filename}{page}] {row.search_text}"))
+            passages.append(
+                Passage(content_id, f"[{row.filename}{page}] {row.search_text}", row.document_id, row.parent_id)
+            )
     return passages
 
 
