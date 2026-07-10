@@ -153,37 +153,13 @@ def extract_html_table(html: str) -> MaterializedTable:
     return _grid_table(grid, _header_count(table), caption)
 
 
-_LATEX_MARKERS = ("\\(", "\\[", "\\frac", "\\sum", "\\int", "\\sqrt", "\\left", "\\leq", "\\geq", "$$")
-_MATH_CHARS = frozenset("∑∫≤≥≠±∞√αβγδεφζηθλμπσωτχψ→∈∀∃∂∇⊂⊆∪∩·×÷")
-_EQ_NUMBER = re.compile(r"^\(\d+\)$")  # displayed-equation numbering, e.g. "(483)" — a cell of its own in math texts
+def html_to_text(html: str) -> str:
+    return BeautifulSoup(html, "lxml").get_text(separator=" ", strip=True)
 
 
 def grid_from_html(html: str) -> list[list[str]]:
     table = BeautifulSoup(html, "lxml").find("table")
     return _grid(table) if isinstance(table, Tag) else []
-
-
-def _is_math_cell(cell: str) -> bool:
-    value = cell.strip()
-    if any(marker in value for marker in _LATEX_MARKERS) or _EQ_NUMBER.match(value):
-        return True
-    return sum(1 for char in value if char in _MATH_CHARS) >= 2  # unicode math without any LaTeX command
-
-
-def classify_grid(grid: list[list[str]]) -> str:
-    # the visual model tags displayed math, prose blocks and empty regions as "table". structuring those yields a
-    # degenerate col0..colN relation that pollutes the table store and the retrieval table channel, and there is no
-    # header to find because there is no table. decide what the region really is, deterministically, before structuring.
-    # equation requires EVERY cell to be math: a real table may hold math in its cells (a place-value table of 10^n, a
-    # symbol/definition table) but always carries at least one word-y cell — a header or a gloss. majority would eat it.
-    cells = [cell for row in grid for cell in row if cell.strip()]
-    if not cells:
-        return "empty"
-    if all(_is_math_cell(cell) for cell in cells):
-        return "equation"
-    if max(len(row) for row in grid) <= 1:  # a single column is never a relation — it is prose, a list or math
-        return "prose"
-    return "table"
 
 
 def _grid_cell(grid: list[list[str]], row: int, col: int) -> str:

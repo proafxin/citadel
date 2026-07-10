@@ -7,7 +7,13 @@ from citadel.db import get_sessionmaker
 from citadel.models.document import Document
 from citadel.models.library import Library
 from citadel.schemas.library import LibraryRead, Tier
-from citadel.services.document import compress_tree, delete_document_tree, load_document_tree, notify_embed
+from citadel.services.document import (
+    compress_tree,
+    delete_document_blocks,
+    delete_document_tree,
+    load_document_tree,
+    notify_embed,
+)
 
 
 def _to_read(library: Library) -> LibraryRead:
@@ -70,6 +76,7 @@ async def delete_library(library_id: int) -> None:
         await session.delete(library)
     for doc_id in doc_ids:
         await asyncio.to_thread(delete_document_tree, doc_id)
+        await asyncio.to_thread(delete_document_blocks, doc_id)
 
 
 async def library_exists(library_id: int) -> bool:

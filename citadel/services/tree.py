@@ -19,20 +19,20 @@ _LIST_MARKER = re.compile(r"^\s*(?:[●○•▪◦‣·*]\s|[-–—]\s|\(?\d{1
 _BULLET_GLYPH = re.compile(r"^\s*[●○•▪◦‣·*\-–—]\s+")
 _HEADING_SPLIT = re.compile(r'(?<=["”:.?)])\s*\n\s*')
 
-_PARATEXT_TYPES = {"header", "footer", "page_number", "page_footnote", "aside_text"}
-_EMPTY_IMAGE_TYPES = {"image", "image_block"}
+PARATEXT_TYPES = {"header", "footer", "page_number", "page_footnote", "aside_text"}
+EMPTY_IMAGE_TYPES = {"image", "image_block"}
 
 
 def split_paratext(blocks: list[Block]) -> tuple[list[Block], dict[int, list[str]]]:
     content: list[Block] = []
     paratext: dict[int, list[str]] = {}
     for block in blocks:
-        if block.type in _PARATEXT_TYPES:
+        if block.type in PARATEXT_TYPES:
             text = (block.text or "").strip()
             if text:
                 paratext.setdefault(block.page_idx + 1, []).append(text)
             continue
-        if block.type in _EMPTY_IMAGE_TYPES and not (block.text or "").strip():
+        if block.type in EMPTY_IMAGE_TYPES and not (block.text or "").strip():
             continue
         content.append(block)
     return content, paratext

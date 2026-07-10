@@ -1,8 +1,8 @@
-"""update models
+"""empty message
 
-Revision ID: 58a3f55c378a
+Revision ID: 93696f429f8c
 Revises: 
-Create Date: 2026-07-06 21:34:54.483720
+Create Date: 2026-07-10 19:30:16.320166
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ from sqlalchemy.dialects import postgresql
 import pgvector.sqlalchemy
 
 # revision identifiers, used by Alembic.
-revision: str = '58a3f55c378a'
+revision: str = '93696f429f8c'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -43,6 +43,9 @@ def upgrade() -> None:
     sa.Column('status', sa.String(), nullable=False),
     sa.Column('processing_started_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('ingest_seconds', sa.Float(), nullable=True),
+    sa.Column('blocks_in', sa.Integer(), nullable=True),
+    sa.Column('nodes_out', sa.Integer(), nullable=True),
+    sa.Column('drops', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
@@ -61,7 +64,7 @@ def upgrade() -> None:
     sa.Column('label', sa.String(), nullable=True),
     sa.Column('bbox', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('search_text', sa.Text(), nullable=True),
-    sa.Column('embedding', pgvector.sqlalchemy.Vector(dim=1024), nullable=True),
+    sa.Column('token_count', sa.Integer(), nullable=True),
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
@@ -82,6 +85,19 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('content_id')
     )
+    op.create_table('embeddings',
+    sa.Column('content_id', sa.String(), nullable=False),
+    sa.Column('library_id', sa.Integer(), nullable=False),
+    sa.Column('type', sa.String(), nullable=False),
+    sa.Column('embedding', pgvector.sqlalchemy.HALFVEC(dim=1024), nullable=False),
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.ForeignKeyConstraint(['content_id'], ['content.content_id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('content_id')
+    )
+    op.create_index(op.f('ix_embeddings_library_id'), 'embeddings', ['library_id'], unique=False)
     op.create_table('equations',
     sa.Column('content_id', sa.String(), nullable=False),
     sa.Column('latex', sa.Text(), nullable=False),
@@ -154,6 +170,8 @@ def downgrade() -> None:
     op.drop_table('paragraphs')
     op.drop_table('lists')
     op.drop_table('equations')
+    op.drop_index(op.f('ix_embeddings_library_id'), table_name='embeddings')
+    op.drop_table('embeddings')
     op.drop_table('codes')
     op.drop_index(op.f('ix_content_parent_id'), table_name='content')
     op.drop_index(op.f('ix_content_document_id'), table_name='content')

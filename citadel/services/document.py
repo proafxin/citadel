@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import zipfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import starmap
 
@@ -20,9 +21,12 @@ from citadel.models.status import DocumentStatus, LibraryStatus
 from citadel.models.table import Table, TableRow
 from citadel.schemas.content import Block
 from citadel.schemas.table import Column
-from citadel.services.excel import MaterializedTable
-from citadel.services.tabular import classify_grid, grid_from_html, stitch_tables, structure_html_tables
+from citadel.services.excel import MaterializedTable, SheetItem, SheetText
+from citadel.services.grid import classify_grid
+from citadel.services.tabular import grid_from_html, html_to_text, stitch_tables, structure_html_tables
 from citadel.services.tree import (
+    EMPTY_IMAGE_TYPES,
+    PARATEXT_TYPES,
     NodeSpec,
     build_search_text,
     build_table_search_text,
@@ -152,7 +156,10 @@ async def _describe_one(
     search_text: str | None,
 ) -> tuple[str, str, str]:
     description = await describe_table(
-        [Column(**column) for column in columns], sample_rows, metadata.get("sheet") or filename
+        [Column(**column) for column in columns],
+        sample_rows,
+        metadata.get("sheet") or filename,
+        metadata.get("formulas"),
     )
     combined = "\n".join(part for part in [search_text or "", description.strip()] if part)
     return content_id, description, combined
@@ -213,7 +220,9 @@ def _reclassify_regions(blocks: list[Block]) -> list[Block]:
         text = " ".join(cell for row in grid for cell in row if cell.strip())
         match classify_grid(grid):
             case "empty":
-                continue
+                salvaged = html_to_text(block.text or "")
+                if salvaged:
+                    kept.append(block.model_copy(update={"type": "text", "text": salvaged}))
             case "equation":
                 kept.append(block.model_copy(update={"type": "equation", "text": text}))
             case "prose":
@@ -301,7 +310,12 @@ async def _insert_tables_bulk(session: AsyncSession, doc_id: int, pairs: list[tu
             "content_id": content_id,
             "document_id": doc_id,
             "columns": [column.model_dump() for column in table.columns],
-            "table_metadata": {"title": table.title, "caption": table.caption, "notes": table.notes},
+            "table_metadata": {
+                "title": table.title,
+                "caption": table.caption,
+                "notes": table.notes,
+                "formulas": table.formulas,
+            },
             "description": table.description,
             "n_rows": table.n_rows,
             "sample_rows": table.sample_rows,
@@ -320,6 +334,40 @@ async def _insert_tables_bulk(session: AsyncSession, doc_id: int, pairs: list[tu
         await session.execute(insert(TableRow), row_payload)
 
 
+DROP_REASONS = frozenset({"paratext", "empty_image", "empty_block"})
+
+
+@dataclass
+class _Prepared:
+    stitched: list[Block]
+    paratext: dict[int, list[str]]
+    drops: dict[str, int]
+
+
+def _drop_counts(blocks: list[Block], content: list[Block], reclassified: list[Block]) -> dict[str, int]:
+    counts = {
+        "paratext": sum(1 for block in blocks if block.type in PARATEXT_TYPES),
+        "empty_image": sum(1 for block in blocks if block.type in EMPTY_IMAGE_TYPES and not (block.text or "").strip()),
+        "empty_block": len(content) - len(reclassified),
+    }
+    unknown = set(counts) - DROP_REASONS
+    if unknown:
+        msg = f"undeclared drop reason(s) {sorted(unknown)}"
+        raise ValueError(msg)
+    negative = sorted(reason for reason, count in counts.items() if count < 0)
+    if negative:
+        msg = f"drop accounting is broken for {negative}"
+        raise ValueError(msg)
+    return {reason: count for reason, count in counts.items() if count}
+
+
+def _prepare_blocks(blocks: list[Block]) -> _Prepared:
+    content_blocks, paratext = split_paratext(blocks)
+    reclassified = _reclassify_regions(content_blocks)  # math/prose/empty must not reach table structuring
+    drops = _drop_counts(blocks, content_blocks, reclassified)
+    return _Prepared(stitch_tables(reclassified), paratext, drops)
+
+
 async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentStatus) -> None:
     async with get_sessionmaker()() as session:
         document = await session.get(Document, doc_id)
@@ -327,12 +375,11 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentS
             return
         library = await session.get_one(Library, document.library_id)
         library_id, filename, library_name = document.library_id, document.filename, library.name
-    content_blocks, paratext = split_paratext(blocks)
-    content_blocks = _reclassify_regions(content_blocks)  # math/prose/empty must not reach table structuring
-    stitched = stitch_tables(content_blocks)
-    table_counts, table_queue = await _resolve_tables(stitched)
-    specs = list(build_tree(stitched, library_id, doc_id, table_counts))
-    search_text = build_search_text(specs, library_name, filename, paratext)
+    await asyncio.to_thread(persist_document_blocks, doc_id, blocks)
+    prepared = _prepare_blocks(blocks)
+    table_counts, table_queue = await _resolve_tables(prepared.stitched)
+    specs = list(build_tree(prepared.stitched, library_id, doc_id, table_counts))
+    search_text = build_search_text(specs, library_name, filename, prepared.paratext)
     tables = iter(table_queue)
     async with get_sessionmaker()() as session, session.begin():
         # per-doc advisory lock: serialize concurrent/redelivered merges of the same document so the "already
@@ -344,6 +391,9 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentS
             return
         document.status = status
         document.ingest_seconds = _ingest_seconds(document)
+        document.blocks_in = len(blocks)
+        document.nodes_out = len(specs)
+        document.drops = prepared.drops
         if await session.scalar(select(ContentNode.id).where(ContentNode.document_id == doc_id).limit(1)) is not None:
             await _maybe_notify_embed(session, library_id)
             return
@@ -368,9 +418,25 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentS
         await _maybe_notify_embed(session, library_id)
 
 
-async def save_sheet_tables(
-    doc_id: int, sheet_no: int, sheet_name: str, tables: list[tuple[int, MaterializedTable]]
+def _add_sheet_text(
+    session: AsyncSession, item: SheetText, content_id: str, doc_id: int, parent_id: int, sheet_no: int, ordinal: int
 ) -> None:
+    session.add(
+        ContentNode(
+            content_id=content_id,
+            document_id=doc_id,
+            parent_id=parent_id,
+            sheet_no=sheet_no,
+            ordinal=ordinal,
+            type="text",
+            search_text=item.text,
+            token_count=_token_count(item.text),
+        )
+    )
+    session.add(Paragraph(content_id=content_id, text=item.text))
+
+
+async def save_sheet_tables(doc_id: int, sheet_no: int, sheet_name: str, items: list[tuple[int, SheetItem]]) -> None:
     async with get_sessionmaker()() as session, session.begin():
         existing = await session.scalar(
             select(ContentNode.id).where(ContentNode.document_id == doc_id, ContentNode.sheet_no == sheet_no).limit(1)
@@ -390,8 +456,12 @@ async def save_sheet_tables(
         )
         session.add(sheet)
         await session.flush()
-        for ordinal, table in tables:
+        for ordinal, item in items:
             content_id = make_content_id(document.library_id, doc_id, sheet_no, ordinal)
+            if isinstance(item, SheetText):
+                _add_sheet_text(session, item, content_id, doc_id, sheet.id, sheet_no, ordinal)
+                continue
+            table = item
             node_search = build_table_search_text(
                 library.name,
                 document.filename,
@@ -423,6 +493,7 @@ async def save_sheet_tables(
                     "title": table.title,
                     "caption": table.caption,
                     "notes": table.notes,
+                    "formulas": table.formulas,
                 },
                 description=table.description,
                 n_rows=table.n_rows,
@@ -534,6 +605,31 @@ async def build_document_tree(session: AsyncSession, document: Document) -> dict
 
 def _tree_key(doc_id: int) -> str:
     return f"{doc_id}.json.zst"
+
+
+def _blocks_key(doc_id: int) -> str:
+    return f"blocks/{doc_id}.json.zst"
+
+
+def compress_blocks(blocks: list[Block]) -> bytes:
+    payload = [block.model_dump() for block in blocks]
+    return zstandard.ZstdCompressor().compress(json.dumps(payload).encode())
+
+
+def persist_document_blocks(doc_id: int, blocks: list[Block]) -> None:
+    put_object(_blocks_key(doc_id), compress_blocks(blocks))
+
+
+def load_document_blocks(doc_id: int) -> list[Block] | None:
+    raw = get_object(_blocks_key(doc_id))
+    if raw is None:
+        return None
+    payload = json.loads(zstandard.ZstdDecompressor().decompress(raw))
+    return [Block.model_validate(item) for item in payload]
+
+
+def delete_document_blocks(doc_id: int) -> None:
+    delete_object(_blocks_key(doc_id))
 
 
 def compress_tree(tree: dict) -> bytes:

@@ -27,6 +27,7 @@ dependencies = [
     "polars>=1.42.1",
     "protobuf>=7.35.0",
     "pypdfium2>=5.11.0",
+    "python-pptx>=1.0.2",
     "rank-bm25>=0.2.2",
     "rapidocr-onnxruntime>=1.4.4",
     "redis>=8.0.1",

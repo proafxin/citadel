@@ -97,6 +97,20 @@ def _keep_image(element: Tag) -> bool:
     return not (width is not None and height is not None and width < 32 and height < 32)
 
 
+def _anchor(element: Tag) -> str:
+    text = element.get_text(separator=" ", strip=True)
+    href = element.get("href")
+    url = href.strip() if isinstance(href, str) else ""
+    if not url or url.startswith("#") or url == text:
+        return text
+    return f"{text} ({url})" if text else url
+
+
+def _inline_links(soup: BeautifulSoup) -> None:
+    for anchor in soup.find_all("a"):
+        anchor.string = _anchor(anchor)
+
+
 def _latex(element: Tag) -> str:
     annotation = element.find("annotation", attrs={"encoding": "application/x-tex"})
     if annotation is not None:
@@ -163,6 +177,7 @@ def _walk(element: Tag, blocks: list[Block]) -> None:
 
 def parse_html(data: bytes) -> list[Block]:
     soup = BeautifulSoup(data, "lxml")
+    _inline_links(soup)
     blocks: list[Block] = []
     _walk(soup.body or soup, blocks)
     return blocks

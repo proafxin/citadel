@@ -48,10 +48,11 @@ from citadel.services.document import (
     save_document_tree,
     save_sheet_tables,
 )
-from citadel.services.excel import SheetExtraction, extract_tables, load_all_sheets, sheet_names
+from citadel.services.excel import SheetExtraction, extract_sheet_content, load_all_sheets, sheet_names
 from citadel.services.html import parse_html
 from citadel.services.library import library_exists
 from citadel.services.pdf import MAX_IMAGE_SIDE, count_pdf_pages, downscale, extract_layer_by_bbox, render_pdf_page
+from citadel.services.presentation import parse_pptx
 from citadel.services.tabular import extract_json_tables, structure_csv_tables
 from citadel.utils import normalize_file
 from config import CPU_QUARTER, CPU_THIRD, get_settings
@@ -80,7 +81,6 @@ MINERU_CLIENTS = (
 MINERU_CONN_PER_CLIENT = 12  # sockets per client (reused). clients x per-client = 192 total = OCR_CONCURRENCY, bounded
 REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connection, never open unbounded sockets
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
-DIGITAL_RENDER_DPI = 110  # office→pdf ONLY (provably born-digital): image is layout-only, text from the PDF layer → render small. validate layout still holds; regular pdf stays at RENDER_DPI
 PAGINATE_CONCURRENCY = CPU_QUARTER  # pdfium process-pool workers, one dedicated pdfium per process
 RENDER_CONCURRENCY = CPU_QUARTER  # in-flight render jobs; matches the pdfium pool width so pages never queue in RAM
 LAYER_CONCURRENCY = CPU_QUARTER  # dedicated pdfium pool for born-digital text-layer extraction, isolated from render
@@ -339,28 +339,46 @@ def _cap_image_bytes(image_bytes: bytes) -> bytes:
         return out.getvalue()
 
 
+async def _paginate_text(doc_id: str, filename: str) -> None:
+    data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
+    text = data.decode("utf-8", errors="replace")
+    blocks = [Block(type="text", page_idx=0, text=part.strip()) for part in re.split(r"\n\s*\n", text) if part.strip()]
+    await get_redis().hset(f"doc:{doc_id}", "page_count", 1)
+    await record_page(doc_id, 0, blocks)
+    logger.info("paginate file=%s text paragraphs=%d", filename, len(blocks))
+
+
+async def _paginate_html(doc_id: str, filename: str) -> None:
+    data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
+    blocks = await asyncio.to_thread(parse_html, data)
+    await get_redis().hset(f"doc:{doc_id}", "page_count", 1)
+    await record_page(doc_id, 0, blocks)
+    logger.info("paginate file=%s html blocks=%d", filename, len(blocks))
+
+
+async def _paginate_pptx(doc_id: str, filename: str) -> None:
+    # a slide is the page unit: page_idx = slide index, so content ids line up with every other paginated lane. an
+    # empty deck still records one empty page, otherwise no unit job fires and the doc never reaches merge.
+    data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
+    slides = await asyncio.to_thread(parse_pptx, data)
+    await get_redis().hset(f"doc:{doc_id}", "page_count", max(len(slides), 1))
+    for index, slide_blocks in enumerate(slides or [[]]):
+        await record_page(doc_id, index, slide_blocks)
+    logger.info("paginate file=%s pptx slides=%d", filename, len(slides))
+
+
+_BLOCK_PAGINATORS = {"text": _paginate_text, "html": _paginate_html, "pptx": _paginate_pptx}
+
+
 async def handle_paginate(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     kind = fields["kind"]
     redis = get_redis()
     await redis.hset(f"doc:{doc_id}", "state", "paginating")
     await redis.hsetnx(f"doc:{doc_id}", "t_paginate", time.time())
-    if kind == "text":
-        data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
-        text = data.decode("utf-8", errors="replace")
-        blocks = [
-            Block(type="text", page_idx=0, text=part.strip()) for part in re.split(r"\n\s*\n", text) if part.strip()
-        ]
-        await redis.hset(f"doc:{doc_id}", "page_count", 1)
-        await record_page(doc_id, 0, blocks)
-        logger.info("paginate file=%s text paragraphs=%d", fields["filename"], len(blocks))
-        return
-    if kind == "html":
-        data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
-        blocks = await asyncio.to_thread(parse_html, data)
-        await redis.hset(f"doc:{doc_id}", "page_count", 1)
-        await record_page(doc_id, 0, blocks)
-        logger.info("paginate file=%s html blocks=%d", fields["filename"], len(blocks))
+    paginator = _BLOCK_PAGINATORS.get(kind)
+    if paginator is not None:
+        await paginator(doc_id, fields["filename"])
         return
     if kind.startswith("image:"):
         data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
@@ -387,7 +405,7 @@ async def handle_paginate(fields: dict[str, str]) -> None:
             await redis.xadd(STREAM_TABLES, {"doc_id": doc_id, "kind": kind, "sheet_no": 0})
             logger.info("paginate file=%s kind=%s", fields["filename"], kind)
         return
-    dpi = DIGITAL_RENDER_DPI if kind == "office-pdf" else RENDER_DPI
+    dpi = RENDER_DPI
     count = await _run_pool(get_paginate_pool(), count_pdf_pages, str(blob_path(doc_id)), timeout=RENDER_TIMEOUT)
     if count <= 0:  # empty/unreadable pdf: no page units will ever be recorded, so drive the doc straight to merge
         await redis.hset(f"doc:{doc_id}", "page_count", 0)
@@ -528,18 +546,18 @@ async def handle_tabular(fields: dict[str, str]) -> None:
         return  # doc already finished → a reclaimed sheet job is a safe no-op
     if kind == "xlsx":
         sheet = await _get_sheet(doc_id, sheet_no)
-        tables = await extract_tables(sheet)
+        items = await extract_sheet_content(sheet)
         sheet_name = sheet.sheet_name
     else:
         data = await asyncio.to_thread(path.read_bytes)
         filename = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
         if kind == "json":
-            tables = await asyncio.to_thread(extract_json_tables, data, filename.rsplit(".", 1)[0] or "root")
+            items = await asyncio.to_thread(extract_json_tables, data, filename.rsplit(".", 1)[0] or "root")
         else:
             separator = "\t" if kind == "tsv" else ","
-            tables = list(enumerate(await structure_csv_tables(data, separator), start=1))
+            items = list(enumerate(await structure_csv_tables(data, separator), start=1))
         sheet_name = filename
-    await save_sheet_tables(int(doc_id), sheet_no, sheet_name, tables)
+    await save_sheet_tables(int(doc_id), sheet_no, sheet_name, items)
     await record_sheet(doc_id, sheet_no)
 
 

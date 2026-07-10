@@ -89,10 +89,14 @@ _DESCRIPTION_SCHEMA = {
 }
 
 
-async def describe_table(columns: list[Column], sample_rows: list[list], context: str) -> str:
+async def describe_table(
+    columns: list[Column], sample_rows: list[list], context: str, formulas: list[str] | None = None
+) -> str:
     header = " | ".join(column.header or f"col{index}" for index, column in enumerate(columns))
     rows = "\n".join(" | ".join("" if value is None else str(value) for value in row) for row in sample_rows)
     prompt = f"{load_prompt('table_description')}\nsource: {context}\ncolumns: {header}\nsample rows:\n{rows}"
+    if formulas:
+        prompt += "\ncalculations used in this table:\n" + "\n".join(formulas)
     data = await call_slm(prompt, _DESCRIPTION_SCHEMA)
     return str(data.get("description", ""))
 

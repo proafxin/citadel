@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
@@ -7,11 +8,13 @@ from openpyxl.cell.cell import Cell as OpenpyxlCell
 from openpyxl.worksheet.worksheet import Worksheet
 
 from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
+from citadel.services.grid import classify_grid, grid_text
 from citadel.tabular.infer import merge_spurious_splits, predict_pooled, structure_from_mask
 
 type RawCellValue = str | int | float | bool | datetime | None
 
 SAMPLE_TABLE_ROWS = 10
+_A1_REF = re.compile(r"(\$?[A-Za-z]{1,3})\$?\d+")
 
 
 @dataclass
@@ -23,6 +26,12 @@ class Cell:
     bold: bool
     filled: bool
     bordered: bool
+    formula: str | None = None
+    comment: str | None = None
+
+
+def cell_value(cell: Cell) -> RawCellValue:
+    return cell.value if cell.value is not None else cell.formula
 
 
 @dataclass
@@ -64,6 +73,16 @@ class MaterializedTable:
     notes: list[str]
     description: str
     anchors: dict
+    formulas: list[str] | None = None
+
+
+@dataclass
+class SheetText:
+    sheet_no: int
+    text: str
+
+
+type SheetItem = MaterializedTable | SheetText
 
 
 def _style_flags(cell: OpenpyxlCell) -> tuple[bool, bool, bool]:
@@ -77,22 +96,38 @@ def _style_flags(cell: OpenpyxlCell) -> tuple[bool, bool, bool]:
     return bold, filled, bordered
 
 
-def _capture_cells(worksheet: Worksheet) -> list[Cell]:
+def _cell_comment(cell: OpenpyxlCell) -> str | None:
+    if cell.comment is None:
+        return None
+    return cell.comment.text.strip() or None
+
+
+def _cell_formula(cell: OpenpyxlCell) -> str | None:
+    value = cell.value
+    return value if isinstance(value, str) and value.startswith("=") else None
+
+
+def _capture_cells(values_sheet: Worksheet, formulas_sheet: Worksheet) -> list[Cell]:
     cells: list[Cell] = []
-    for row in worksheet.iter_rows():
+    for row in formulas_sheet.iter_rows():
         for cell in row:
-            if cell.value is None:
+            formula = _cell_formula(cell)
+            comment = _cell_comment(cell)
+            value = values_sheet.cell(row=cell.row, column=cell.column).value
+            if value is None and formula is None and comment is None:
                 continue
             bold, filled, bordered = _style_flags(cell)
             cells.append(
                 Cell(
                     row=cell.row,
                     col=cell.column,
-                    value=cell.value,
+                    value=value,
                     number_format=cell.number_format or "General",
                     bold=bold,
                     filled=filled,
                     bordered=bordered,
+                    formula=formula,
+                    comment=comment,
                 )
             )
     return cells
@@ -105,14 +140,14 @@ def _capture_merges(worksheet: Worksheet) -> list[MergedRange]:
     ]
 
 
-def extract_sheet(worksheet: Worksheet, sheet_no: int) -> SheetExtraction:
+def extract_sheet(values_sheet: Worksheet, formulas_sheet: Worksheet, sheet_no: int) -> SheetExtraction:
     return SheetExtraction(
         sheet_no=sheet_no,
-        sheet_name=worksheet.title,
-        max_row=worksheet.max_row or 0,
-        max_col=worksheet.max_column or 0,
-        cells=_capture_cells(worksheet),
-        merges=_capture_merges(worksheet),
+        sheet_name=formulas_sheet.title,
+        max_row=formulas_sheet.max_row or 0,
+        max_col=formulas_sheet.max_column or 0,
+        cells=_capture_cells(values_sheet, formulas_sheet),
+        merges=_capture_merges(formulas_sheet),
     )
 
 
@@ -125,13 +160,19 @@ def sheet_names(data: bytes) -> list[str]:
 
 
 def load_all_sheets(data: bytes) -> list[SheetExtraction]:
-    # parse the workbook ONCE and extract every sheet: styles need the full (non-read_only) load, so re-loading per
-    # sheet would re-parse the whole file N times. callers cache the result per document and index by sheet_no.
-    workbook = openpyxl.load_workbook(BytesIO(data), data_only=True)
+    # two loads: data_only=True yields cached values but no formulas, data_only=False yields formulas but no values.
+    # openpyxl offers no mode that gives both, and a generated workbook has NO cached values at all — reading only the
+    # values load silently skips every formula cell. callers cache the result per document and index by sheet_no.
+    values_workbook = openpyxl.load_workbook(BytesIO(data), data_only=True)
+    formulas_workbook = openpyxl.load_workbook(BytesIO(data), data_only=False)
     try:
-        return [extract_sheet(worksheet, sheet_no) for sheet_no, worksheet in enumerate(workbook.worksheets, start=1)]
+        return [
+            extract_sheet(values_workbook.worksheets[index], formulas_sheet, index + 1)
+            for index, formulas_sheet in enumerate(formulas_workbook.worksheets)
+        ]
     finally:
-        workbook.close()
+        values_workbook.close()
+        formulas_workbook.close()
 
 
 def _runs(indices: list[int]) -> list[tuple[int, int]]:
@@ -171,7 +212,27 @@ def find_regions(sheet: SheetExtraction) -> list[Region]:
 
 
 def _value_map(cells: list[Cell]) -> dict[tuple[int, int], RawCellValue]:
-    return {(cell.row, cell.col): cell.value for cell in cells}
+    return {(cell.row, cell.col): cell_value(cell) for cell in cells}
+
+
+def region_comments(region: Region) -> list[str]:
+    ordered = sorted(region.cells, key=lambda cell: (cell.row, cell.col))
+    return [cell.comment for cell in ordered if cell.comment]
+
+
+def _formula_shape(formula: str) -> str:
+    return _A1_REF.sub(r"\1#", formula)
+
+
+def region_formulas(region: Region) -> list[str]:
+    # a column is ONE formula pattern repeated down its rows with shifted refs, so "=B2*C2" and "=B3*C3" are the same
+    # fact. dedupe on the row-stripped shape and keep the first real formula per shape: N rows collapse to one entry
+    ordered = sorted(region.cells, key=lambda cell: (cell.row, cell.col))
+    by_shape: dict[str, str] = {}
+    for cell in ordered:
+        if cell.formula:
+            by_shape.setdefault(_formula_shape(cell.formula), cell.formula)
+    return list(by_shape.values())
 
 
 def _infer_dtype(values: list[RawCellValue]) -> ColumnDType:
@@ -253,9 +314,10 @@ def apply_structure(region: Region, structure: TableStructure, sheet_no: int) ->
         n_rows=len(rows),
         title=structure.title,
         caption=structure.caption,
-        notes=structure.notes or [],
+        notes=[*(structure.notes or []), *region_comments(region)],
         description=structure.description or "",
         anchors=_anchor_range(region, structure),
+        formulas=region_formulas(region) or None,
     )
 
 
@@ -271,7 +333,7 @@ def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
     # the region as a dense string grid for the header model: merged cells are filled (top-left value spans the whole
     # merge) and every typed value rendered to text, so a merged / multi-row header reads like a normal grid. offsets
     # are region-relative (row 0 = region.min_row) to line up with structure_from_mask and apply_structure
-    values = {(cell.row, cell.col): cell.value for cell in region.cells}
+    values = {(cell.row, cell.col): cell_value(cell) for cell in region.cells}
     for merge in sheet.merges:
         if merge.max_row < region.min_row or merge.min_row > region.max_row:
             continue
@@ -289,13 +351,21 @@ def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
     ]
 
 
-async def extract_tables(sheet: SheetExtraction) -> list[tuple[int, MaterializedTable]]:
-    tables: list[tuple[int, MaterializedTable]] = []
+async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, SheetItem]]:
+    items: list[tuple[int, SheetItem]] = []
     ordinal = 0
     for region in find_regions(sheet):
         grid = region_grid(sheet, region)
+        kind = classify_grid(grid)
+        if kind == "empty":
+            continue
+        if kind != "table":
+            ordinal += 1
+            text = " ".join([grid_text(grid), *region_comments(region)]).strip()
+            items.append((ordinal, SheetText(sheet_no=sheet.sheet_no, text=text)))
+            continue
         mask = await predict_pooled(grid)
         for structure in merge_spurious_splits(grid, structure_from_mask(grid, mask)):
             ordinal += 1
-            tables.append((ordinal, apply_structure(region, structure, sheet.sheet_no)))
-    return tables
+            items.append((ordinal, apply_structure(region, structure, sheet.sheet_no)))
+    return items
