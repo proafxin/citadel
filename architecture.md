@@ -50,21 +50,22 @@ Plain text is a degenerate markup case: split on blank lines into paragraphs.
 
 Ingestion runs as streaming workers on a bus — an upload feeds an always-running pipeline, not a
 per-upload script. Each phase is an independent, asynchronous consumer running concurrently, and work is
-**page-granular**: the pages of one document interleave with every other document's through a shared,
-bounded pool at each stage, so a large scan never blocks a one-page form and the whole corpus reads in
-parallel. Every stage bounds its own in-flight work and applies backpressure to the one upstream, so the
-bus stays flat no matter how many or how large the uploads are. The phases:
+**page-granular**: the pages of one document interleave with every other document's, so a large scan never
+blocks a one-page form and the whole corpus reads in parallel. Every stage is a FIFO-fed sliding window —
+it claims only as much as it can hold, and a slot frees the moment one item completes, never in batches.
+The phases:
 
 ```
-upload → normalize → paginate → ocr ─────────────────→ merge → relational store
-                                  └─ gapfill (scanned) ──┘
-                     └────────────→ tabular ───────────→ merge
+upload → normalize → paginate → render → ocr ─────────────────→ merge → relational store
+                                           └─ gapfill (scanned) ──┘
+                     └──────────────────→ tabular ──────────────→ merge
 ```
 
 | Phase | Work |
 |---|---|
 | normalize | route + convert to one of the three lanes |
-| paginate | render PDF pages; or split markup/text/tabular into units |
+| paginate | count PDF pages and emit one render job each; or split markup/text/tabular into units |
+| render | rasterize one PDF page |
 | ocr | read each page visually → blocks |
 | gapfill | scanned pages only: recover the lines the visual read dropped |
 | merge | blocks → split paratext → stitch tables → structure embedded tables → content tree → persist |
@@ -73,6 +74,29 @@ upload → normalize → paginate → ocr ────────────�
 The bus carries only lightweight in-flight state — page images and per-page blocks; the uploaded source is
 held once in a doc-keyed store and memory-mapped by each stage that reads it, never copied through the bus
 per page.
+
+### What bounds the pipeline
+
+The vision model's unit of work is not a page but a **crop**: a page is laid out once, and every block it
+finds is then cut out and read as its own request. A page is therefore worth wildly different amounts of
+GPU work — a scanned page yields tens of crops, while a born-digital one yields only a couple, because its
+text comes from the page's own text layer and is never sent to the model at all. No page count can be
+right for both: set it for scanned pages and the model starves on digital ones; set it for digital pages
+and a scanned document floods it.
+
+So **crops are the only concurrency that is configured, and everything else derives from it.** A page is
+admitted only against free crop budget, so how many pages run at once is simply whatever the budget
+affords — many digital pages, few scanned ones, both keeping the model equally saturated. Crops are
+charged before they are cut, so none can exist uncharged, and every source of them — a page's own blocks,
+re-read fill-in fields, empty image regions — draws on the same budget.
+
+Memory follows from the same idea. A decoded page bitmap is needed to lay out and to cut, never to wait on
+the model, so it is dropped as soon as the crops exist and a page spends the long part of its life holding
+only its (far smaller) encoded bytes. Bitmaps are bounded separately and tightly; crops are bounded by the
+budget; the render buffer is sized to feed the decode gate. Host memory is therefore **flat** — a function
+of these bounds alone, not of how many documents are uploaded, how large they are, or how long the queue
+gets. Backpressure propagates the whole way back: crops fill → pages stop being admitted → rendered pages
+back up → render stalls → paginate stalls.
 
 ### Reading pages (ocr)
 

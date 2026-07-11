@@ -8,7 +8,8 @@ from typing import Any
 
 from citadel.db import get_engine
 from citadel.services.ingestion import (
-    CROP_BUFFER,
+    CROP_BOUND,
+    CROP_CONCURRENCY,
     GROUP,
     MAX_ATTEMPTS,
     PAGINATE_CONCURRENCY,
@@ -47,14 +48,14 @@ from config import CPU_EIGHTH, configure_logging, get_settings
 logger = logging.getLogger(__name__)
 
 NORMALIZE_CONCURRENCY = CPU_EIGHTH
-OCR_CONCURRENCY = 64  # pages that may be DECODED at once, not VLM work: crops are the bottleneck and the crop budget
-# bounds them. a page must be decoded to lay out, and only then is its crop cost known, so the decoded image (~10MB)
-# can only ever be bounded in pages. keep it high enough that low-crop born-digital pages still fill the crop budget
 MERGE_CONCURRENCY = CPU_EIGHTH  # light assembly
 PAGES_BUFFER = 32  # K: rendered pages kept buffered ahead of OCR so neither render nor OCR starves
-# render is gated so `pages` holds at most OCR_CONCURRENCY (claimed/in-flight) + PAGES_BUFFER images — bounds the
-# page-image RAM in Redis. without it a huge PDF renders ALL N pages up front (800 pages → GBs of images) → OOM.
-PAGES_BOUND = OCR_CONCURRENCY + PAGES_BUFFER
+# render is gated on the depth of `pages`. a claimed-but-unacked entry still counts in xlen, so this bounds every page
+# in flight — not just the ones decoding — and a page holds at least one request open with the VLM for nearly all of
+# its life. so it has to be sized against the REQUEST queue, not the decode gate: fewer pages in flight than the model
+# has sequence slots and the GPU idles no matter how deep the crop budget is (measured: 160 pages -> ~170 running
+# against 256 slots, Waiting: 0). without any gate a huge PDF renders ALL N pages up front (800 pages → GBs) → OOM.
+PAGES_BOUND = CROP_CONCURRENCY + PAGES_BUFFER
 GAPFILL_BUFFER = 64  # scanned pages OCR may run ahead of RapidOCR gap-fill before it backpressures (keeps the GPU
 # busy while still bounding the scanned-page images buffered in `gapfill`); born-digital pages never enter it
 GAPFILL_BOUND = RAPIDOCR_CONCURRENCY + GAPFILL_BUFFER
@@ -136,7 +137,7 @@ async def _retry_or_fail(
         await requeue_message(stream, msg_id, {**raw, b"attempt": str(attempt).encode()})
 
 
-async def _recover(stream: str, consumer: str, cap: _Capacity, spawn: Spawn) -> None:
+async def _recover(stream: str, consumer: str, cap: _Capacity | None, spawn: Spawn) -> None:
     # startup only: reprocess THIS consumer's own delivered-but-unacked entries, orphaned when a previous run crashed.
     # id="0" reads only our own pending — never another live consumer's in-flight — so there is no idle threshold to
     # guess and no risk of stealing a job that is legitimately still running. handlers are idempotent, so re-reading
@@ -144,46 +145,57 @@ async def _recover(stream: str, consumer: str, cap: _Capacity, spawn: Spawn) -> 
     redis = get_redis()
     last = "0"
     while True:
-        if cap.free() <= 0:
+        if cap is not None and cap.free() <= 0:
             await cap.wait_free()
             continue
-        fresh = await redis.xreadgroup(GROUP, consumer, {stream: last}, count=cap.free())
+        count = cap.free() if cap is not None else CROP_BOUND
+        fresh = await redis.xreadgroup(GROUP, consumer, {stream: last}, count=count)
         entries = fresh[0][1] if fresh else []
         if not entries:
             return
         for msg_id, raw in entries:
-            cap.take()
+            if cap is not None:
+                cap.take()
             spawn(msg_id.decode(), raw)
         last = entries[-1][0].decode()
 
 
 async def _pump(
-    stream: str, consumer: str, cap: _Capacity, spawn: Spawn, downstream: Callable[[], Awaitable[int]] | None = None
+    stream: str,
+    consumer: str,
+    cap: _Capacity | None,
+    spawn: Spawn,
+    downstream: Callable[[], Awaitable[int]] | None = None,
 ) -> None:
     redis = get_redis()
     while True:
-        if cap.free() <= 0:
-            await cap.wait_free()  # no slot → block here instead of claiming more messages into RAM
-            continue
-        room = cap.free()
-        if downstream is not None:
-            # backpressure: never produce more than the downstream stream can hold (bounds its image RAM)
-            room = min(room, await downstream())
-            if room <= 0:
-                await asyncio.sleep(0.1)
+        room = None
+        if cap is not None:
+            if cap.free() <= 0:
+                await cap.wait_free()  # no slot → block here instead of claiming more messages into RAM
                 continue
+            room = cap.free()
+        if downstream is not None:
+            # backpressure: never produce more than the downstream stage can absorb (bounds its image RAM). a stage
+            # with no cap of its own (ocr) is bounded ENTIRELY by this — the downstream resource is its only gate
+            available = await downstream()
+            room = available if room is None else min(room, available)
+        if room is not None and room <= 0:
+            await asyncio.sleep(0.1)
+            continue
         fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=room, block=BLOCK_MS)
         for msg_id, raw in fresh[0][1] if fresh else []:
-            cap.take()
+            if cap is not None:
+                cap.take()
             spawn(msg_id.decode(), raw)
 
 
 async def _drive(
-    stream: str, cap: _Capacity, spawn: Spawn, downstream: Callable[[], Awaitable[int]] | None = None
+    stream: str, cap: _Capacity | None, spawn: Spawn, downstream: Callable[[], Awaitable[int]] | None = None
 ) -> None:
     await ensure_group(stream)
     consumer = f"{stream}-{get_settings().worker_id}"
-    logger.info("consuming %s concurrency=%d", stream, cap.limit)
+    logger.info("consuming %s concurrency=%s", stream, cap.limit if cap is not None else "crop-gated")
     await _recover(stream, consumer, cap, spawn)
     await _pump(stream, consumer, cap, spawn, downstream)
 
@@ -242,7 +254,7 @@ async def _render_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> N
         cap.release()
 
 
-async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _ocr_job(cap: _Capacity | None, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_PAGES
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
@@ -256,7 +268,8 @@ async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None
         logger.error("ocr failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
         await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
     finally:
-        cap.release()
+        if cap is not None:
+            cap.release()
 
 
 async def _gapfill_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
@@ -338,22 +351,23 @@ async def render() -> None:
 
 
 async def _ocr_room() -> int:
-    # backpressure gate for ocr, on the two things a page can pile up downstream of it:
-    #   crops   — a page must be DECODED to lay out, so admitting one we cannot crop yet parks a ~10MB image doing
-    #             nothing. claim the next page only while the crop budget still has its buffer of slack, so decoded
-    #             pages self-limit to roughly what the crop bound can absorb — whatever OCR_CONCURRENCY is set to.
-    #   gapfill — a scanned-heavy doc must not queue page images faster than RapidOCR drains them
-    if get_crop_budget().free() <= CROP_BUFFER:
+    # crops are the pipeline's only real bottleneck, so admission is gated on them and nothing else: claim a page only
+    # against a free crop slot. we never need to predict a page's crop count — it is charged for what it actually cut
+    # once layout reveals it, and until then it cannot have been admitted without a slot to cut into. also gated on
+    # gapfill depth so a scanned-heavy doc can't queue page images faster than RapidOCR drains them
+    crops = get_crop_budget().free()
+    if crops <= 0:
         return 0
-    return GAPFILL_BOUND - await get_redis().xlen(STREAM_GAPFILL)
+    return min(crops, GAPFILL_BOUND - await get_redis().xlen(STREAM_GAPFILL))
 
 
-# ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. crops are the pipeline's one true bottleneck, so
-# OCR_CONCURRENCY is only pipelining depth here — the crop budget is what actually bounds admission (and thus RAM) ----
+# ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. there is no page concurrency to set: a page is
+# claimed only against a free crop slot, so how many run at once is whatever the crop budget affords — ~160 born-digital
+# pages (~2 crops each) or ~12 scanned ones (~27 each), both filling the same 320 crops and keeping the VLM saturated.
+# CROP_BOUND is the cap only because a page cannot be admitted without taking at least one crop -----------------------
 async def ocr() -> None:
     await asyncio.to_thread(get_mineru_client)  # build the pooled clients once now, not lazily mid-OCR
-    cap = _Capacity(OCR_CONCURRENCY)
-    await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)), _ocr_room)
+    await _drive(STREAM_PAGES, None, lambda mid, raw: _spawn(_ocr_job(None, mid, raw)), _ocr_room)
 
 
 # ---- gapfill: read `gapfill`, RapidOCR the lines the VLM dropped, finalize the page. CPU-bound, bounded low ----
