@@ -1,4 +1,6 @@
 import asyncio
+import ctypes
+import gc
 import io
 import itertools
 import json
@@ -56,6 +58,7 @@ from citadel.services.library import library_exists
 from citadel.services.pdf import MAX_IMAGE_SIDE, count_pdf_pages, downscale, extract_layer_by_bbox, render_pdf_page
 from citadel.services.presentation import parse_pptx
 from citadel.services.tabular import extract_json_tables, structure_csv_tables
+from citadel.tabular.infer import release_header_pool
 from citadel.utils import normalize_file
 from config import CPU_EIGHTH, CPU_THIRD, get_settings
 
@@ -83,17 +86,22 @@ REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connect
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
 PAGINATE_CONCURRENCY = CPU_EIGHTH
 RENDER_CONCURRENCY = CPU_EIGHTH
-PDFIUM_WORKERS = CPU_EIGHTH  # every pdfium job (count + render + text layer) shares these. a pdfium process costs
-# hundreds of MB standing, so this is a MEMORY knob, not a throughput one: the whole stage is a few hundred
-# CPU-seconds across a GPU-bound run, and it was 12 processes across three pools before
+PDFIUM_WORKERS = CPU_EIGHTH + 1  # every pdfium job (count + render + text layer) shares these. a pdfium process costs
+# hundreds of MB standing, so keep it small: the whole stage is a few hundred CPU-seconds across a GPU-bound run, and
+# demand (~2.5 calls/s) sits far under capacity (~100/s). the +1 is headroom, not need — the text layer is awaited
+# INSIDE the ocr path, so this pool does touch the VLM's feed path, and layer_cpu in the stage line is what would say
+# whether it ever costs anything
 RENDER_TIMEOUT = 120  # page renders in <1s; if a job strands (dead/hung pool worker) free the slot + retry the page
 PDF_POOL_MAX_TASKS = 100  # recycle a pdfium worker every N pages: a long-lived one grows to hundreds of MB and never
 # gives it back, and there are 12 of them. respawn is a fork off the (lean) forkserver, so the cost is milliseconds
 # amortised over 100 pages, against a stage that is already the cheapest in the pipeline
 RAPIDOCR_CONCURRENCY = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
 GAP_FILL = True  # RapidOCR scanned gap-fill; set to False for clean-image benchmarks (pure VLM)
-CROP_CONCURRENCY = 256  # the ONE bottleneck: a crop is the unit of VLM work. matches mineru --max-num-seqs and our
-# MINERU_CLIENTS x MINERU_CONN_PER_CLIENT socket pool, so the GPU is exactly saturated and never over-queued
+CROP_CONCURRENCY = 256  # the ONE bottleneck: a crop is the unit of VLM work. this is a semaphore, so it caps what can
+# be outstanding at the model at all (Running + Waiting), which makes it the dial on BOTH throughput and the model's
+# host memory — a queued request holds its decoded image there until the GPU reaches it (measured: crops unbounded ->
+# mineru 11-12GB, crops bounded -> 8.4GB). matches --max-num-seqs so the GPU can fill every sequence slot it has.
+# raising it past the point where Waiting stays healthy buys nothing but queued images on their side.
 CROP_BUFFER = 256  # crops cut and ready to send while in-flight ones return, so the VLM never starves between pages.
 # it also has to absorb a transient over-reservation: a page charges the budget for its BLOCK count before cutting
 # (the real crop count is not knowable until the library has cut them, and the skip list only ever removes), then
@@ -101,12 +109,13 @@ CROP_BUFFER = 256  # crops cut and ready to send while in-flight ones return, so
 # would force crops-alive below CROP_CONCURRENCY just to let a page through — starving the VLM at the gate. a crop is
 # a few hundred KB, so buying that headroom outright costs less than one decoded page
 CROP_BOUND = CROP_CONCURRENCY + CROP_BUFFER  # hard cap on crops alive at once, across every page and every crop source
-DECODE_CONCURRENCY = 128  # pages that may hold a decoded ~10MB bitmap at once — the ONLY place one ever exists, so
-# decoded-page RAM is flat at ~640MB however many pages are in flight waiting on the VLM (those cost ~2MB each).
-# a page holds a slot while it lays out, charges the crop budget, and cuts; deep enough that pages are always laid out
-# and ready when a crop slot frees (a born-digital page cuts only ~1-2 crops, so it takes many in flight to keep 256
-# crops alive), and the pages blocked on the budget here have already paid the layout — refilling is a cut, not a
-# render+layout round trip
+DECODE_CONCURRENCY = CROP_CONCURRENCY  # pages that may hold a decoded ~10MB bitmap at once — the ONLY place one ever
+# exists, so decoded-page RAM is flat however many pages are in flight waiting on the VLM (those cost ~2MB each).
+# a page must pass through here to issue ANY request — its layout is a request too — so this gate is the crop
+# pipeline's supply. narrower than CROP_CONCURRENCY and it starves it: at 128 the model ran ~175 outstanding against a
+# 256 semaphore we never filled. crops are the bottleneck; nothing upstream of them may be the narrower number.
+# a page holds a slot only while it lays out, charges the budget, and cuts — then drops the bitmap and waits out the
+# VLM holding just its encoded bytes
 
 
 @lru_cache
@@ -265,6 +274,21 @@ def _reap_profile_dirs() -> None:
         path = Path(_PROFILE_DIRS.pop())
         if path.exists():
             shutil.rmtree(path)
+
+
+def release_idle() -> None:
+    # ingestion is bursty but the worker is always-on, so what it warms up it then holds forever. the process pools are
+    # the whole cost — several hundred MB per worker, idle between uploads — and they rebuild lazily as a fork off the
+    # forkserver, in milliseconds. the RapidOCR engines are deliberately KEPT: they are only ~264MB across all threads
+    # and each takes ~1.3s to reload, so dropping them would trade a rounding error for a stall on the next scan.
+    while _PROCESS_POOLS:
+        pool = _PROCESS_POOLS.pop()
+        pool.stop()
+        pool.join()
+    get_pdfium_pool.cache_clear()
+    release_header_pool()
+    gc.collect()
+    ctypes.CDLL("libc.so.6").malloc_trim(0)  # glibc keeps freed pages; without this the process footprint never drops
 
 
 async def shutdown() -> None:
@@ -872,6 +896,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         text_blocks = [cb for cb in content_blocks if cb.type in LAYER_TYPES]
         path = blob_path(doc_id)
         if text_blocks and path.exists():
+            layer_t = time.time()  # awaited on the OCR path: every digital page waits here, so it gates the VLM's feed
             layer = await _run_pool(
                 get_pdfium_pool(),
                 extract_layer_by_bbox,
@@ -880,6 +905,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
                 [list(cb.bbox) for cb in text_blocks],
                 timeout=RENDER_TIMEOUT,
             )
+            await _add_stage_seconds(doc_id, "layer_s", time.time() - layer_t)
             for cb, text in zip(text_blocks, layer, strict=True):
                 if text:
                     cb.content = text
@@ -943,6 +969,14 @@ async def emit_vlm_only(fields: dict[str, str]) -> None:
 # ---- merge stage ----------------------------------------------------------------------
 
 
+STAGE_SECONDS = (  # accumulated per-page work, in pipeline order — not wall spans, which are mostly queue wait
+    ("render_cpu", "render_s"),
+    ("ocr_gpu", "ocr_s"),
+    ("layer_cpu", "layer_s"),
+    ("gapfill_cpu", "gapfill_s"),
+)
+
+
 def _stage_line(doc: dict[bytes, bytes]) -> str:
     # render/ocr wall time is meaningless: render is backpressured on the pages stream, so its span is GPU queue wait,
     # not work. report the ACTUAL cpu/gpu seconds each stage spent (accumulated per page) plus the queue wait separately
@@ -951,23 +985,11 @@ def _stage_line(doc: dict[bytes, bytes]) -> str:
 
     proc, paginate, paginated = g("t_proc"), g("t_paginate"), g("t_paginated")
     pages, merge, done = g("t_pages"), g("t_merge"), g("t_done")
-    walls: list[str] = []
-    if proc and paginate:
-        walls.append(f"normalize={paginate - proc:.1f}s")
-    if paginate and paginated:
-        walls.append(f"paginate={paginated - paginate:.1f}s")
-    if paginated and pages:
-        walls.append(f"queued={pages - paginated:.1f}s")
-    if g("render_s"):
-        walls.append(f"render_cpu={g('render_s'):.1f}s")
-    if g("ocr_s"):
-        walls.append(f"ocr_gpu={g('ocr_s'):.1f}s")
-    if g("gapfill_s"):
-        walls.append(f"gapfill_cpu={g('gapfill_s'):.1f}s")
-    if pages and merge:
-        walls.append(f"pages_wall={merge - pages:.1f}s")
-    if merge and done:
-        walls.append(f"merge={done - merge:.1f}s")
+    head = (("normalize", proc, paginate), ("paginate", paginate, paginated), ("queued", paginated, pages))
+    tail = (("pages_wall", pages, merge), ("merge", merge, done))
+    walls = [f"{name}={end - start:.1f}s" for name, start, end in head if start and end]
+    walls += [f"{name}={g(key):.1f}s" for name, key in STAGE_SECONDS if g(key)]
+    walls += [f"{name}={end - start:.1f}s" for name, start, end in tail if start and end]
     return " ".join(walls)
 
 

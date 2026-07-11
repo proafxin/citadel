@@ -126,5 +126,12 @@ def _pool() -> ProcessPoolExecutor:
     return ProcessPoolExecutor(max_workers=HEADER_WORKERS, mp_context=ctx, initializer=_cpu_only)
 
 
+def release_header_pool() -> None:
+    # its workers are whole processes and it is idle between uploads; the next call forks it back off the forkserver
+    if _pool.cache_info().currsize:
+        _pool().shutdown(wait=True)
+        _pool.cache_clear()
+
+
 async def predict_pooled(rows: list[list[str]]) -> list[bool]:
     return await asyncio.get_running_loop().run_in_executor(_pool(), predict, rows)

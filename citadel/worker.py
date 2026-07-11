@@ -9,7 +9,7 @@ from typing import Any
 from citadel.db import get_engine
 from citadel.services.ingestion import (
     CROP_BOUND,
-    CROP_CONCURRENCY,
+    DECODE_CONCURRENCY,
     GROUP,
     MAX_ATTEMPTS,
     PAGINATE_CONCURRENCY,
@@ -39,6 +39,7 @@ from citadel.services.ingestion import (
     handle_tabular,
     make_profile_pool,
     reap_orphan_blobs,
+    release_idle,
     requeue_message,
     shutdown,
 )
@@ -49,13 +50,15 @@ logger = logging.getLogger(__name__)
 
 NORMALIZE_CONCURRENCY = CPU_EIGHTH
 MERGE_CONCURRENCY = CPU_EIGHTH  # light assembly
-PAGES_BUFFER = 32  # K: rendered pages kept buffered ahead of OCR so neither render nor OCR starves
-# render is gated on the depth of `pages`. a claimed-but-unacked entry still counts in xlen, so this bounds every page
-# in flight — not just the ones decoding — and a page holds at least one request open with the VLM for nearly all of
-# its life. so it has to be sized against the REQUEST queue, not the decode gate: fewer pages in flight than the model
-# has sequence slots and the GPU idles no matter how deep the crop budget is (measured: 160 pages -> ~170 running
-# against 256 slots, Waiting: 0). without any gate a huge PDF renders ALL N pages up front (800 pages → GBs) → OOM.
-PAGES_BOUND = CROP_CONCURRENCY + PAGES_BUFFER
+PAGES_BUFFER = DECODE_CONCURRENCY  # rendered pages sitting UNCLAIMED in `pages`, waiting for ocr to pick them up.
+# sized to fill the decode gate in one claim: shallower and ocr takes what is there, leaves decode slots idle, and
+# waits on render to catch up — a stall the GPU pays for. it does NOT bound pages in flight (ocr claims as fast as the
+# crop budget allows), so it is purely a render-ahead buffer and purely a RAM bound (~2MB an image), deep enough that
+# ocr never waits on pdfium and shallow enough that an 800-page PDF cannot rasterize itself into redis.
+PAGES_IN_FLIGHT = CROP_BOUND  # pages CLAIMED at once — each holds its ~2MB encoded image for its whole life. this is a
+# RAM cap, not a throttle: the crop budget decides how much work is actually in flight, and a page yields at least one
+# crop, so the budget always runs out first. it exists because a page must be claimed before it can lay out, and until
+# it lays out the crop budget cannot see it — without this, admission never blocks and claimed pages grow without end.
 GAPFILL_BUFFER = 64  # scanned pages OCR may run ahead of RapidOCR gap-fill before it backpressures (keeps the GPU
 # busy while still bounding the scanned-page images buffered in `gapfill`); born-digital pages never enter it
 GAPFILL_BOUND = RAPIDOCR_CONCURRENCY + GAPFILL_BUFFER
@@ -290,6 +293,31 @@ async def _gapfill_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> 
         cap.release()
 
 
+DRAINED_STREAMS = (
+    STREAM_INGEST,
+    STREAM_NORMALIZED,
+    STREAM_RENDER,
+    STREAM_PAGES,
+    STREAM_GAPFILL,
+    STREAM_MERGE,
+    STREAM_TABLES,
+)
+
+
+async def _release_if_drained() -> None:
+    # a merge is the last thing that touches a document, so the moment one is acked is the moment the pipeline MIGHT be
+    # empty. an empty stream proves it: a claimed-but-unacked entry still counts in xlen, so xlen==0 across every stream
+    # means nothing is queued AND nothing is in flight. that is a guarantee, not a guess — which is what makes it safe
+    # to stop the pools, since stopping one with a task still running would kill it mid-render. they rebuild lazily as a
+    # fork off the forkserver on the next upload.
+    redis = get_redis()
+    for stream in DRAINED_STREAMS:
+        if await redis.xlen(stream):
+            return
+    await asyncio.to_thread(release_idle)
+    logger.info("pipeline drained → released process pools")
+
+
 async def _merge_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_MERGE
     try:
@@ -304,6 +332,7 @@ async def _merge_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> No
             return
         await _settle(stream, msg_id)
         await cleanup(fields["doc_id"])  # only after the merge message is acked → safe to delete blocks
+        await _release_if_drained()
     finally:
         cap.release()
 
@@ -339,35 +368,45 @@ async def paginate() -> None:
 
 
 async def _pages_room() -> int:
-    # backpressure gate for render: how many more page images `pages` can hold before OCR is behind
-    return PAGES_BOUND - await get_redis().xlen(STREAM_PAGES)
+    # gate render on the pages nobody has picked up yet — NOT on xlen. a claimed entry stays in the stream, unacked,
+    # for the whole life of its page (decode, layout, crops, the entire VLM wait), so gating on xlen silently caps
+    # pages IN FLIGHT rather than the render-ahead buffer, and throttles the model it is supposed to be feeding.
+    # what render must not do is run away — an 800-page PDF rasterized up front is GBs of images — and that is a
+    # question about the buffer alone. ocr claims from it as fast as the crop budget allows.
+    redis = get_redis()
+    claimed = int((await redis.xpending(STREAM_PAGES, GROUP))["pending"])
+    unclaimed = await redis.xlen(STREAM_PAGES) - claimed
+    return PAGES_BUFFER - unclaimed
 
 
 # ---- render: read `render`, render one PDF page via the pdfium pool, write `pages`. bounded to the pool width and
-# gated on `pages` depth so render never runs ahead of OCR by more than PAGES_BUFFER images (RAM bound) -----------
+# gated on the UNCLAIMED depth of `pages`, so it keeps a shallow buffer ready without bounding what ocr may hold ----
 async def render() -> None:
+    await ensure_group(STREAM_PAGES)  # our gate reads `pages`' pending list, and ocr — which owns that group — may not
+    # have created it yet. XPENDING on a missing group is an error, not an empty answer. idempotent.
     cap = _Capacity(RENDER_CONCURRENCY)
     await _drive(STREAM_RENDER, cap, lambda mid, raw: _spawn(_render_job(cap, mid, raw)), _pages_room)
 
 
 async def _ocr_room() -> int:
-    # crops are the pipeline's only real bottleneck, so admission is gated on them and nothing else: claim a page only
-    # against a free crop slot. we never need to predict a page's crop count — it is charged for what it actually cut
-    # once layout reveals it, and until then it cannot have been admitted without a slot to cut into. also gated on
-    # gapfill depth so a scanned-heavy doc can't queue page images faster than RapidOCR drains them
+    # crops are the bottleneck, so admission is gated on them — but the crop budget CANNOT see a page until it has laid
+    # out, and a page must be claimed to lay out. so a claimed page waiting at the decode gate has charged nothing, the
+    # budget still reads free, and this gate would keep claiming forever: every one of those pages holds its encoded
+    # image, and they pile up unbounded (measured: ~1700 claimed, ~3.4GB). PAGES_IN_FLIGHT is the cap that closes that
+    # hole. also gated on gapfill depth so a scanned-heavy doc can't queue page images faster than RapidOCR drains them
     crops = get_crop_budget().free()
     if crops <= 0:
         return 0
     return min(crops, GAPFILL_BOUND - await get_redis().xlen(STREAM_GAPFILL))
 
 
-# ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. there is no page concurrency to set: a page is
-# claimed only against a free crop slot, so how many run at once is whatever the crop budget affords — ~160 born-digital
-# pages (~2 crops each) or ~12 scanned ones (~27 each), both filling the same 320 crops and keeping the VLM saturated.
-# CROP_BOUND is the cap only because a page cannot be admitted without taking at least one crop -----------------------
+# ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. crops decide how much work is in flight; this cap
+# only bounds the encoded images we hold while it happens, and is set far above what the crop budget will ever admit
+# (a page yields at least one crop, and only ~2 on a born-digital page) so it can never throttle the model ------------
 async def ocr() -> None:
     await asyncio.to_thread(get_mineru_client)  # build the pooled clients once now, not lazily mid-OCR
-    await _drive(STREAM_PAGES, None, lambda mid, raw: _spawn(_ocr_job(None, mid, raw)), _ocr_room)
+    cap = _Capacity(PAGES_IN_FLIGHT)
+    await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)), _ocr_room)
 
 
 # ---- gapfill: read `gapfill`, RapidOCR the lines the VLM dropped, finalize the page. CPU-bound, bounded low ----
