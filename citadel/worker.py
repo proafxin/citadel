@@ -55,12 +55,12 @@ PAGES_BUFFER = DECODE_CONCURRENCY  # rendered pages sitting UNCLAIMED in `pages`
 # waits on render to catch up — a stall the GPU pays for. it does NOT bound pages in flight (ocr claims as fast as the
 # crop budget allows), so it is purely a render-ahead buffer and purely a RAM bound (~2MB an image), deep enough that
 # ocr never waits on pdfium and shallow enough that an 800-page PDF cannot rasterize itself into redis.
-PAGES_IN_FLIGHT = 512  # pages CLAIMED at once — each holds its ~2MB encoded image for its whole life. purely a RAM cap,
-# and it must never be the constraint: a page is either in the decode gate (DECODE_CONCURRENCY of them) or waiting out
-# its crops at the model (crops-alive / crops-per-page — at most ~128, since the crop semaphore caps requests at 256
-# and a born-digital page carries only ~2). ~420 covers the worst case, so 512 has headroom and still cannot throttle.
-# it exists because a page must be claimed before it can lay out, and until it lays out the crop budget cannot see it —
-# without this, admission never blocks and claimed pages grow without end (measured: ~1700 claimed, ~3.4GB).
+PAGES_IN_FLIGHT = 1024  # pages CLAIMED at once — each holds only its ~2MB encoded image (the bitmap dies at the decode
+# gate, the crops are PNG), so this is cheap. it is the pipeline's SUPPLY of requests, not a gate: a page is inside a
+# VLM call maybe 40% of its life — the rest it is cutting, writing blocks, or heading for gapfill/merge — so 512 pages
+# only ever kept ~200 requests open against a 256 semaphore we never filled, with the model idle behind it (Waiting: 0).
+# it must also exist at all: a page has to be claimed before it can lay out, and the crop budget cannot see it until it
+# does, so without a cap admission never blocks and claimed pages grow without end (measured: ~1700 claimed, ~3.4GB).
 GAPFILL_BUFFER = 64  # scanned pages OCR may run ahead of RapidOCR gap-fill before it backpressures (keeps the GPU
 # busy while still bounding the scanned-page images buffered in `gapfill`); born-digital pages never enter it
 GAPFILL_BOUND = RAPIDOCR_CONCURRENCY + GAPFILL_BUFFER

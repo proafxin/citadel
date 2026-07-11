@@ -28,6 +28,7 @@ from mineru_vl_utils import MinerUClient
 from mineru_vl_utils.mineru_client import _PredictResult
 from mineru_vl_utils.structs import ContentBlock, ExtractResult
 from mineru_vl_utils.vlm_client import SamplingParams
+from mineru_vl_utils.vlm_client.utils import get_png_bytes
 from pebble import ProcessPool
 from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
@@ -104,13 +105,12 @@ CROP_CONCURRENCY = 256  # the ONE bottleneck: a crop is the unit of VLM work. th
 # host memory — a queued request holds its decoded image there until the GPU reaches it (measured: crops unbounded ->
 # mineru 11-12GB, crops bounded -> 8.4GB). matches --max-num-seqs so the GPU can fill every sequence slot it has.
 # raising it past the point where Waiting stays healthy buys nothing but queued images on their side.
-CROP_BUFFER = 1024  # crops cut and ready to send while in-flight ones return, so the VLM never starves between pages.
-# it must ALSO cover the reservation every page in the decode gate is trying to make: a page charges its BLOCK count
-# before cutting (the real crop count is unknowable until the library has cut them) and refunds the difference after —
-# and it blocks there STILL HOLDING its decode slot and bitmap. so a tight budget does not merely delay a page, it jams
-# the gate that feeds the model: at 256, a scanned page reserving ~27 meant only a handful got through and ~270 decode
-# slots sat blocked, issuing nothing (ocr_gpu per page went 85s -> 234s, all of it queueing). a crop is ~0.4MB — the
-# headroom is far cheaper than the throughput it costs to withhold it
+CROP_BUFFER = 8192  # crops cut and waiting on the semaphore. it has to cover every page in flight at once, or the pages
+# just queue HERE instead of at the decode gate: a scanned page carries ~26 crops, so at 1024 only ~49 of the 512 pages
+# in flight could hold budget and the rest blocked — budget_wait hit 115s a page on the scanned book, the single largest
+# span in the run. a crop is PNG bytes by the time it is charged (~40KB, not the ~400KB of raw pixels it used to be), so
+# covering all 512 pages costs a few hundred MB. the semaphore still caps what is in flight AT the model; this bound
+# only exists to stop us holding crops we cannot send, and it should never be what throttles us
 CROP_BOUND = CROP_CONCURRENCY + CROP_BUFFER  # hard cap on crops alive at once, across every page and every crop source
 DECODE_HEADROOM = 32  # decode slots ABOVE the bottleneck. a page in this gate is not always issuing a request — it may
 # be cutting, or waiting on crop budget — so sizing it exactly at CROP_CONCURRENCY leaves the model momentarily dry
@@ -735,9 +735,34 @@ def _reservation(client: MinerUClient, layout: ExtractResult, not_extract: list[
     return max(sum(1 for block in layout if block.type not in skip), 1)
 
 
+def _layout_prompt(client: MinerUClient) -> str:
+    # read the client's own [layout] prompt rather than hardcode it — we only drive the call ourselves so the page
+    # bitmap can be freed before the (slow) request, not to change what is asked
+    prompt: str = client.prompts.get("[layout]") or client.prompts["[default]"]
+    return prompt
+
+
+def _layout_params(client: MinerUClient) -> SamplingParams | None:
+    params: SamplingParams | None = client.sampling_params.get("[layout]") or client.sampling_params.get("[default]")
+    return params
+
+
+def _encode_crops(crops: list[Image.Image | bytes]) -> list[bytes]:
+    # the client PNGs every crop before sending it, so do it here instead: the raw pixel buffer dies at once and we
+    # carry only the compressed bytes (~8x smaller) for however long the request waits at the model
+    out: list[bytes] = []
+    for crop in crops:
+        if isinstance(crop, Image.Image):
+            out.append(get_png_bytes(crop))
+            crop.close()
+        else:
+            out.append(crop)
+    return out
+
+
 async def _predict_crop(
     client: MinerUClient,
-    crop: Image.Image | bytes,
+    payload: bytes,
     prompt: str,
     param: SamplingParams | None,
     semaphore: asyncio.Semaphore,
@@ -746,11 +771,9 @@ async def _predict_crop(
     # one crop, one slot: the semaphore bounds what is in flight at the model, the budget bounds what is alive in RAM,
     # and both are handed back the instant THIS crop returns — not when its slowest sibling does
     try:
-        return await client._aio_predict(crop, prompt, param, None, semaphore, None)
+        return await client._aio_predict(payload, prompt, param, None, semaphore, None)
     finally:
         budget.release(1)
-        if isinstance(crop, Image.Image):
-            crop.close()
 
 
 @dataclass
@@ -780,17 +803,34 @@ async def extract_page(client: MinerUClient, doc_id: str, image: bytes, not_extr
     budget = get_crop_budget()
     semaphore = get_crop_semaphore()
     spans = _Spans()
+
+    # LAYOUT. the model resizes the page to 1036x1036 for this anyway, so the moment that copy exists our ~10MB bitmap
+    # is dead weight — and the call itself is slow (it generates every block's box as text: 66s a page, measured, and
+    # up to 266 blocks on a dense one). holding a decode slot across that wait is what made pages queue for the gate:
+    # 288 slots each pinned for a minute by a page doing nothing but waiting on the network.
     mark = time.time()
     async with get_decode_gate():
         spans.decode_wait = time.time() - mark
         with Image.open(io.BytesIO(image)) as img:
-            mark = time.time()
-            layout = await client.aio_layout_detect(img, semaphore=semaphore)
-            spans.layout = time.time() - mark
-            mark = time.time()
-            granted = await budget.acquire(_reservation(client, layout, not_extract))
-            spans.budget_wait = time.time() - mark
-            mark = time.time()
+            layout_image = await client.helper.aio_prepare_for_layout(client.executor, img)
+    mark = time.time()  # bitmap gone, slot released — we hold only the small layout copy for the long call
+    layout_call = client._aio_predict(
+        layout_image, _layout_prompt(client), _layout_params(client), None, semaphore, None
+    )
+    output = await layout_call
+    del layout_image
+    layout = ExtractResult(await client.helper.aio_parse_layout_output(client.executor, output.text), output.scored)
+    spans.layout = time.time() - mark
+
+    # CUT. re-decode (~50ms) rather than carry the bitmap across the layout wait, and turn every crop into its encoded
+    # bytes here: the client would PNG them anyway, so encoding now lets the raw pixel buffers die immediately and
+    # leaves us holding only the compressed form (~8x smaller) until the response lands.
+    mark = time.time()
+    granted = await budget.acquire(_reservation(client, layout, not_extract))
+    spans.budget_wait = time.time() - mark
+    mark = time.time()
+    async with get_decode_gate():
+        with Image.open(io.BytesIO(image)) as img:
             try:
                 crops, prompts, params, indices = await client.helper.aio_prepare_for_extract(
                     client.executor, img, layout, not_extract, None
@@ -798,11 +838,12 @@ async def extract_page(client: MinerUClient, doc_id: str, image: bytes, not_extr
             except BaseException:
                 budget.release(granted)  # the crops never existed, so no _predict_crop will hand this back
                 raise
-            spans.cut = time.time() - mark
-        if len(crops) > granted:  # the absorption passes only ever remove, so this cannot happen — charge it if it does
-            granted += await budget.acquire(len(crops) - granted)
-        budget.release(granted - len(crops))  # refund the estimate's slack. the budget now holds exactly len(crops),
-        # and from here each crop hands its own slot back — the page keeps no lump reservation of its own
+        payloads = await asyncio.to_thread(_encode_crops, crops)
+    spans.cut = time.time() - mark
+    if len(payloads) > granted:  # the absorption passes only ever remove, so this cannot happen — charge it if it does
+        granted += await budget.acquire(len(payloads) - granted)
+    budget.release(granted - len(payloads))  # refund the estimate's slack. the budget now holds exactly len(payloads),
+    # and from here each crop hands its own slot back — the page keeps no lump reservation of its own
     # drive the crops individually rather than through aio_batch_predict, which gathers them and returns only when the
     # SLOWEST comes back. the budget is a reservation on crops ALIVE, so releasing it in one lump at the end means a
     # page squats on all 26 slots long after 25 of them are done — tail latency holding the whole reservation. a
@@ -811,8 +852,8 @@ async def extract_page(client: MinerUClient, doc_id: str, image: bytes, not_extr
     mark = time.time()
     outputs = await asyncio.gather(
         *(
-            _predict_crop(client, crop, prompt, param, semaphore, budget)
-            for crop, prompt, param in zip(crops, prompts, params, strict=True)
+            _predict_crop(client, payload, prompt, param, semaphore, budget)
+            for payload, prompt, param in zip(payloads, prompts, params, strict=True)
         )
     )
     spans.predict = time.time() - mark
