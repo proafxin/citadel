@@ -15,6 +15,7 @@ class DocumentRead(BaseModel):
 class DocProgress(BaseModel):
     doc_id: int
     filename: str
+    status: str
     done: int
+    active: int
     total: int
-    state: str

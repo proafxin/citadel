@@ -55,7 +55,7 @@ from citadel.services.pdf import MAX_IMAGE_SIDE, count_pdf_pages, downscale, ext
 from citadel.services.presentation import parse_pptx
 from citadel.services.tabular import extract_json_tables, structure_csv_tables
 from citadel.utils import normalize_file
-from config import CPU_QUARTER, CPU_THIRD, get_settings
+from config import CPU_EIGHTH, CPU_QUARTER, CPU_THIRD, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +79,9 @@ MINERU_CLIENTS = 16
 MINERU_CONN_PER_CLIENT = 16
 REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connection, never open unbounded sockets
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
-PAGINATE_CONCURRENCY = CPU_QUARTER
-COUNT_CONCURRENCY = CPU_QUARTER
-RENDER_CONCURRENCY = CPU_QUARTER
+PAGINATE_CONCURRENCY = CPU_EIGHTH
+COUNT_CONCURRENCY = CPU_EIGHTH
+RENDER_CONCURRENCY = CPU_EIGHTH
 LAYER_CONCURRENCY = CPU_QUARTER
 RENDER_TIMEOUT = 120  # page renders in <1s; if a job strands (dead/hung pool worker) free the slot + retry the page
 RAPIDOCR_CONCURRENCY = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
@@ -290,6 +290,17 @@ async def list_documents(library_id: int) -> list[DocumentRead]:
     ]
 
 
+def _progress_status(state: bytes | None, started: int, done: int) -> str:
+    internal = state.decode() if state else ""
+    if internal == "failed":
+        return "Failed"
+    if internal == "ingested":
+        return "Ready"
+    if started > 0 or done > 0:
+        return "Processing"
+    return "Queued"
+
+
 async def library_progress(library_id: int) -> list[DocProgress]:
     async with get_sessionmaker()() as session:
         rows = list(
@@ -302,14 +313,16 @@ async def library_progress(library_id: int) -> list[DocProgress]:
     redis = get_redis()
     progress: list[DocProgress] = []
     for doc_id, filename in rows:
-        done, total, state = await redis.hmget(f"doc:{doc_id}", "done_count", "page_count", "state")
+        fields = await redis.hmget(f"doc:{doc_id}", "done_count", "started_count", "page_count", "state")
+        done, started, total = (int(value) if value else 0 for value in fields[:3])
         progress.append(
             DocProgress(
                 doc_id=doc_id,
                 filename=filename,
-                done=int(done) if done else 0,
-                total=int(total) if total else 0,
-                state=state.decode() if state else "",
+                status=_progress_status(fields[3], started, done),
+                done=done,
+                active=max(started - done, 0),
+                total=total,
             )
         )
     return progress
@@ -438,6 +451,7 @@ async def handle_render(fields: dict[str, str]) -> None:
         return  # doc already finished → a reclaimed render job is a safe no-op
     redis = get_redis()
     await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
+    await redis.hincrby(f"doc:{doc_id}", "started_count", 1)
     image_bytes, digital = await _run_pool(
         get_paginate_pool(), render_pdf_page, str(path), page_idx, dpi, timeout=RENDER_TIMEOUT
     )

@@ -40,11 +40,11 @@ from citadel.services.ingestion import (
     shutdown,
 )
 from citadel.tabular.infer import HEADER_WORKERS
-from config import CPU_QUARTER, configure_logging, get_settings
+from config import CPU_EIGHTH, configure_logging, get_settings
 
 logger = logging.getLogger(__name__)
 
-NORMALIZE_CONCURRENCY = CPU_QUARTER  # one isolated libreoffice profile per worker (per-job soffice)
+NORMALIZE_CONCURRENCY = CPU_EIGHTH
 OCR_CONCURRENCY = 256
 MERGE_CONCURRENCY = 4  # light assembly
 PAGES_BUFFER = 32  # K: rendered pages kept buffered ahead of OCR so neither render nor OCR starves

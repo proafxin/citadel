@@ -33,7 +33,7 @@ services:
       # (forms, letterheads) + within-page re-encodes; bounded to 2GB so it can't balloon the host footprint.
       # cache only affects speed, never the output — so it doesn't touch the OmniDocBench quality numbers.
       - --mm-processor-cache-gb
-      - "2"
+      - "1"
       - --uvicorn-log-level
       - warning
     ports:
