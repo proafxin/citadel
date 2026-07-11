@@ -9,8 +9,10 @@ import shutil
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import TypeVar
@@ -36,7 +38,6 @@ from sqlalchemy import select
 from citadel.db import get_sessionmaker
 from citadel.models.document import Document
 from citadel.models.status import DocumentStatus
-from citadel.proc import name_process
 from citadel.schemas.content import Block
 from citadel.schemas.document import DocProgress, DocumentRead, IngestResponse
 from citadel.services.document import (
@@ -87,6 +88,10 @@ LAYER_CONCURRENCY = CPU_QUARTER
 RENDER_TIMEOUT = 120  # page renders in <1s; if a job strands (dead/hung pool worker) free the slot + retry the page
 RAPIDOCR_CONCURRENCY = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
 GAP_FILL = True  # RapidOCR scanned gap-fill; set to False for clean-image benchmarks (pure VLM)
+CROP_CONCURRENCY = 256  # the ONE bottleneck: a crop is the unit of VLM work. matches mineru --max-num-seqs and our
+# MINERU_CLIENTS x MINERU_CONN_PER_CLIENT socket pool, so the GPU is exactly saturated and never over-queued
+CROP_BUFFER = 64  # crops cut and ready to send while in-flight ones return, so the VLM never starves between pages
+CROP_BOUND = CROP_CONCURRENCY + CROP_BUFFER  # hard cap on crops alive at once, across every page and every crop source
 
 
 @lru_cache
@@ -134,6 +139,54 @@ def get_mineru_client() -> MinerUClient:
 
 
 @lru_cache
+def get_crop_semaphore() -> asyncio.Semaphore:
+    # ONE semaphore shared by every crop request from every page. each mineru entry point defaults to constructing a
+    # fresh per-call semaphore, which bounds a single page and nothing globally — that is what let crops go unbounded
+    return asyncio.Semaphore(CROP_CONCURRENCY)
+
+
+@dataclass
+class _CropBudget:
+    # bounds crops ALIVE (cut and held in RAM), not just crops in flight: a page reserves its blocks before any crop is
+    # cut, so a page whose crops cannot be absorbed yet blocks here instead of materializing images nothing will read.
+    # FIFO: waiters are granted strictly in arrival order, so a 66-block page can never be starved by 17-block pages
+    limit: int
+    used: int = 0
+    waiters: deque[tuple[int, asyncio.Future[None]]] = field(default_factory=deque)
+
+    def free(self) -> int:
+        return self.limit - self.used
+
+    async def acquire(self, count: int) -> int:
+        need = min(count, self.limit)  # a page with more blocks than the whole budget takes it all rather than deadlock
+        if not self.waiters and self.free() >= need:
+            self.used += need
+            return need
+        waiter = asyncio.get_running_loop().create_future()
+        self.waiters.append((need, waiter))  # queue behind everyone already waiting — never jump the line
+        await waiter
+        return need
+
+    def release(self, count: int) -> None:
+        self.used -= count
+        while self.waiters:
+            need, waiter = self.waiters[0]
+            if waiter.done():  # its page was cancelled while queued — it will never take the reservation
+                self.waiters.popleft()
+                continue
+            if self.free() < need:
+                return  # head of the line cannot fit yet; no one behind it may overtake
+            self.waiters.popleft()
+            self.used += need
+            waiter.set_result(None)
+
+
+@lru_cache
+def get_crop_budget() -> _CropBudget:
+    return _CropBudget(CROP_BOUND)
+
+
+@lru_cache
 def _thread_rapidocr(_thread_id: int) -> RapidOCR:
     # one RapidOCR per pool thread: the wrapper isn't guaranteed re-entrant, so sharing one instance across the thread
     # pool could race and garble output. keying the cache on thread id gives each worker its own engine (the fixed
@@ -155,31 +208,31 @@ T = TypeVar("T")
 _PROCESS_POOLS: list[ProcessPool] = []
 
 
-def _pdfium_pool(workers: int, label: str) -> ProcessPool:
+def _pdfium_pool(workers: int) -> ProcessPool:
     # one process per worker → each gets its own pdfium (pdfium is not thread-safe; isolate by process). forkserver
     # preloads only the lean pdf module (not __main__ → no onnxruntime/cv2/mineru/xgboost in a pdfium worker). workers
     # are long-lived (no max_tasks) so each keeps its bounded PdfDocument LRU warm across a document's pages; pebble
     # kills+replaces only the specific worker a per-task timeout fires on, so a hung page can't permanently shrink it.
     ctx = multiprocessing.get_context("forkserver")
     ctx.set_forkserver_preload(["citadel.services.pdf"])
-    pool = ProcessPool(max_workers=workers, context=ctx, initializer=name_process, initargs=(label,))
+    pool = ProcessPool(max_workers=workers, context=ctx)
     _PROCESS_POOLS.append(pool)
     return pool
 
 
 @lru_cache
 def get_paginate_pool() -> ProcessPool:
-    return _pdfium_pool(PAGINATE_CONCURRENCY, "render")
+    return _pdfium_pool(PAGINATE_CONCURRENCY)
 
 
 @lru_cache
 def get_count_pool() -> ProcessPool:
-    return _pdfium_pool(COUNT_CONCURRENCY, "count")
+    return _pdfium_pool(COUNT_CONCURRENCY)
 
 
 @lru_cache
 def get_layer_pool() -> ProcessPool:
-    return _pdfium_pool(LAYER_CONCURRENCY, "layer")
+    return _pdfium_pool(LAYER_CONCURRENCY)
 
 
 async def _run_pool[T](pool: ProcessPool, func: Callable[..., T], *args: object, timeout: float) -> T:
@@ -622,17 +675,47 @@ def _is_vlm_refusal(text: str) -> bool:
     return refers and denies
 
 
+async def extract_page(client: MinerUClient, img: Image.Image, not_extract: list[str] | None) -> ExtractResult:
+    # aio_two_step_extract, but with the crop budget reserved BETWEEN layout and cropping. the library cuts every crop
+    # for a page eagerly, so gating after it would bound requests while the images were already allocated; gating on
+    # the layout's block count (an upper bound — the skip list only removes) bounds what is ever cut in the first place
+    budget = get_crop_budget()
+    semaphore = get_crop_semaphore()
+    layout = await client.aio_layout_detect(img, semaphore=semaphore)
+    granted = await budget.acquire(len(layout))
+    try:
+        crops, prompts, params, indices = await client.helper.aio_prepare_for_extract(
+            client.executor, img, layout, not_extract, None
+        )
+        # the block count only bounded what COULD be cut. hand the difference straight back, or a born-digital page
+        # (whose text/title blocks are skipped, not cropped) would hold reservations against crops it never made and
+        # starve the VLM while the budget looked full
+        budget.release(granted - len(crops))
+        granted = len(crops)
+        outputs = await client._aio_batch_predict(crops, prompts, params, None, semaphore, None)
+    finally:
+        budget.release(granted)
+    for idx, output in zip(indices, outputs, strict=True):
+        layout[idx].content = output.text
+        layout[idx].scored = output.scored
+    processed = await client.helper.aio_post_process(client.executor, layout)
+    return ExtractResult(processed, layout.layout_scored)
+
+
 async def _vlm_recover(client: MinerUClient, img: Image.Image, blocks: list[ContentBlock]) -> None:
-    # crop each block's region and OCR it as text via the VLM; per page, concurrent across pages → vLLM batches it
+    # crop each block's region and OCR it as text via the VLM. reserves budget before cropping, on the same global
+    # bound as the page crops — recovery crops are VLM work too, so they must not be able to exceed it
     if not blocks:
         return
+    budget = get_crop_budget()
+    granted = await budget.acquire(len(blocks))
     width, height = img.size
     crops = [
         img.crop((int(b.bbox[0] * width), int(b.bbox[1] * height), int(b.bbox[2] * width), int(b.bbox[3] * height)))
         for b in blocks
     ]
     try:
-        recovered = await client.aio_batch_content_extract(crops, types="text")
+        recovered = await client.aio_batch_content_extract(crops, types="text", semaphore=get_crop_semaphore())
         for block, text in zip(blocks, recovered, strict=True):
             clean = str(text or "").strip()
             if clean and not _is_vlm_refusal(clean):
@@ -640,6 +723,7 @@ async def _vlm_recover(client: MinerUClient, img: Image.Image, blocks: list[Cont
     finally:
         for crop in crops:
             crop.close()
+        budget.release(granted)
 
 
 @lru_cache
@@ -752,7 +836,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     with Image.open(io.BytesIO(image)) as img:
         if digital:
             # born-digital page: VLM does layout + recognizes only non-text; text/title come from the exact text layer
-            content_blocks = await client.aio_two_step_extract(img, not_extract_list=list(LAYER_TYPES))
+            content_blocks = await extract_page(client, img, list(LAYER_TYPES))
             text_blocks = [cb for cb in content_blocks if cb.type in LAYER_TYPES]
             path = blob_path(doc_id)
             if text_blocks and path.exists():
@@ -772,7 +856,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
             # re-crop only risks re-introducing the same drop and slightly degrading the text — skip it there.
             fill_crops = await recover_fillin_blocks(client, img, content_blocks)
         else:
-            content_blocks = await client.aio_two_step_extract(img)  # VLM reads the scanned text (primary)
+            content_blocks = await extract_page(client, img, None)  # VLM reads the scanned text (primary)
             fill_crops = 0
         img_crops = await ocr_empty_blocks(client, img, content_blocks)  # empty image blocks → VLM-crop
     await _add_stage_seconds(doc_id, "ocr_s", time.time() - ocr_t)

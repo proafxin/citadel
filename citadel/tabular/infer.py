@@ -9,12 +9,12 @@ from pathlib import Path
 import numpy as np
 import xgboost as xgb
 
-from citadel.proc import name_process
 from citadel.schemas.table import TableStructure
 from citadel.tabular.detect import featurize
 
 MODEL = Path(__file__).resolve().parents[2] / "model.json"
-HEADER_WORKERS = 4
+HEADER_WORKERS = max((os.cpu_count() or 8) // 8, 1)  # config.CPU_EIGHTH, recomputed rather than imported: this module
+# is the header pool's forkserver preload, so importing config would pull torch into every one of its workers
 
 
 def structure_from_mask(grid: list[list[str]], mask: list[bool]) -> list[TableStructure]:
@@ -116,7 +116,6 @@ def predict(rows: list[list[str]]) -> list[bool]:
 
 def _cpu_only() -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-    name_process("header")
 
 
 @functools.lru_cache(maxsize=1)
