@@ -25,7 +25,9 @@ import redis.asyncio as aioredis
 from cachetools import LRUCache
 from fastapi import HTTPException, UploadFile
 from mineru_vl_utils import MinerUClient
+from mineru_vl_utils.mineru_client import _PredictResult
 from mineru_vl_utils.structs import ContentBlock, ExtractResult
+from mineru_vl_utils.vlm_client import SamplingParams
 from pebble import ProcessPool
 from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
@@ -712,7 +714,62 @@ def _is_vlm_refusal(text: str) -> bool:
     return refers and denies
 
 
-async def extract_page(client: MinerUClient, image: bytes, not_extract: list[str] | None) -> ExtractResult:
+CROP_SKIP = frozenset({"list", "equation_block", "image_block"})  # never cropped — mirrors prepare_for_extract
+CROP_SKIP_UNANALYSED = frozenset(
+    {"image", "chart"}
+)  # cropped only when the client is set to analyse images (it is not)
+
+
+def _reservation(client: MinerUClient, layout: ExtractResult, not_extract: list[str] | None) -> int:
+    # what this page will ACTUALLY cut, not how many blocks it has. the block count is a wild over-estimate on a
+    # born-digital page — ~30 blocks, of which text and title come from the pdf text layer and are never cropped, so it
+    # cuts ~2 — and a page holds its reservation while blocked in the decode gate. reserving 30 to spend 2 jams that
+    # gate on budget it never uses, and the gate is what feeds the VLM. this applies the same skip rules the library
+    # does; it ignores only the caption/table absorption passes, which can remove more, never add. so still an upper
+    # bound, and the difference is refunded once the crops are actually cut.
+    skip = set(CROP_SKIP)
+    if not client.helper._resolve_image_analysis(None):
+        skip |= CROP_SKIP_UNANALYSED
+    if not_extract:
+        skip |= set(not_extract)
+    return max(sum(1 for block in layout if block.type not in skip), 1)
+
+
+async def _predict_crop(
+    client: MinerUClient,
+    crop: Image.Image | bytes,
+    prompt: str,
+    param: SamplingParams | None,
+    semaphore: asyncio.Semaphore,
+    budget: _CropBudget,
+) -> _PredictResult:
+    # one crop, one slot: the semaphore bounds what is in flight at the model, the budget bounds what is alive in RAM,
+    # and both are handed back the instant THIS crop returns — not when its slowest sibling does
+    try:
+        return await client._aio_predict(crop, prompt, param, None, semaphore, None)
+    finally:
+        budget.release(1)
+        if isinstance(crop, Image.Image):
+            crop.close()
+
+
+@dataclass
+class _Spans:
+    # where a page's time inside handle_ocr actually goes. ocr_gpu alone says only that pages wait, never on what —
+    # every theory about the bottleneck so far has been a guess at which of these five it is
+    decode_wait: float = 0.0  # queuing for a decode slot
+    layout: float = 0.0  # the one VLM call that finds the blocks
+    budget_wait: float = 0.0  # blocked on crop budget, holding the decode slot and the bitmap
+    cut: float = 0.0  # PIL: cutting the crops out (cpu)
+    predict: float = 0.0  # the N VLM calls that read them — the only span that is real work
+
+
+async def _record_spans(doc_id: str, spans: _Spans) -> None:
+    for field_name in ("decode_wait", "layout", "budget_wait", "cut", "predict"):
+        await _add_stage_seconds(doc_id, f"{field_name}_s", getattr(spans, field_name))
+
+
+async def extract_page(client: MinerUClient, doc_id: str, image: bytes, not_extract: list[str] | None) -> ExtractResult:
     # a page's ~10MB decoded bitmap is needed to lay out and to cut crops — never to wait on the predictions, which is
     # the long part. so it lives only inside the decode gate: lay out, charge the budget, cut, drop the bitmap, leave.
     # the page then waits out the VLM holding just its crops and the ~2MB of encoded bytes it already had.
@@ -722,29 +779,48 @@ async def extract_page(client: MinerUClient, image: bytes, not_extract: list[str
     # render+layout round trip (~0.6s): the pages waiting at this gate are the reservoir that keeps the VLM fed
     budget = get_crop_budget()
     semaphore = get_crop_semaphore()
+    spans = _Spans()
+    mark = time.time()
     async with get_decode_gate():
+        spans.decode_wait = time.time() - mark
         with Image.open(io.BytesIO(image)) as img:
+            mark = time.time()
             layout = await client.aio_layout_detect(img, semaphore=semaphore)
-            granted = await budget.acquire(len(layout))  # upper bound: the skip list only ever removes blocks
+            spans.layout = time.time() - mark
+            mark = time.time()
+            granted = await budget.acquire(_reservation(client, layout, not_extract))
+            spans.budget_wait = time.time() - mark
+            mark = time.time()
             try:
                 crops, prompts, params, indices = await client.helper.aio_prepare_for_extract(
                     client.executor, img, layout, not_extract, None
                 )
             except BaseException:
-                budget.release(granted)
+                budget.release(granted)  # the crops never existed, so no _predict_crop will hand this back
                 raise
-        # refund what was reserved but never cut, or a born-digital page (text/title skipped, not cropped) would hold
-        # a reservation against crops it never made and starve the VLM while the budget looked full
-        budget.release(granted - len(crops))
-        granted = len(crops)
-    try:
-        outputs = await client._aio_batch_predict(crops, prompts, params, None, semaphore, None)
-    finally:
-        budget.release(granted)
+            spans.cut = time.time() - mark
+        if len(crops) > granted:  # the absorption passes only ever remove, so this cannot happen — charge it if it does
+            granted += await budget.acquire(len(crops) - granted)
+        budget.release(granted - len(crops))  # refund the estimate's slack. the budget now holds exactly len(crops),
+        # and from here each crop hands its own slot back — the page keeps no lump reservation of its own
+    # drive the crops individually rather than through aio_batch_predict, which gathers them and returns only when the
+    # SLOWEST comes back. the budget is a reservation on crops ALIVE, so releasing it in one lump at the end means a
+    # page squats on all 26 slots long after 25 of them are done — tail latency holding the whole reservation. a
+    # 26-crop scanned page then stalls every page behind it in the decode gate (253s per page against 85s unbounded).
+    # each crop now returns its slot and drops its image the moment its own request lands.
+    mark = time.time()
+    outputs = await asyncio.gather(
+        *(
+            _predict_crop(client, crop, prompt, param, semaphore, budget)
+            for crop, prompt, param in zip(crops, prompts, params, strict=True)
+        )
+    )
+    spans.predict = time.time() - mark
     for idx, output in zip(indices, outputs, strict=True):
         layout[idx].content = output.text
         layout[idx].scored = output.scored
     processed = await client.helper.aio_post_process(client.executor, layout)
+    await _record_spans(doc_id, spans)
     return ExtractResult(processed, layout.layout_scored)
 
 
@@ -896,7 +972,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     ocr_t = time.time()
     if digital:
         # born-digital page: VLM does layout + recognizes only non-text; text/title come from the exact text layer
-        content_blocks = await extract_page(client, image, list(LAYER_TYPES))
+        content_blocks = await extract_page(client, doc_id, image, list(LAYER_TYPES))
         text_blocks = [cb for cb in content_blocks if cb.type in LAYER_TYPES]
         path = blob_path(doc_id)
         if text_blocks and path.exists():
@@ -918,7 +994,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         # risks re-introducing the same drop and slightly degrading the text — skip it there.
         fill_crops = await recover_fillin_blocks(client, image, content_blocks)
     else:
-        content_blocks = await extract_page(client, image, None)  # VLM reads the scanned text (primary)
+        content_blocks = await extract_page(client, doc_id, image, None)  # VLM reads the scanned text (primary)
         fill_crops = 0
     img_crops = await ocr_empty_blocks(client, image, content_blocks)  # empty image blocks → VLM-crop
     await _add_stage_seconds(doc_id, "ocr_s", time.time() - ocr_t)
@@ -976,6 +1052,11 @@ async def emit_vlm_only(fields: dict[str, str]) -> None:
 STAGE_SECONDS = (  # accumulated per-page work, in pipeline order — not wall spans, which are mostly queue wait
     ("render_cpu", "render_s"),
     ("ocr_gpu", "ocr_s"),
+    ("decode_wait", "decode_wait_s"),  # the five below decompose ocr_gpu: which of them dominates IS the bottleneck
+    ("layout", "layout_s"),
+    ("budget_wait", "budget_wait_s"),
+    ("cut", "cut_s"),
+    ("predict", "predict_s"),
     ("layer_cpu", "layer_s"),
     ("gapfill_cpu", "gapfill_s"),
 )
