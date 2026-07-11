@@ -11,7 +11,7 @@ from citadel.models.status import DocumentStatus
 class Document(Base):
     __tablename__ = "documents"
 
-    library_id: Mapped[int] = mapped_column(ForeignKey("libraries.id", ondelete="CASCADE"))
+    library_id: Mapped[int] = mapped_column(ForeignKey("libraries.id", ondelete="CASCADE"), index=True)
     filename: Mapped[str]
     status: Mapped[str] = mapped_column(default=DocumentStatus.QUEUED)
     processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)

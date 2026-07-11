@@ -75,15 +75,14 @@ DOC_TTL = 86_400  # safety expiry on doc/blocks/sheets keys: set at submit, refr
 # forever. far longer than any single doc's processing, so it never evicts live state; cleanup shortens it on finish.
 LAYER_TYPES = ("text", "title")  # filled from the PDF text layer on born-digital pages (skip VLM recognition)
 
-MINERU_CLIENTS = (
-    16  # pool of VLM clients; OCR jobs round-robin across them (more, smaller pools → cheaper event-loop walk)
-)
-MINERU_CONN_PER_CLIENT = 12  # sockets per client (reused). clients x per-client = 192 total = OCR_CONCURRENCY, bounded
+MINERU_CLIENTS = 16
+MINERU_CONN_PER_CLIENT = 16
 REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connection, never open unbounded sockets
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
-PAGINATE_CONCURRENCY = CPU_QUARTER  # pdfium process-pool workers, one dedicated pdfium per process
-RENDER_CONCURRENCY = CPU_QUARTER  # in-flight render jobs; matches the pdfium pool width so pages never queue in RAM
-LAYER_CONCURRENCY = CPU_QUARTER  # dedicated pdfium pool for born-digital text-layer extraction, isolated from render
+PAGINATE_CONCURRENCY = CPU_QUARTER
+COUNT_CONCURRENCY = CPU_QUARTER
+RENDER_CONCURRENCY = CPU_QUARTER
+LAYER_CONCURRENCY = CPU_QUARTER
 RENDER_TIMEOUT = 120  # page renders in <1s; if a job strands (dead/hung pool worker) free the slot + retry the page
 RAPIDOCR_CONCURRENCY = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
 GAP_FILL = True  # RapidOCR scanned gap-fill; set to False for clean-image benchmarks (pure VLM)
@@ -170,6 +169,11 @@ def _pdfium_pool(workers: int) -> ProcessPool:
 @lru_cache
 def get_paginate_pool() -> ProcessPool:
     return _pdfium_pool(PAGINATE_CONCURRENCY)
+
+
+@lru_cache
+def get_count_pool() -> ProcessPool:
+    return _pdfium_pool(COUNT_CONCURRENCY)
 
 
 @lru_cache
@@ -406,7 +410,7 @@ async def handle_paginate(fields: dict[str, str]) -> None:
             logger.info("paginate file=%s kind=%s", fields["filename"], kind)
         return
     dpi = RENDER_DPI
-    count = await _run_pool(get_paginate_pool(), count_pdf_pages, str(blob_path(doc_id)), timeout=RENDER_TIMEOUT)
+    count = await _run_pool(get_count_pool(), count_pdf_pages, str(blob_path(doc_id)), timeout=RENDER_TIMEOUT)
     if count <= 0:  # empty/unreadable pdf: no page units will ever be recorded, so drive the doc straight to merge
         await redis.hset(f"doc:{doc_id}", "page_count", 0)
         await get_redis().xadd(STREAM_MERGE, {"doc_id": doc_id})

@@ -20,7 +20,7 @@ from citadel.services.document import (
     mark_library_ready,
 )
 from citadel.services.ingestion import shutdown as shutdown_resources
-from citadel.services.retrieval import calibrate_embedder, embed_library, pending_libraries
+from citadel.services.retrieval import embed_library, pending_libraries
 from config import configure_logging, get_embedder, get_settings
 
 logger = logging.getLogger(__name__)
@@ -113,7 +113,6 @@ def _fatal_on_worker_death(task: asyncio.Task[None]) -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     await asyncio.to_thread(get_embedder)
-    calibrate_embedder()
     queue: asyncio.Queue[int] = asyncio.Queue()
     tasks = [asyncio.create_task(finalize_libraries(queue)), asyncio.create_task(_listen(queue))]
     for task in tasks:

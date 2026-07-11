@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, Text
+from sqlalchemy import ForeignKey, Index, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -9,6 +9,16 @@ EMBED_DIM = 1024
 
 class ContentNode(Base):
     __tablename__ = "content"
+
+    # trigram GIN backs the sparse channel's ILIKE; declared here so autogenerate keeps it (see Embedding)
+    __table_args__ = (
+        Index(
+            "ix_content_search_text_trgm",
+            "search_text",
+            postgresql_using="gin",
+            postgresql_ops={"search_text": "gin_trgm_ops"},
+        ),
+    )
 
     content_id: Mapped[str] = mapped_column(unique=True)
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)

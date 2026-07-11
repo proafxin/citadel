@@ -28,21 +28,13 @@ RRF_K = 60
 CANDIDATES = 1000
 RETRIEVAL_CONCURRENCY = 8  # cap concurrent dense/sparse searches so a many-variant query can't exhaust the DB pool
 
-EMBED_VRAM_HEADROOM = 0.7  # fraction of currently-free VRAM one encode may use; margin for fit error + spikes
-MODEL_MAX_TOKENS = 8192  # BGE-M3 context ceiling — the encoder truncates here, so it caps effective seq length
-BOOTSTRAP_A = 40_000.0  # safe-high per-token seed used only while the startup sweep is still climbing to long lengths
-CALIB_TOKENS = (256, 512, 1024, 2048, 4096, 8192)  # startup sweep points (short→long so early fits size the next batch)
-CALIB_BATCH_MAX = 32  # cap the calibration batch so the sweep stays quick
-CALIB_HEADROOM = 0.5  # extra-conservative VRAM fraction for the calibration batches themselves
-UPSERT_COLS = 4  # content_id, library_id, type, embedding per embeddings row
-UPSERT_CHUNK = 32767 // UPSERT_COLS  # asyncpg caps bind params per statement at 32767 → chunk the multi-row upsert
+EMBED_VRAM_HEADROOM = 0.7
+MODEL_MAX_TOKENS = 8192
+BYTES_PER_TOKEN = 23_000
+UPSERT_COLS = 4
+UPSERT_CHUNK = 32767 // UPSERT_COLS
 
 _EMBED_LOCK = asyncio.Lock()
-# per-item activation ≈ a·L + b·L² (L = seq tokens): fitted online by OLS from measured encodes so batch sizing is
-# VRAM-accurate INCLUDING the superlinear (attention/workspace) term. sums are touched only by the encode thread; the
-# published model tuple is one atomic dict key the sizing loop reads (encodes are serialized, so no real contention).
-_calib_sums: dict[str, float] = {"s2": 0.0, "s3": 0.0, "s4": 0.0, "t1": 0.0, "t2": 0.0, "n": 0.0}
-_calib_model: dict[str, tuple[float, float]] = {"ab": (BOOTSTRAP_A, 0.0)}
 
 
 def _max_tokens(texts: list[str]) -> int:
@@ -53,59 +45,33 @@ def _max_tokens(texts: list[str]) -> int:
     return min(MODEL_MAX_TOKENS, max((len(ids) for ids in encoded), default=1))
 
 
-def _update_calib(activation: int, batch: int, longest: int) -> None:
-    per_item = activation / batch
-    length = float(longest)
-    _calib_sums["s2"] += length**2
-    _calib_sums["s3"] += length**3
-    _calib_sums["s4"] += length**4
-    _calib_sums["t1"] += length * per_item
-    _calib_sums["t2"] += length**2 * per_item
-    _calib_sums["n"] += 1
-    det = _calib_sums["s2"] * _calib_sums["s4"] - _calib_sums["s3"] ** 2
-    if _calib_sums["n"] >= 2 and det > 0:  # solve the 2x2 OLS normal equations for a, b; clamp unphysical negatives
-        a = (_calib_sums["t1"] * _calib_sums["s4"] - _calib_sums["t2"] * _calib_sums["s3"]) / det
-        b = (_calib_sums["s2"] * _calib_sums["t2"] - _calib_sums["s3"] * _calib_sums["t1"]) / det
-        _calib_model["ab"] = (max(a, 0.0), max(b, 0.0))
+def available_vram() -> int:
+    driver_free, _ = torch.cuda.mem_get_info()
+    cached_free = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
+    return driver_free + cached_free
 
 
-def _per_item(longest: int) -> float:
-    a, b = _calib_model["ab"]
-    return a * longest + b * longest * longest
-
-
-def calibrate_embedder() -> None:
-    # startup VRAM sweep: fit per_item(L)=a·L+b·L² by encoding synthetic batches at known sequence lengths, so batch
-    # sizing is accurate before any real embedding. activation is content-independent (driven by batch × seq), so
-    # synthetic text is representative. short→long: each measured point refines the model that sizes the next batch.
-    tokenizer = get_embedder().tokenizer
-    for target in CALIB_TOKENS:
-        text = "data " * target
-        longest = min(MODEL_MAX_TOKENS, len(tokenizer(text, add_special_tokens=True)["input_ids"]))
-        free, _ = torch.cuda.mem_get_info()
-        batch = max(1, min(CALIB_BATCH_MAX, int(free * CALIB_HEADROOM / _per_item(longest))))
-        torch.cuda.reset_peak_memory_stats()
-        baseline = torch.cuda.memory_allocated()
-        get_embedder().encode([text] * batch, batch_size=batch, normalize_embeddings=True, show_progress_bar=False)
-        activation = torch.cuda.max_memory_allocated() - baseline
-        if activation > 0:
-            _update_calib(activation, batch, longest)
-        a, b = _calib_model["ab"]
-        logger.info("calibrate longest=%d batch=%d act=%dMiB a=%.0f b=%.4f", longest, batch, activation >> 20, a, b)
+def token_budget() -> int:
+    return max(MODEL_MAX_TOKENS, int(EMBED_VRAM_HEADROOM * available_vram() / BYTES_PER_TOKEN))
 
 
 def embed_texts(texts: list[str], longest: int) -> list[list[float]]:
-    # the group is pre-sized to fit one pass at the VRAM budget, so encode it whole (batch_size = len). the peak is
-    # logged (not fitted — the model is fixed by the startup sweep) so a misprediction is visible against free.
     if not texts:
         return []
+    budget = token_budget()
+    batch_size = max(1, budget // max(longest, 1))
     torch.cuda.reset_peak_memory_stats()
     baseline = torch.cuda.memory_allocated()
-    vectors = get_embedder().encode(texts, batch_size=len(texts), normalize_embeddings=True, show_progress_bar=False)
+    vectors = get_embedder().encode(texts, batch_size=batch_size, normalize_embeddings=True, show_progress_bar=False)
     activation = torch.cuda.max_memory_allocated() - baseline
-    free, _ = torch.cuda.mem_get_info()
     logger.info(
-        "embed_encode rows=%d longest=%d act=%dMiB free=%dMiB", len(texts), longest, activation >> 20, free >> 20
+        "embed_encode rows=%d longest=%d batch=%d budget=%d act=%dMiB avail=%dMiB",
+        len(texts),
+        longest,
+        batch_size,
+        budget,
+        activation >> 20,
+        available_vram() >> 20,
     )
     return [vector.tolist() for vector in vectors]
 
@@ -241,16 +207,16 @@ def _upsert_chunks(records: list[dict[str, object]], size: int) -> Iterator[list
         yield records[start : start + size]
 
 
-def _take_group(nodes: list[_PendingNode], start: int, budget: float) -> tuple[int, int]:
-    # iterate in original order; add a node while the estimated VRAM of the batch still fits the budget, else flush.
-    # a batch pads to its longest sequence, so estimated VRAM = count × per_item(longest). always takes ≥1 node.
+def _take_group(nodes: list[_PendingNode], start: int, budget: int) -> tuple[int, int]:
+    total = nodes[start].token_len
     longest = nodes[start].token_len
     end = start + 1
     while end < len(nodes):
-        candidate_longest = max(longest, nodes[end].token_len)
-        if (end - start + 1) * _per_item(candidate_longest) > budget:
+        tokens = nodes[end].token_len
+        if total + tokens > budget:
             break
-        longest = candidate_longest
+        total += tokens
+        longest = max(longest, tokens)
         end += 1
     return end, longest
 
@@ -295,8 +261,7 @@ async def embed_library(library_id: int) -> int:
     index = 0
     group_no = 0
     while index < total:
-        free, _ = torch.cuda.mem_get_info()
-        end, longest = _take_group(pending, index, EMBED_VRAM_HEADROOM * free)
+        end, longest = _take_group(pending, index, token_budget())
         group_no += 1
         embedded += await _embed_group(library_id, pending[index:end], longest, f"lib{library_id}.g{group_no}")
         index = end
