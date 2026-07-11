@@ -220,6 +220,10 @@ async def shutdown() -> None:
 BLOB_DIR = Path(tempfile.gettempdir()) / "citadel-blobs"
 
 
+async def _add_stage_seconds(doc_id: str, field: str, seconds: float) -> None:
+    await get_redis().hincrbyfloat(f"doc:{doc_id}", field, seconds)
+
+
 def blob_path(doc_id: str | int) -> Path:
     # doc-id-keyed source store on a shared host path (the stand-in for S3): every stage reads the source from here
     # instead of copying it through Redis, so a large PDF is memory-mapped once, never pickled per page
@@ -436,6 +440,7 @@ async def handle_paginate(fields: dict[str, str]) -> None:
     await (
         pipe.execute()
     )  # emit one render job per page → the bounded render consumer does the work, no in-handler fan-out
+    await redis.hsetnx(f"doc:{doc_id}", "t_paginated", time.time())
     logger.info("paginate file=%s pages=%d", fields["filename"], count)
 
 
@@ -451,9 +456,11 @@ async def handle_render(fields: dict[str, str]) -> None:
         return  # doc already finished → a reclaimed render job is a safe no-op
     redis = get_redis()
     await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
+    render_t = time.time()
     image_bytes, digital = await _run_pool(
         get_paginate_pool(), render_pdf_page, str(path), page_idx, dpi, timeout=RENDER_TIMEOUT
     )
+    await _add_stage_seconds(doc_id, "render_s", time.time() - render_t)
     await redis.xadd(
         STREAM_PAGES,
         {"doc_id": doc_id, "page_idx": page_idx, "image": image_bytes, "digital": "1" if digital else "0"},
@@ -740,6 +747,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     digital = fields.get("digital") == "1"
     await get_redis().hincrby(f"doc:{doc_id}", "started_count", 1)
     client = get_mineru_client()  # one of the pooled clients, round-robin — its httpx pool is reused, not per-page
+    ocr_t = time.time()
     with Image.open(io.BytesIO(image)) as img:
         if digital:
             # born-digital page: VLM does layout + recognizes only non-text; text/title come from the exact text layer
@@ -766,6 +774,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
             content_blocks = await client.aio_two_step_extract(img)  # VLM reads the scanned text (primary)
             fill_crops = 0
         img_crops = await ocr_empty_blocks(client, img, content_blocks)  # empty image blocks → VLM-crop
+    await _add_stage_seconds(doc_id, "ocr_s", time.time() - ocr_t)
     blocks = [map_content_block(cb, page_idx) for cb in content_blocks]
     if img_crops + fill_crops >= CROP_LOG_THRESHOLD:  # surface only crop-heavy pages — no per-page spam over thousands
         logger.info(
@@ -802,8 +811,10 @@ async def handle_gapfill(fields: dict[str, str], image: bytes) -> None:
     # decoupled CPU stage: RapidOCR adds the lines the VLM dropped on a scanned page, then the page is finalized
     page_idx = int(fields["page_idx"])
     blocks = _load_blocks(fields["blocks"])
+    gapfill_t = time.time()
     with Image.open(io.BytesIO(image)) as img:
         await recover_scanned_gaps(img, blocks, page_idx)
+    await _add_stage_seconds(fields["doc_id"], "gapfill_s", time.time() - gapfill_t)
     await _emit_page(fields["doc_id"], page_idx, blocks)
 
 
@@ -816,17 +827,28 @@ async def emit_vlm_only(fields: dict[str, str]) -> None:
 
 
 def _stage_line(doc: dict[bytes, bytes]) -> str:
+    # render/ocr wall time is meaningless: render is backpressured on the pages stream, so its span is GPU queue wait,
+    # not work. report the ACTUAL cpu/gpu seconds each stage spent (accumulated per page) plus the queue wait separately
     def g(key: str) -> float:
         return float(doc.get(key.encode(), 0) or 0)
 
-    proc, paginate, pages, merge, done = g("t_proc"), g("t_paginate"), g("t_pages"), g("t_merge"), g("t_done")
+    proc, paginate, paginated = g("t_proc"), g("t_paginate"), g("t_paginated")
+    pages, merge, done = g("t_pages"), g("t_merge"), g("t_done")
     walls: list[str] = []
     if proc and paginate:
         walls.append(f"normalize={paginate - proc:.1f}s")
-    if paginate and pages:
-        walls.append(f"paginate={pages - paginate:.1f}s")
+    if paginate and paginated:
+        walls.append(f"paginate={paginated - paginate:.1f}s")
+    if paginated and pages:
+        walls.append(f"queued={pages - paginated:.1f}s")
+    if g("render_s"):
+        walls.append(f"render_cpu={g('render_s'):.1f}s")
+    if g("ocr_s"):
+        walls.append(f"ocr_gpu={g('ocr_s'):.1f}s")
+    if g("gapfill_s"):
+        walls.append(f"gapfill_cpu={g('gapfill_s'):.1f}s")
     if pages and merge:
-        walls.append(f"pages={merge - pages:.1f}s")
+        walls.append(f"pages_wall={merge - pages:.1f}s")
     if merge and done:
         walls.append(f"merge={done - merge:.1f}s")
     return " ".join(walls)
