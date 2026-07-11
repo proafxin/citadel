@@ -1,19 +1,20 @@
-import { motion } from "motion/react";
-import { useState } from "react";
 import { DocumentRow } from "@/components/document-row";
 import { Eyebrow } from "@/components/eyebrow";
 import { Card } from "@/components/ui/card";
-import type { DocumentItem, Library } from "@/lib/api";
+import type { Library } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { type Bucket, type DocState, bucketOf, isSettled } from "@/lib/doc-state";
 import { formatDuration } from "@/lib/format";
+import { motion } from "motion/react";
+import { useState } from "react";
 
-export type Bucket = "processing" | "ready" | "failed" | "skipped";
 export type Filter = "all" | Bucket;
 
 const PAGE_SIZE = 10;
 
 const PILLS: { key: Filter; label: string }[] = [
   { key: "all", label: "All" },
+  { key: "queued", label: "Queued" },
   { key: "processing", label: "Processing" },
   { key: "ready", label: "Ready" },
   { key: "failed", label: "Failed" },
@@ -21,48 +22,28 @@ const PILLS: { key: Filter; label: string }[] = [
 ];
 
 const DOT: Record<Bucket, string> = {
+  queued: "bg-ink-muted",
   processing: "bg-accent",
   ready: "bg-emerald-500",
   failed: "bg-red-400",
   skipped: "bg-ink-muted",
 };
 
-export function bucketOf(doc: DocumentItem): Bucket {
-  switch (doc.status) {
-    case "failed":
-      return "failed";
-    case "skipped":
-      return "skipped";
-    case "ingested":
-    case "embedded":
-    case "partial":
-      return "ready";
-    default:
-      return "processing";
-  }
-}
-
-export function hasActive(docs: DocumentItem[], searchable: boolean): boolean {
-  return docs.some(
-    (doc) => doc.status === "queued" || doc.status === "processing" || (searchable && doc.status === "ingested"),
-  );
-}
-
 export function LibraryProgress({
-  docs,
+  states,
   library,
   filter,
   onFilter,
 }: {
-  docs: DocumentItem[];
+  states: DocState[];
   library: Library | undefined;
   filter: Filter;
   onFilter: (next: Filter) => void;
 }) {
-  const counts: Record<Bucket, number> = { processing: 0, ready: 0, failed: 0, skipped: 0 };
-  for (const doc of docs) counts[bucketOf(doc)] += 1;
-  const settled = counts.ready + counts.failed + counts.skipped;
-  const overall = docs.length > 0 ? settled / docs.length : 0;
+  const counts: Record<Bucket, number> = { queued: 0, processing: 0, ready: 0, failed: 0, skipped: 0 };
+  for (const doc of states) counts[bucketOf(doc)] += 1;
+  const settled = states.filter(isSettled).length;
+  const overall = states.length > 0 ? settled / states.length : 0;
   const timings: string[] = [];
   if (library?.ingest_seconds != null) timings.push(`Ingestion runtime ${formatDuration(library.ingest_seconds)}`);
   if (library?.total_seconds != null) timings.push(`Wall time ${formatDuration(library.total_seconds)}`);
@@ -72,7 +53,7 @@ export function LibraryProgress({
       <div className="flex items-center justify-between">
         <Eyebrow>Progress</Eyebrow>
         <span className="text-xs text-ink-muted">
-          {counts.ready}/{docs.length} ready
+          {counts.ready}/{states.length} ready
           {timings.length > 0 ? ` · ${timings.join(" · ")}` : ""}
         </span>
       </div>
@@ -96,7 +77,7 @@ export function LibraryProgress({
             )}
           >
             {pill.key !== "all" ? <span className={cn("size-1.5 rounded-full", DOT[pill.key])} /> : null}
-            {pill.label} {pill.key === "all" ? docs.length : counts[pill.key]}
+            {pill.label} {pill.key === "all" ? states.length : counts[pill.key]}
           </button>
         ))}
       </div>
@@ -106,21 +87,21 @@ export function LibraryProgress({
 
 export function DocumentsList({
   libraryId,
-  docs,
+  states,
   filter,
   isLoading,
   isError,
   error,
 }: {
   libraryId: number;
-  docs: DocumentItem[];
+  states: DocState[];
   filter: Filter;
   isLoading: boolean;
   isError: boolean;
   error: unknown;
 }) {
   const [page, setPage] = useState(0);
-  const filtered = filter === "all" ? docs : docs.filter((doc) => bucketOf(doc) === filter);
+  const filtered = filter === "all" ? states : states.filter((doc) => bucketOf(doc) === filter);
   const lastPage = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const current = Math.min(page, lastPage - 1);
   const shown = filtered.slice(current * PAGE_SIZE, current * PAGE_SIZE + PAGE_SIZE);
@@ -135,7 +116,7 @@ export function DocumentsList({
         {isError ? (
           <Card className="border-red-500/30 p-5 text-sm text-red-400">{(error as Error).message}</Card>
         ) : null}
-        {docs.length === 0 && !isLoading ? (
+        {states.length === 0 && !isLoading ? (
           <Card className="h-full p-6 text-sm text-ink-muted">No documents yet.</Card>
         ) : null}
         {shown.map((doc) => (

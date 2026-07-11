@@ -1,9 +1,9 @@
-import { createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/react-router";
 import { AppShell } from "@/components/app-shell";
 import { DocumentViewerPage } from "@/routes/document-viewer";
 import { LibrariesPage } from "@/routes/libraries";
 import { LibraryAskPage } from "@/routes/library-ask";
 import { LibraryDetailPage } from "@/routes/library-detail";
+import { Outlet, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 
 const rootRoute = createRootRoute({
   component: () => (

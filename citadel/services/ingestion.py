@@ -36,6 +36,7 @@ from sqlalchemy import select
 from citadel.db import get_sessionmaker
 from citadel.models.document import Document
 from citadel.models.status import DocumentStatus
+from citadel.proc import name_process
 from citadel.schemas.content import Block
 from citadel.schemas.document import DocProgress, DocumentRead, IngestResponse
 from citadel.services.document import (
@@ -154,31 +155,31 @@ T = TypeVar("T")
 _PROCESS_POOLS: list[ProcessPool] = []
 
 
-def _pdfium_pool(workers: int) -> ProcessPool:
+def _pdfium_pool(workers: int, label: str) -> ProcessPool:
     # one process per worker → each gets its own pdfium (pdfium is not thread-safe; isolate by process). forkserver
     # preloads only the lean pdf module (not __main__ → no onnxruntime/cv2/mineru/xgboost in a pdfium worker). workers
     # are long-lived (no max_tasks) so each keeps its bounded PdfDocument LRU warm across a document's pages; pebble
     # kills+replaces only the specific worker a per-task timeout fires on, so a hung page can't permanently shrink it.
     ctx = multiprocessing.get_context("forkserver")
     ctx.set_forkserver_preload(["citadel.services.pdf"])
-    pool = ProcessPool(max_workers=workers, context=ctx)
+    pool = ProcessPool(max_workers=workers, context=ctx, initializer=name_process, initargs=(label,))
     _PROCESS_POOLS.append(pool)
     return pool
 
 
 @lru_cache
 def get_paginate_pool() -> ProcessPool:
-    return _pdfium_pool(PAGINATE_CONCURRENCY)
+    return _pdfium_pool(PAGINATE_CONCURRENCY, "render")
 
 
 @lru_cache
 def get_count_pool() -> ProcessPool:
-    return _pdfium_pool(COUNT_CONCURRENCY)
+    return _pdfium_pool(COUNT_CONCURRENCY, "count")
 
 
 @lru_cache
 def get_layer_pool() -> ProcessPool:
-    return _pdfium_pool(LAYER_CONCURRENCY)
+    return _pdfium_pool(LAYER_CONCURRENCY, "layer")
 
 
 async def _run_pool[T](pool: ProcessPool, func: Callable[..., T], *args: object, timeout: float) -> T:

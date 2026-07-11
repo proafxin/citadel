@@ -1,16 +1,16 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "@tanstack/react-router";
-import { ArrowLeft, ArrowUp, Download, MessageSquare } from "lucide-react";
-import { useState } from "react";
-import { isIngested, isInflight } from "@/components/document-row";
-import { DocumentsList, type Filter, hasActive, LibraryProgress } from "@/components/documents-panel";
 import { DocumentUpload } from "@/components/document-upload";
+import { DocumentsList, type Filter, LibraryProgress } from "@/components/documents-panel";
 import { Eyebrow } from "@/components/eyebrow";
 import { NowProcessing } from "@/components/now-processing";
 import { TierBadge } from "@/components/tier-badge";
 import { Card } from "@/components/ui/card";
-import { exportUrl, getLibrary, listDocuments, updateLibrary } from "@/lib/api";
+import { exportUrl, getLibrary, getProgress, listDocuments, updateLibrary } from "@/lib/api";
+import { hasActive, interpret, isSettled } from "@/lib/doc-state";
 import { tierMeta } from "@/lib/tiers";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link, useParams } from "@tanstack/react-router";
+import { ArrowLeft, ArrowUp, Download, MessageSquare } from "lucide-react";
+import { useMemo, useState } from "react";
 
 export function LibraryDetailPage() {
   const { libraryId } = useParams({ from: "/library/$libraryId" });
@@ -24,11 +24,8 @@ export function LibraryDetailPage() {
   });
   const meta = libQ.data ? tierMeta(libQ.data.tier) : null;
   const searchable = meta?.searchable ?? false;
-  const docsQ = useQuery({
-    queryKey: ["documents", id],
-    queryFn: () => listDocuments(id),
-    refetchInterval: (query) => (hasActive(query.state.data ?? [], searchable) ? 2_000 : false),
-  });
+  const docsQ = useQuery({ queryKey: ["documents", id], queryFn: () => listDocuments(id), refetchInterval: 2_000 });
+  const progressQ = useQuery({ queryKey: ["progress", id], queryFn: () => getProgress(id), refetchInterval: 1_500 });
   const upgrade = useMutation({
     mutationFn: () => updateLibrary(id, libQ.data?.name ?? "", "tier_2"),
     onSuccess: () => {
@@ -36,17 +33,15 @@ export function LibraryDetailPage() {
       qc.invalidateQueries({ queryKey: ["documents", id] });
     },
   });
-  const docs = docsQ.data ?? [];
-  const processing = docs.some(isInflight);
-  const ingested = docs.length > 0 && !processing;
-  const ready = searchable && docs.length > 0 && !docs.some((doc) => isInflight(doc) || isIngested(doc));
+
+  const states = useMemo(() => interpret(docsQ.data ?? [], progressQ.data ?? []), [docsQ.data, progressQ.data]);
+  const processing = hasActive(states, false);
+  const ingested = states.length > 0 && !processing;
+  const ready = searchable && states.length > 0 && states.every(isSettled);
 
   return (
     <div>
-      <Link
-        to="/"
-        className="inline-flex items-center gap-1.5 text-sm text-ink-muted transition-colors hover:text-ink"
-      >
+      <Link to="/" className="inline-flex items-center gap-1.5 text-sm text-ink-muted transition-colors hover:text-ink">
         <ArrowLeft size={15} /> Libraries
       </Link>
 
@@ -73,9 +68,9 @@ export function LibraryDetailPage() {
         <DocumentUpload libraryId={id} />
       </div>
 
-      {docs.length > 0 ? (
+      {states.length > 0 ? (
         <div className="mt-6">
-          <LibraryProgress docs={docs} library={libQ.data} filter={filter} onFilter={setFilter} />
+          <LibraryProgress states={states} library={libQ.data} filter={filter} onFilter={setFilter} />
         </div>
       ) : null}
 
@@ -83,7 +78,7 @@ export function LibraryDetailPage() {
         <DocumentsList
           key={filter}
           libraryId={id}
-          docs={docs}
+          states={states}
           filter={filter}
           isLoading={docsQ.isLoading}
           isError={docsQ.isError}
@@ -97,7 +92,7 @@ export function LibraryDetailPage() {
           </div>
           <div className="mt-4 flex-1">
             {processing ? (
-              <NowProcessing libraryId={id} />
+              <NowProcessing states={states} />
             ) : (
               <Card className="flex h-full flex-col p-6 text-sm text-ink-muted">
                 {!meta?.searchable ? (

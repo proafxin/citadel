@@ -1,14 +1,14 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
-import { Plus, Trash2 } from "lucide-react";
-import { motion } from "motion/react";
-import type { ReactNode } from "react";
 import { CreateLibraryDialog } from "@/components/create-library-dialog";
 import { Eyebrow } from "@/components/eyebrow";
 import { TierBadge } from "@/components/tier-badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { deleteLibrary, listLibraries } from "@/lib/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import { Plus, Trash2 } from "lucide-react";
+import { motion } from "motion/react";
+import type { ReactNode } from "react";
 
 export function LibrariesPage() {
   const qc = useQueryClient();
@@ -46,11 +46,7 @@ export function LibrariesPage() {
                 transition={{ duration: 0.22, delay: i * 0.03, ease: [0.16, 1, 0.3, 1] }}
               >
                 <Card className="group relative transition-colors hover:border-ink-muted/40">
-                  <Link
-                    to="/library/$libraryId"
-                    params={{ libraryId: String(lib.id) }}
-                    className="block p-5"
-                  >
+                  <Link to="/library/$libraryId" params={{ libraryId: String(lib.id) }} className="block p-5">
                     <TierBadge tier={lib.tier} />
                     <h2 className="mt-3 font-display text-xl text-ink">{lib.name}</h2>
                   </Link>
@@ -85,11 +81,7 @@ function GridSkeleton() {
 }
 
 function Notice({ children }: { children: ReactNode }) {
-  return (
-    <Card className="border-red-500/30 p-5 text-sm text-red-400">
-      Couldn’t load libraries — {children}
-    </Card>
-  );
+  return <Card className="border-red-500/30 p-5 text-sm text-red-400">Couldn’t load libraries — {children}</Card>;
 }
 
 function EmptyState() {

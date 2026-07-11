@@ -1,10 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "@tanstack/react-router";
-import { ArrowLeft } from "lucide-react";
 import { Eyebrow } from "@/components/eyebrow";
 import { Card } from "@/components/ui/card";
 import { getResult } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { useQuery } from "@tanstack/react-query";
+import { Link, useParams } from "@tanstack/react-router";
+import { ArrowLeft } from "lucide-react";
 
 type ListItem = { content?: string; depth?: number };
 

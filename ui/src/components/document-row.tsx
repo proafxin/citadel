@@ -1,22 +1,12 @@
-import { Link } from "@tanstack/react-router";
 import { StatusBadge } from "@/components/status-badge";
 import { Card } from "@/components/ui/card";
-import type { DocumentItem } from "@/lib/api";
+import { type DocState, isSettled, isViewable } from "@/lib/doc-state";
 import { formatDuration } from "@/lib/format";
+import { Link } from "@tanstack/react-router";
 
-const VIEWABLE = new Set(["ingested", "embedded", "partial"]);
-
-export function isInflight(doc: DocumentItem): boolean {
-  return doc.status === "queued" || doc.status === "processing";
-}
-
-export function isIngested(doc: DocumentItem): boolean {
-  return doc.status === "ingested";
-}
-
-export function DocumentRow({ doc, libraryId }: { doc: DocumentItem; libraryId: number }) {
-  const active = isInflight(doc);
-  const viewable = VIEWABLE.has(doc.status);
+export function DocumentRow({ doc, libraryId }: { doc: DocState; libraryId: number }) {
+  const active = !isSettled(doc);
+  const pct = doc.total > 0 ? Math.min(100, Math.round((doc.done / doc.total) * 100)) : 0;
 
   const inner = (
     <>
@@ -26,18 +16,22 @@ export function DocumentRow({ doc, libraryId }: { doc: DocumentItem; libraryId: 
           {doc.elapsed != null ? (
             <span className="text-xs tabular-nums text-ink-muted">{formatDuration(doc.elapsed)}</span>
           ) : null}
-          <StatusBadge doc={doc} />
+          <StatusBadge status={doc.status} />
         </div>
       </div>
       {active ? (
         <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-surface-2">
-          <div className="h-full w-1/3 animate-pulse rounded-full bg-accent/60" />
+          {doc.total > 0 ? (
+            <div className="h-full rounded-full bg-accent transition-all duration-500" style={{ width: `${pct}%` }} />
+          ) : (
+            <div className="h-full w-1/3 animate-pulse rounded-full bg-accent/60" />
+          )}
         </div>
       ) : null}
     </>
   );
 
-  if (viewable) {
+  if (isViewable(doc)) {
     return (
       <Link
         to="/library/$libraryId/document/$docId"

@@ -1,11 +1,10 @@
-import type { DocumentItem } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import type { Status } from "@/lib/doc-state";
 
-const LABELS: Record<string, string> = {
+const LABELS: Record<Status, string> = {
   queued: "Queued",
   processing: "Processing",
-  ingested: "Ready",
-  embedded: "Ready",
+  ready: "Ready",
   partial: "Partial",
   failed: "Failed",
   skipped: "Skipped",
@@ -13,22 +12,14 @@ const LABELS: Record<string, string> = {
 
 type Tone = "ready" | "warn" | "bad" | "muted" | "active";
 
-function toneFor(key: string): Tone {
-  switch (key) {
-    case "ingested":
-    case "embedded":
-      return "ready";
-    case "partial":
-      return "warn";
-    case "failed":
-      return "bad";
-    case "skipped":
-    case "queued":
-      return "muted";
-    default:
-      return "active";
-  }
-}
+const TONES: Record<Status, Tone> = {
+  queued: "muted",
+  processing: "active",
+  ready: "ready",
+  partial: "warn",
+  failed: "bad",
+  skipped: "muted",
+};
 
 const TONE_PILL: Record<Tone, string> = {
   ready: "bg-emerald-500/10 text-emerald-500",
@@ -46,10 +37,8 @@ const TONE_DOT: Record<Tone, string> = {
   active: "animate-pulse bg-accent",
 };
 
-export function StatusBadge({ doc }: { doc: DocumentItem }) {
-  const key = doc.status.toLowerCase();
-  const tone = toneFor(key);
-  const label = LABELS[key] ?? "Processing";
+export function StatusBadge({ status }: { status: Status }) {
+  const tone = TONES[status];
 
   return (
     <span
@@ -59,7 +48,7 @@ export function StatusBadge({ doc }: { doc: DocumentItem }) {
       )}
     >
       <span className={cn("size-1.5 rounded-full", TONE_DOT[tone])} />
-      {label}
+      {LABELS[status]}
     </span>
   );
 }

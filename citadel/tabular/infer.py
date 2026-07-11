@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import xgboost as xgb
 
+from citadel.proc import name_process
 from citadel.schemas.table import TableStructure
 from citadel.tabular.detect import featurize
 
@@ -115,6 +116,7 @@ def predict(rows: list[list[str]]) -> list[bool]:
 
 def _cpu_only() -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+    name_process("header")
 
 
 @functools.lru_cache(maxsize=1)

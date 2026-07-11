@@ -5,8 +5,7 @@ from cachetools import LRUCache
 from PIL import Image
 
 MAX_IMAGE_SIDE = 2500
-PDF_CACHE_MAX = 2  # open pdfium handles per (long-lived) pool worker: a held handle costs hundreds of MB, times every
-# pool process, while re-parsing costs negligible cpu. counting never caches at all — it reads and drops the handle
+PDF_CACHE_MAX = 4
 
 
 class _PdfCache(LRUCache[str, pdfium.PdfDocument]):
@@ -36,7 +35,6 @@ def downscale(img: Image.Image) -> Image.Image:
 
 
 def count_pdf_pages(path: str) -> int:
-    # a document is counted exactly once, so caching its handle has a 0% hit rate and holds hundreds of MB for nothing
     with pdfium.PdfDocument(path) as pdf:
         return len(pdf)
 

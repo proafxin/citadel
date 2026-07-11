@@ -1,7 +1,7 @@
-import { Monitor, Moon, Sun } from "lucide-react";
-import { AnimatePresence, motion } from "motion/react";
 import { cn } from "@/lib/cn";
 import { useTheme } from "@/lib/theme";
+import { Monitor, Moon, Sun } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 
 export function ThemeToggle() {
   const { mode, theme, toggle, setSystem } = useTheme();

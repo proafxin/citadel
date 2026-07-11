@@ -1,13 +1,13 @@
-import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "@tanstack/react-router";
-import { ArrowLeft, SendHorizontal } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
 import { Eyebrow } from "@/components/eyebrow";
 import { Markdown } from "@/components/markdown";
 import { Card } from "@/components/ui/card";
 import { getLibrary, queryStream } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { tierMeta } from "@/lib/tiers";
+import { useQuery } from "@tanstack/react-query";
+import { Link, useParams } from "@tanstack/react-router";
+import { ArrowLeft, SendHorizontal } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 type Message = { role: "user" | "assistant"; content: string };
 
@@ -83,9 +83,7 @@ export function LibraryAskPage() {
       ) : (
         <>
           <div className="mt-6 flex-1 space-y-5">
-            {messages.length === 0 ? (
-              <p className="text-sm text-ink-muted">Ask anything about this library.</p>
-            ) : null}
+            {messages.length === 0 ? <p className="text-sm text-ink-muted">Ask anything about this library.</p> : null}
             {messages.map((m, i) => (
               <div key={`m-${i}`} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
                 {m.role === "user" ? (
@@ -93,9 +91,7 @@ export function LibraryAskPage() {
                     {m.content}
                   </div>
                 ) : (
-                  <div className="max-w-full">
-                    {m.content ? <Markdown>{m.content}</Markdown> : <ThinkingDots />}
-                  </div>
+                  <div className="max-w-full">{m.content ? <Markdown>{m.content}</Markdown> : <ThinkingDots />}</div>
                 )}
               </div>
             ))}

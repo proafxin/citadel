@@ -6,7 +6,10 @@ from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+import psutil
+
 from citadel.db import get_engine
+from citadel.proc import PROC_PREFIX
 from citadel.services.ingestion import (
     GROUP,
     MAX_ATTEMPTS,
@@ -58,8 +61,20 @@ GAPFILL_BOUND = RAPIDOCR_CONCURRENCY + GAPFILL_BUFFER
 BLOCK_MS = 5000
 
 _tasks: set[asyncio.Task[None]] = set()
+_caps: dict[str, "_Capacity"] = {}  # every consumer registers its gate here so the sampler can log in-flight per stage
 
 Spawn = Callable[[str, dict[bytes, bytes]], None]
+
+MEM_SAMPLE_SECONDS = 10
+MEM_STREAMS = (
+    STREAM_INGEST,
+    STREAM_NORMALIZED,
+    STREAM_RENDER,
+    STREAM_PAGES,
+    STREAM_GAPFILL,
+    STREAM_MERGE,
+    STREAM_TABLES,
+)
 
 
 @dataclass
@@ -310,14 +325,14 @@ async def _tabular_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> 
 
 # ---- normalize: read `ingest`, convert, write `normalized`. one dedicated libreoffice profile per job
 async def normalize() -> None:
-    cap = _Capacity(NORMALIZE_CONCURRENCY)
+    cap = _caps.setdefault("normalize", _Capacity(NORMALIZE_CONCURRENCY))
     profiles = make_profile_pool(cap.limit)
     await _drive(STREAM_INGEST, cap, lambda mid, raw: _spawn(_normalize_job(cap, profiles, mid, raw)))
 
 
 # ---- paginate: read `normalized`, count pages, emit one `render` job per page (markup/tabular resolved inline)
 async def paginate() -> None:
-    cap = _Capacity(PAGINATE_CONCURRENCY)
+    cap = _caps.setdefault("paginate", _Capacity(PAGINATE_CONCURRENCY))
     await _drive(STREAM_NORMALIZED, cap, lambda mid, raw: _spawn(_paginate_job(cap, mid, raw)))
 
 
@@ -329,7 +344,7 @@ async def _pages_room() -> int:
 # ---- render: read `render`, render one PDF page via the pdfium pool, write `pages`. bounded to the pool width and
 # gated on `pages` depth so render never runs ahead of OCR by more than PAGES_BUFFER images (RAM bound) -----------
 async def render() -> None:
-    cap = _Capacity(RENDER_CONCURRENCY)
+    cap = _caps.setdefault("render", _Capacity(RENDER_CONCURRENCY))
     await _drive(STREAM_RENDER, cap, lambda mid, raw: _spawn(_render_job(cap, mid, raw)), _pages_room)
 
 
@@ -342,26 +357,83 @@ async def _gapfill_room() -> int:
 # depth so a scanned-heavy doc can't pile up gap-fill page images faster than RapidOCR drains them -----------------
 async def ocr() -> None:
     await asyncio.to_thread(get_mineru_client)  # build the pooled clients once now, not lazily mid-OCR
-    cap = _Capacity(OCR_CONCURRENCY)
+    cap = _caps.setdefault("ocr", _Capacity(OCR_CONCURRENCY))
     await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)), _gapfill_room)
 
 
 # ---- gapfill: read `gapfill`, RapidOCR the lines the VLM dropped, finalize the page. CPU-bound, bounded low ----
 async def gapfill() -> None:
-    cap = _Capacity(RAPIDOCR_CONCURRENCY)
+    cap = _caps.setdefault("gapfill", _Capacity(RAPIDOCR_CONCURRENCY))
     await _drive(STREAM_GAPFILL, cap, lambda mid, raw: _spawn(_gapfill_job(cap, mid, raw)))
 
 
 # ---- merge: read `merge`, assemble result.json, clean up. light concurrency ----------------------------
 async def merge() -> None:
-    cap = _Capacity(MERGE_CONCURRENCY)
+    cap = _caps.setdefault("merge", _Capacity(MERGE_CONCURRENCY))
     await _drive(STREAM_MERGE, cap, lambda mid, raw: _spawn(_merge_job(cap, mid, raw)))
 
 
 # ---- tabular: read `tables`, model header-detection + describe, write tables. bounded by the header pool -----
 async def tabular() -> None:
-    cap = _Capacity(HEADER_WORKERS)
+    cap = _caps.setdefault("tabular", _Capacity(HEADER_WORKERS))
     await _drive(STREAM_TABLES, cap, lambda mid, raw: _spawn(_tabular_job(cap, mid, raw)))
+
+
+def _mb(value: float) -> int:
+    return int(value) // 1024 // 1024
+
+
+def _group_of(proc: psutil.Process) -> str:
+    name = proc.name()
+    if name.startswith(PROC_PREFIX):
+        return name.removeprefix(PROC_PREFIX)
+    if name.startswith(("soffice", "oosplash")):
+        return "soffice"
+    return name
+
+
+def _child_memory(child: psutil.Process, groups: dict[str, list[int]]) -> None:
+    try:
+        groups.setdefault(_group_of(child), []).append(child.memory_full_info().uss)
+    except psutil.NoSuchProcess:  # pool worker exited mid-walk: it is gone, so it holds nothing to attribute
+        return
+
+
+def _tree_memory() -> tuple[int, int, dict[str, tuple[int, int]]]:
+    # USS, not RSS: RSS counts every page a child shares with its parent, so summing it over a pool double-counts
+    # the interpreter once per worker. USS is what that process alone would hand back to the OS if it died.
+    me = psutil.Process()
+    groups: dict[str, list[int]] = {}
+    for child in me.children(recursive=True):
+        _child_memory(child, groups)
+    memory = psutil.virtual_memory()
+    totals = {name: (len(values), sum(values)) for name, values in groups.items()}
+    return me.memory_full_info().uss, memory.total - memory.available, totals
+
+
+async def _sample_memory() -> None:
+    redis = get_redis()
+    own, sys_used, groups = await asyncio.to_thread(_tree_memory)
+    depths = {name: await redis.xlen(name) for name in MEM_STREAMS}
+    redis_used = int((await redis.info("memory"))["used_memory"])
+    children = " ".join(f"{name}={_mb(total)}MB/{count}p" for name, (count, total) in sorted(groups.items()))
+    inflight = " ".join(f"{name}={cap.inflight}/{cap.limit}" for name, cap in _caps.items() if cap.inflight)
+    queues = " ".join(f"{name}={depth}" for name, depth in depths.items() if depth)
+    logger.info(
+        "mem sys=%dMB worker=%dMB redis=%dMB | children %s | inflight %s | streams %s",
+        _mb(sys_used),
+        _mb(own),
+        _mb(redis_used),
+        children or "-",
+        inflight or "-",
+        queues or "-",
+    )
+
+
+async def track_memory() -> None:
+    while True:
+        await _sample_memory()
+        await asyncio.sleep(MEM_SAMPLE_SECONDS)
 
 
 async def _main() -> None:
@@ -370,7 +442,7 @@ async def _main() -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    stages = (normalize, paginate, render, ocr, gapfill, merge, tabular)
+    stages = (normalize, paginate, render, ocr, gapfill, merge, tabular, track_memory)
     consumers = [asyncio.create_task(stage()) for stage in stages]
     stop_task = asyncio.create_task(stop.wait())
     try:
