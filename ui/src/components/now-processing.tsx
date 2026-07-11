@@ -9,8 +9,8 @@ export function NowProcessing({ libraryId }: { libraryId: number }) {
   });
   const all = data ?? [];
   const live = all.filter((p) => p.status === "Processing");
-  const queued = all.filter((p) => p.status === "Queued").length;
-  if (live.length === 0 && queued === 0) return null;
+  const queued = all.filter((p) => p.status === "Queued");
+  if (live.length === 0 && queued.length === 0) return null;
   return (
     <div className="space-y-3 rounded-xl border border-accent/30 bg-accent/5 p-4">
       {live.map((p) => {
@@ -20,7 +20,7 @@ export function NowProcessing({ libraryId }: { libraryId: number }) {
             <div className="flex items-center justify-between gap-3">
               <span className="truncate font-mono text-xs text-ink">{p.filename}</span>
               <span className="shrink-0 tabular-nums text-xs text-ink-muted">
-                {p.total > 0 ? `${p.done}/${p.total} pages` : p.status}
+                {p.done}/{p.total} pages{p.active > 0 ? ` · ${p.active} in progress` : ""}
               </span>
             </div>
             <div className="h-1 overflow-hidden rounded-full bg-surface-2">
@@ -29,7 +29,16 @@ export function NowProcessing({ libraryId }: { libraryId: number }) {
           </div>
         );
       })}
-      {queued > 0 && <div className="text-xs text-ink-muted">{queued} queued</div>}
+      {queued.length > 0 && (
+        <div className="space-y-1 border-t border-accent/20 pt-2">
+          {queued.map((p) => (
+            <div key={p.doc_id} className="flex items-center justify-between gap-3">
+              <span className="truncate font-mono text-xs text-ink-muted">{p.filename}</span>
+              <span className="shrink-0 text-xs text-ink-muted">Queued</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

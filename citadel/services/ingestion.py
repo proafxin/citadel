@@ -451,7 +451,6 @@ async def handle_render(fields: dict[str, str]) -> None:
         return  # doc already finished → a reclaimed render job is a safe no-op
     redis = get_redis()
     await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
-    await redis.hincrby(f"doc:{doc_id}", "started_count", 1)
     image_bytes, digital = await _run_pool(
         get_paginate_pool(), render_pdf_page, str(path), page_idx, dpi, timeout=RENDER_TIMEOUT
     )
@@ -739,6 +738,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     doc_id = fields["doc_id"]
     page_idx = int(fields["page_idx"])
     digital = fields.get("digital") == "1"
+    await get_redis().hincrby(f"doc:{doc_id}", "started_count", 1)
     client = get_mineru_client()  # one of the pooled clients, round-robin — its httpx pool is reused, not per-page
     with Image.open(io.BytesIO(image)) as img:
         if digital:

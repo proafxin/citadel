@@ -22,7 +22,7 @@ services:
       - --port
       - "${CITADEL_MINERU_PORT:-8099}"
       - --gpu-memory-utilization
-      - "0.27"
+      - "0.35"
       - --max-num-seqs
       - "256"
       - --quantization

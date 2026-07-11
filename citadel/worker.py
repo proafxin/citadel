@@ -45,7 +45,7 @@ from config import CPU_EIGHTH, configure_logging, get_settings
 logger = logging.getLogger(__name__)
 
 NORMALIZE_CONCURRENCY = CPU_EIGHTH
-OCR_CONCURRENCY = 256
+OCR_CONCURRENCY = 200
 MERGE_CONCURRENCY = 4  # light assembly
 PAGES_BUFFER = 32  # K: rendered pages kept buffered ahead of OCR so neither render nor OCR starves
 # render is gated so `pages` holds at most OCR_CONCURRENCY (claimed/in-flight) + PAGES_BUFFER images — bounds the
