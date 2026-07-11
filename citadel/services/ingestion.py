@@ -102,18 +102,22 @@ CROP_CONCURRENCY = 256  # the ONE bottleneck: a crop is the unit of VLM work. th
 # host memory — a queued request holds its decoded image there until the GPU reaches it (measured: crops unbounded ->
 # mineru 11-12GB, crops bounded -> 8.4GB). matches --max-num-seqs so the GPU can fill every sequence slot it has.
 # raising it past the point where Waiting stays healthy buys nothing but queued images on their side.
-CROP_BUFFER = 256  # crops cut and ready to send while in-flight ones return, so the VLM never starves between pages.
-# it also has to absorb a transient over-reservation: a page charges the budget for its BLOCK count before cutting
-# (the real crop count is not knowable until the library has cut them, and the skip list only ever removes), then
-# refunds the difference. a born-digital page reserves ~30 to keep ~2. sized under a page's blocks, that reservation
-# would force crops-alive below CROP_CONCURRENCY just to let a page through — starving the VLM at the gate. a crop is
-# a few hundred KB, so buying that headroom outright costs less than one decoded page
+CROP_BUFFER = 1024  # crops cut and ready to send while in-flight ones return, so the VLM never starves between pages.
+# it must ALSO cover the reservation every page in the decode gate is trying to make: a page charges its BLOCK count
+# before cutting (the real crop count is unknowable until the library has cut them) and refunds the difference after —
+# and it blocks there STILL HOLDING its decode slot and bitmap. so a tight budget does not merely delay a page, it jams
+# the gate that feeds the model: at 256, a scanned page reserving ~27 meant only a handful got through and ~270 decode
+# slots sat blocked, issuing nothing (ocr_gpu per page went 85s -> 234s, all of it queueing). a crop is ~0.4MB — the
+# headroom is far cheaper than the throughput it costs to withhold it
 CROP_BOUND = CROP_CONCURRENCY + CROP_BUFFER  # hard cap on crops alive at once, across every page and every crop source
-DECODE_CONCURRENCY = CROP_CONCURRENCY  # pages that may hold a decoded ~10MB bitmap at once — the ONLY place one ever
-# exists, so decoded-page RAM is flat however many pages are in flight waiting on the VLM (those cost ~2MB each).
-# a page must pass through here to issue ANY request — its layout is a request too — so this gate is the crop
-# pipeline's supply. narrower than CROP_CONCURRENCY and it starves it: at 128 the model ran ~175 outstanding against a
-# 256 semaphore we never filled. crops are the bottleneck; nothing upstream of them may be the narrower number.
+DECODE_HEADROOM = 32  # decode slots ABOVE the bottleneck. a page in this gate is not always issuing a request — it may
+# be cutting, or waiting on crop budget — so sizing it exactly at CROP_CONCURRENCY leaves the model momentarily dry
+# (Waiting dipped to 0 in ~1 sample in 4). the headroom absorbs that jitter for ~10MB a slot
+DECODE_CONCURRENCY = CROP_CONCURRENCY + DECODE_HEADROOM  # pages that may hold a decoded ~10MB bitmap at once — the ONLY
+# place one ever exists, so decoded-page RAM is flat however many pages are in flight waiting on the VLM (those cost
+# ~2MB each). a page must pass through here to issue ANY request — its layout is a request too — so this gate is the
+# crop pipeline's supply, and it must never be the narrower number: at 128 the model ran ~175 outstanding against a 256
+# semaphore we never filled; at 256 it ran ~207 with a real queue behind it.
 # a page holds a slot only while it lays out, charges the budget, and cuts — then drops the bitmap and waits out the
 # VLM holding just its encoded bytes
 

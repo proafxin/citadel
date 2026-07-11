@@ -55,10 +55,12 @@ PAGES_BUFFER = DECODE_CONCURRENCY  # rendered pages sitting UNCLAIMED in `pages`
 # waits on render to catch up — a stall the GPU pays for. it does NOT bound pages in flight (ocr claims as fast as the
 # crop budget allows), so it is purely a render-ahead buffer and purely a RAM bound (~2MB an image), deep enough that
 # ocr never waits on pdfium and shallow enough that an 800-page PDF cannot rasterize itself into redis.
-PAGES_IN_FLIGHT = CROP_BOUND  # pages CLAIMED at once — each holds its ~2MB encoded image for its whole life. this is a
-# RAM cap, not a throttle: the crop budget decides how much work is actually in flight, and a page yields at least one
-# crop, so the budget always runs out first. it exists because a page must be claimed before it can lay out, and until
-# it lays out the crop budget cannot see it — without this, admission never blocks and claimed pages grow without end.
+PAGES_IN_FLIGHT = 512  # pages CLAIMED at once — each holds its ~2MB encoded image for its whole life. purely a RAM cap,
+# and it must never be the constraint: a page is either in the decode gate (DECODE_CONCURRENCY of them) or waiting out
+# its crops at the model (crops-alive / crops-per-page — at most ~128, since the crop semaphore caps requests at 256
+# and a born-digital page carries only ~2). ~420 covers the worst case, so 512 has headroom and still cannot throttle.
+# it exists because a page must be claimed before it can lay out, and until it lays out the crop budget cannot see it —
+# without this, admission never blocks and claimed pages grow without end (measured: ~1700 claimed, ~3.4GB).
 GAPFILL_BUFFER = 64  # scanned pages OCR may run ahead of RapidOCR gap-fill before it backpressures (keeps the GPU
 # busy while still bounding the scanned-page images buffered in `gapfill`); born-digital pages never enter it
 GAPFILL_BOUND = RAPIDOCR_CONCURRENCY + GAPFILL_BUFFER
