@@ -1,6 +1,5 @@
 from html import escape
 from io import BytesIO
-
 from typing import Any
 
 from pptx import Presentation

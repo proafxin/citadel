@@ -16,6 +16,7 @@ from sqlalchemy.types import TypeEngine
 
 from citadel.db import get_sessionmaker
 from citadel.llm import (
+    STRUCT_MAX_TOKENS,
     SYNTH_MAX_TOKENS,
     count_tokens,
     count_tokens_batch,
@@ -36,6 +37,8 @@ OUT_TOKENS = SYNTH_MAX_TOKENS
 BUDGET = CTX_TOKENS - OUT_TOKENS - 2048
 RESULTS_BUDGET = BUDGET // 2  # tabular results are exact: reserve up to half the window before reducing text
 EARLY_STOP_N = 3
+MERGE_INPUT_BUDGET = STRUCT_MAX_TOKENS // 2  # a merge call must fit its summary in STRUCT_MAX_TOKENS; keep input under
+# half that so even near-lossless (barely-compressed) output cannot overrun the cap and truncate the JSON
 SCHEMA_SAMPLES = 3
 SQL_ROW_CAP = 10_000  # hard ceiling on rows any generated query may return, so a broad SELECT can't pull a whole table
 _PG = postgresql.dialect()
@@ -305,7 +308,7 @@ async def _reduce(question: str, evidences: list[_Evidence], budget: int, level:
     groups: dict[object, list[_Evidence]] = {}
     for index in marked:
         groups.setdefault(_group_key(evidences[index], level), []).append(evidences[index])
-    chunks = [chunk for items in groups.values() for chunk in _chunk_by_tokens(items, BUDGET)]
+    chunks = [chunk for items in groups.values() for chunk in _chunk_by_tokens(items, MERGE_INPUT_BUDGET)]
     merged = await asyncio.gather(*(_merge_chunk(question, chunk) for chunk in chunks))
     survivors = [evidences[index] for index in range(len(evidences)) if index not in marked]
     combined = survivors + list(merged)

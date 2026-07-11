@@ -5,11 +5,15 @@ _MATH_CHARS = frozenset("∑∫≤≥≠±∞√αβγδεφζηθλμπσωτχ
 _EQ_NUMBER = re.compile(r"^\(\d+\)$")
 
 
-def _is_math_cell(cell: str) -> bool:
-    value = cell.strip()
-    if any(marker in value for marker in _LATEX_MARKERS) or _EQ_NUMBER.match(value):
+def is_math_text(value: str) -> bool:
+    text = value.strip()
+    if any(marker in text for marker in _LATEX_MARKERS) or _EQ_NUMBER.match(text):
         return True
-    return sum(1 for char in value if char in _MATH_CHARS) >= 2
+    return sum(1 for char in text if char in _MATH_CHARS) >= 2
+
+
+def _is_math_cell(cell: str) -> bool:
+    return is_math_text(cell)
 
 
 def classify_grid(grid: list[list[str]]) -> str:

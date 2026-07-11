@@ -26,11 +26,11 @@ from citadel.services.grid import classify_grid
 from citadel.services.tabular import grid_from_html, html_to_text, stitch_tables, structure_html_tables
 from citadel.services.tree import (
     EMPTY_IMAGE_TYPES,
-    PARATEXT_TYPES,
     NodeSpec,
     build_search_text,
     build_table_search_text,
     build_tree,
+    collapse_loops,
     detail_kind,
     make_content_id,
     split_paratext,
@@ -265,9 +265,7 @@ def _node_row(spec: NodeSpec, doc_id: int, search: str | None) -> dict[str, obje
     }
 
 
-def _table_search(
-    spec: NodeSpec, table: MaterializedTable, library_name: str, filename: str, paratext: dict[int, list[str]]
-) -> str:
+def _table_search(table: MaterializedTable, library_name: str, filename: str) -> str:
     return build_table_search_text(
         library_name,
         filename,
@@ -277,7 +275,6 @@ def _table_search(
         table.notes,
         [column.header or "" for column in table.columns],
         table.description,
-        paratext.get(spec.page_no),
     )
 
 
@@ -340,14 +337,17 @@ DROP_REASONS = frozenset({"paratext", "empty_image", "empty_block"})
 @dataclass
 class _Prepared:
     stitched: list[Block]
-    paratext: dict[int, list[str]]
+    paratext: list[str]
     drops: dict[str, int]
 
 
 def _drop_counts(blocks: list[Block], content: list[Block], reclassified: list[Block]) -> dict[str, int]:
+    # DERIVED, not re-predicated: split_paratext now RESCUES a mis-typed paratext block into content, so re-testing
+    # the type here would count a kept block as dropped. whatever it removed is either an empty image or paratext.
+    empty_image = sum(1 for block in blocks if block.type in EMPTY_IMAGE_TYPES and not (block.text or "").strip())
     counts = {
-        "paratext": sum(1 for block in blocks if block.type in PARATEXT_TYPES),
-        "empty_image": sum(1 for block in blocks if block.type in EMPTY_IMAGE_TYPES and not (block.text or "").strip()),
+        "paratext": len(blocks) - len(content) - empty_image,
+        "empty_image": empty_image,
         "empty_block": len(content) - len(reclassified),
     }
     unknown = set(counts) - DROP_REASONS
@@ -361,10 +361,25 @@ def _drop_counts(blocks: list[Block], content: list[Block], reclassified: list[B
     return {reason: count for reason, count in counts.items() if count}
 
 
+_LOOP_EXEMPT_TYPES = {"table"}  # a table may legitimately repeat identical rows; only prose/math loop pathologically
+
+
+def _collapse_block_loops(blocks: list[Block]) -> list[Block]:
+    collapsed: list[Block] = []
+    for block in blocks:
+        if block.type in _LOOP_EXEMPT_TYPES or not block.text:
+            collapsed.append(block)
+            continue
+        text = collapse_loops(block.text)
+        collapsed.append(block if text == block.text else block.model_copy(update={"text": text}))
+    return collapsed
+
+
 def _prepare_blocks(blocks: list[Block]) -> _Prepared:
-    content_blocks, paratext = split_paratext(blocks)
+    deduped = _collapse_block_loops(blocks)  # kill VLM repetition loops before anything downstream sees them
+    content_blocks, paratext = split_paratext(deduped)
     reclassified = _reclassify_regions(content_blocks)  # math/prose/empty must not reach table structuring
-    drops = _drop_counts(blocks, content_blocks, reclassified)
+    drops = _drop_counts(deduped, content_blocks, reclassified)
     return _Prepared(stitch_tables(reclassified), paratext, drops)
 
 
@@ -379,7 +394,7 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentS
     prepared = _prepare_blocks(blocks)
     table_counts, table_queue = await _resolve_tables(prepared.stitched)
     specs = list(build_tree(prepared.stitched, library_id, doc_id, table_counts))
-    search_text = build_search_text(specs, library_name, filename, prepared.paratext)
+    search_text = build_search_text(specs, library_name, filename)
     tables = iter(table_queue)
     async with get_sessionmaker()() as session, session.begin():
         # per-doc advisory lock: serialize concurrent/redelivered merges of the same document so the "already
@@ -394,6 +409,7 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentS
         document.blocks_in = len(blocks)
         document.nodes_out = len(specs)
         document.drops = prepared.drops
+        document.paratext = prepared.paratext
         if await session.scalar(select(ContentNode.id).where(ContentNode.document_id == doc_id).limit(1)) is not None:
             await _maybe_notify_embed(session, library_id)
             return
@@ -404,9 +420,7 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentS
             if spec.kind == "table":
                 table = next(tables)
                 table_pairs.append((spec.content_id, table))
-                node_rows[spec.content_id] = _node_row(
-                    spec, doc_id, _table_search(spec, table, library_name, filename, prepared.paratext)
-                )
+                node_rows[spec.content_id] = _node_row(spec, doc_id, _table_search(table, library_name, filename))
             else:
                 node_rows[spec.content_id] = _node_row(spec, doc_id, search_text.get(spec.content_id))
                 if spec.kind != "heading":

@@ -19,3 +19,4 @@ class Document(Base):
     blocks_in: Mapped[int | None] = mapped_column(default=None)
     nodes_out: Mapped[int | None] = mapped_column(default=None)
     drops: Mapped[dict | None] = mapped_column(JSONB, default=None)
+    paratext: Mapped[list | None] = mapped_column(JSONB, default=None)
