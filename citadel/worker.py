@@ -14,9 +14,7 @@ from citadel.services.ingestion import (
     GROUP,
     MAX_ATTEMPTS,
     PAGINATE_CONCURRENCY,
-    RAPIDOCR_CONCURRENCY,
     RENDER_CONCURRENCY,
-    STREAM_GAPFILL,
     STREAM_INGEST,
     STREAM_MERGE,
     STREAM_NORMALIZED,
@@ -24,14 +22,11 @@ from citadel.services.ingestion import (
     STREAM_RENDER,
     STREAM_TABLES,
     cleanup,
-    emit_vlm_only,
     ensure_group,
     fail_document,
     fail_page,
     get_crop_budget,
-    get_mineru_client,
     get_redis,
-    handle_gapfill,
     handle_merge,
     handle_normalize,
     handle_ocr,
@@ -64,9 +59,6 @@ PAGES_IN_FLIGHT = CROP_CONCURRENCY  # pages CLAIMED at once — each pins its ~2
 # every page above C is therefore a pinned image lengthening a queue that is already full.
 # it must exist at all: a page has to be claimed before it can lay out, and the crop budget cannot see it until it
 # does, so without a cap admission never blocks and claimed pages grow without end (measured: ~1700 claimed, ~3.4GB).
-GAPFILL_BUFFER = 64  # scanned pages OCR may run ahead of RapidOCR gap-fill before it backpressures (keeps the GPU
-# busy while still bounding the scanned-page images buffered in `gapfill`); born-digital pages never enter it
-GAPFILL_BOUND = RAPIDOCR_CONCURRENCY + GAPFILL_BUFFER
 
 BLOCK_MS = 5000
 
@@ -280,30 +272,11 @@ async def _ocr_job(cap: _Capacity | None, msg_id: str, raw: dict[bytes, bytes]) 
             cap.release()
 
 
-async def _gapfill_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
-    stream = STREAM_GAPFILL
-    try:
-        fields = await _decode_or_settle(stream, msg_id, raw)
-        if fields is None:
-            return
-        work = asyncio.create_task(handle_gapfill(fields, raw.get(b"image", b"")))
-        await asyncio.wait({work})
-        if work.exception() is None:
-            await _settle(stream, msg_id)
-            return
-        logger.error("gapfill failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
-        # retries exhausted → finalize with the VLM blocks alone so a RapidOCR error never loses the page
-        await _retry_or_fail(stream, msg_id, raw, lambda: emit_vlm_only(fields))
-    finally:
-        cap.release()
-
-
 DRAINED_STREAMS = (
     STREAM_INGEST,
     STREAM_NORMALIZED,
     STREAM_RENDER,
     STREAM_PAGES,
-    STREAM_GAPFILL,
     STREAM_MERGE,
     STREAM_TABLES,
 )
@@ -394,30 +367,19 @@ async def render() -> None:
 
 
 async def _ocr_room() -> int:
-    # crops are the bottleneck, so admission is gated on them — but the crop budget CANNOT see a page until it has laid
-    # out, and a page must be claimed to lay out. so a claimed page waiting at the decode gate has charged nothing, the
-    # budget still reads free, and this gate would keep claiming forever: every one of those pages holds its encoded
-    # image, and they pile up unbounded (measured: ~1700 claimed, ~3.4GB). PAGES_IN_FLIGHT is the cap that closes that
-    # hole. also gated on gapfill depth so a scanned-heavy doc can't queue page images faster than RapidOCR drains them
-    crops = get_crop_budget().free()
-    if crops <= 0:
-        return 0
-    return min(crops, GAPFILL_BOUND - await get_redis().xlen(STREAM_GAPFILL))
+    # crops are the bottleneck, so admission is gated on them — but the crop budget CANNOT see a page until the
+    # detector has found its regions, and a page must be claimed to be detected. so a claimed page still waiting on the
+    # detector has charged nothing, the budget reads free, and this gate would keep claiming forever: every one of
+    # those pages holds its encoded image, and they pile up unbounded. PAGES_IN_FLIGHT closes that hole.
+    return get_crop_budget().free()
 
 
 # ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. crops decide how much work is in flight; this cap
 # only bounds the encoded images we hold while it happens, and is set far above what the crop budget will ever admit
 # (a page yields at least one crop, and only ~2 on a born-digital page) so it can never throttle the model ------------
 async def ocr() -> None:
-    await asyncio.to_thread(get_mineru_client)  # build the pooled clients once now, not lazily mid-OCR
     cap = _Capacity(PAGES_IN_FLIGHT)
     await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)), _ocr_room)
-
-
-# ---- gapfill: read `gapfill`, RapidOCR the lines the VLM dropped, finalize the page. CPU-bound, bounded low ----
-async def gapfill() -> None:
-    cap = _Capacity(RAPIDOCR_CONCURRENCY)
-    await _drive(STREAM_GAPFILL, cap, lambda mid, raw: _spawn(_gapfill_job(cap, mid, raw)))
 
 
 # ---- merge: read `merge`, assemble result.json, clean up. light concurrency ----------------------------
@@ -438,7 +400,7 @@ async def _main() -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    stages = (normalize, paginate, render, ocr, gapfill, merge, tabular)
+    stages = (normalize, paginate, render, ocr, merge, tabular)
     consumers = [asyncio.create_task(stage()) for stage in stages]
     stop_task = asyncio.create_task(stop.wait())
     try:

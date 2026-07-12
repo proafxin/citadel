@@ -1,68 +1,57 @@
 
 services:
-  # MinerU2.5-Pro raw VLM server (OpenAI-compatible). Driven per-page by our workers via
-  # mineru-vl-utils http-client (two_step_extract) — NOT the capped-at-3 mineru-api REST path.
-  # Only `--engine` is mineru-openai-server's own flag; --host/--port/--gpu-memory-utilization/
-  # --max-num-seqs are forwarded to vLLM. gpu-mem 0.5 reserves ~half the 24GB (mobile 5090) for the
-  # co-located BGE-M3 bi-encoder + the local query/generation SLM (text, ~32k ctx for batching).
-  # `mineru:latest` is built from MinerU's Dockerfile (model baked in, MINERU_MODEL_SOURCE=local).
-  mineru:
-    image: mineru:latest
-    container_name: citadel-mineru
+  # PaddleOCR-VL-1.6-0.9B: the RECOGNITION model. It reads the crops our detector cuts — one request per region, with
+  # the task prompt chosen by what the region is (OCR / Table / Formula / Chart / Seal). It does NOT do layout: that is
+  # a detector (PP-DocLayoutV3) running in the worker's own pool, which is the whole reason for the switch.
+  # Served by stock vLLM — the architecture is registered upstream, so it needs no vendor image and inherits every
+  # Blackwell fix we already rely on for qwen. bf16, not fp8: at 0.9B the weights are only 1.8GB and quality is the
+  # point. Tables come back as OTSL (one token per cell), so a dense table costs a fraction of what styled HTML would.
+  paddleocr:
+    image: vllm/vllm-openai:latest
+    container_name: citadel-paddleocr
     restart: always
     ipc: host
-    environment:
-      MINERU_MODEL_SOURCE: local
-    entrypoint: mineru-openai-server
     command:
-      - --engine
-      - vllm
+      - --model
+      - PaddlePaddle/PaddleOCR-VL-1.6
+      - --served-model-name
+      - paddleocr-vl
       - --host
       - 0.0.0.0
       - --port
-      - "${CITADEL_MINERU_PORT:-8099}"
-      # KV never needed 0.35 (17-18% used there) but 0.25 ran it to 82% with requests queuing. 0.30 splits it, and the
-      # VRAM this frees is not idle: the embedder sizes its batch from whatever is unclaimed on the card, so what mineru
-      # does not reserve becomes embedding throughput.
+      - "${CITADEL_PADDLEOCR_PORT:-8099}"
       - --gpu-memory-utilization
       - "0.30"
-      # NOT a free knob: vLLM pre-allocates HOST memory for multimodal staging in proportion to this and it scales worse
-      # than linearly — 7GB idle at 256 against 16.25GB idle at 384, on a 31GB box. the GPU was never the limit (KV
-      # holds 858k tokens, ~12% used); host RAM is. our crop semaphore must equal this and never exceed it — exceeding
-      # it only queues requests INSIDE mineru, each pinning a decoded image (288 measured 892s / 14.72GB against 840s /
-      # 8.4GB at 256). raising it is pointless while Running sits below it: that means we are not feeding it, not that
-      # it is full.
+      # must EQUAL the crop semaphore: below it the GPU cannot fill its sequence slots, above it the excess merely
+      # queues INSIDE the model, where every waiting request pins a decoded image. vLLM also pre-allocates HOST memory
+      # for multimodal staging in proportion to this, worse than linearly.
       - --max-num-seqs
       - "128"
-      - --quantization
-      - fp8
+      # NOT the model default of 131072, which leaves a KV cache that holds barely two full-length sequences. A crop is
+      # a region of one page: its prompt is ~1.3k image tokens and its answer is at most a dense table.
+      - --max-model-len
+      - "8192"
       - --kv-cache-dtype
       - fp8
-      # MM processor cache: caches the PREPROCESSED form of an image, keyed by the image. it lives in HOST RAM. we have
-      # never actually measured its hit rate here (the 0.3-15% figure that used to be quoted was the KV PREFIX cache, a
-      # different thing), and the mechanism says it should be ~0 for us: every image we send is unique — one layout
-      # render per page, one crop per block, nothing repeats. it is on at 1GB to MEASURE that, since vLLM logs the hit
-      # rate when enabled. if it is ~0, turn it off and take the gigabyte back. it only ever affects speed, never output.
+      # every image we send is unique — one crop per region, nothing repeats — so a cache keyed on the image cannot hit.
+      # it lives in HOST RAM, which is the scarce resource here.
       - --mm-processor-cache-gb
-      - "1"
-      # already the default in this build, pinned explicitly so a future default cannot silently un-overlap the CPU
-      # scheduler from GPU execution.
-      # NOT set: --api-server-count. four frontends measured no throughput at all (799s against 810s and 843s, all
-      # inside a +-40s run-to-run band) and it DISABLES vLLM's stats logging — no Running/Waiting/throughput lines. that
-      # log is the only window we have into whether we are feeding the model; it is what caught the socket pool silently
-      # capping us at half the GPU. do not trade it for nothing.
+      - "0"
+      # already the default; pinned so a future default cannot silently un-overlap the CPU scheduler from GPU execution.
+      # NOT set: --api-server-count. It measured no throughput at all and it DISABLES vLLM's stats logging — the
+      # Running/Waiting lines are the only window we have into whether we are feeding the model, and that log is what
+      # caught a socket pool silently capping us at half the GPU. Do not trade it for nothing.
       - --async-scheduling
       - --uvicorn-log-level
       - warning
     ports:
-      - "${CITADEL_MINERU_PORT:-8099}:${CITADEL_MINERU_PORT:-8099}"
+      - "${CITADEL_PADDLEOCR_PORT:-8099}:${CITADEL_PADDLEOCR_PORT:-8099}"
     ulimits:
       memlock: -1
       stack: 67108864
     volumes:
-      # Models are baked into the image at build time (mineru-models-download). Do NOT mount the
-      # host HF cache here — it shadows the baked-in model. Persist the torch.compile cache in a
-      # NAMED volume (docker-managed) so the root container never creates root-owned files on the host.
+      # HF weights on a HOST dir so `compose down -v` never wipes the download; torch.compile cache in a named volume.
+      - ${HOME}/.cache/citadel-paddleocr:/root/.cache/huggingface
       - vllm-cache:/root/.cache/vllm
     deploy:
       resources:
@@ -74,7 +63,7 @@ services:
 
   # Qwen3.5-4B (Gated DeltaNet hybrid) served by vLLM with strict guided decoding (xgrammar) so structured
   # output (table structure, filters) is grammar-enforced, not best-effort. fp8 online-quantized; multimodal
-  # model served text-only (no images sent). gpu-mem 0.25 co-locates with mineru (0.5) + the BGE-M3 embedder.
+  # model served text-only (no images sent). gpu-mem 0.30 co-locates with the recognition model (0.30) + the BGE-M3 embedder.
   qwen:
     image: vllm/vllm-openai:latest
     container_name: citadel-qwen

@@ -25,6 +25,8 @@ def detect_layout(image: bytes) -> list[DetBlock]:
     # cannot loop, hallucinate, or return an empty page the way a layout call on a language model can.
     # cv2 decodes to BGR, which is what paddle's own file reader produces — hand it the same thing.
     page = cv2.imdecode(np.frombuffer(image, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if page is None:
+        raise ValueError("undecodable page image")
     height, width = page.shape[:2]
     result = _detector().predict(page)[0]
     return [

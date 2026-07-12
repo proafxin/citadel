@@ -28,7 +28,13 @@ RRF_K = 60
 CANDIDATES = 1000
 RETRIEVAL_CONCURRENCY = 8  # cap concurrent dense/sparse searches so a many-variant query can't exhaust the DB pool
 
-EMBED_VRAM_HEADROOM = 0.7
+EMBED_VRAM_HEADROOM = 0.7  # of what is actually free — the floor, so a genuinely full card still yields a safe batch
+EMBED_VRAM_CAP = 2 * 1024**3  # ...but never more than this, whatever is lying around. the batch used to be sized on
+# free VRAM ALONE, which made this process's memory a function of everyone else's: shrink a co-located model's
+# reservation and the embedder helps itself to the difference, takes a bigger batch, and OOMs — the one time we freed
+# VRAM on purpose is the time it broke. capping it bounds this process no matter how empty the card looks, and leaves
+# the rest genuinely spendable on the models that need it. it costs only embedding wall time, a one-off pass that is
+# never the bottleneck
 MODEL_MAX_TOKENS = 8192
 BYTES_PER_TOKEN = 21_750  # activations: linear in tokens, so batch x longest bounds them
 MASK_BYTES_PER_TOKEN = 2  # the attention mask is NOT linear. transformers materializes it as (batch, 1, L, L) to hand
@@ -63,7 +69,8 @@ def bytes_per_token(longest: int) -> int:
 
 
 def vram_budget() -> int:
-    return int(EMBED_VRAM_HEADROOM * available_vram())
+    # the smaller of what is free and what we are willing to spend. free-VRAM alone is what OOM'd this (EMBED_VRAM_CAP)
+    return min(int(EMBED_VRAM_HEADROOM * available_vram()), EMBED_VRAM_CAP)
 
 
 def token_budget() -> int:
@@ -240,7 +247,7 @@ def _take_group(nodes: list[_PendingNode], start: int, budget: int) -> tuple[int
 
 
 async def _embed_group(library_id: int, batch: list[_PendingNode], longest: int, label: str) -> int:
-    total = sum(node.token_len for node in batch)  # real tokens packed vs the padded ceiling (rows × longest)
+    total = sum(node.token_len for node in batch)  # real tokens packed vs the padded ceiling (rows x longest)
     logger.info("embed_group %s rows=%d longest=%d total=%d", label, len(batch), longest, total)
     vectors = await _embed([node.search_text for node in batch], longest)  # GPU work outside any open transaction
     records: list[dict[str, object]] = [

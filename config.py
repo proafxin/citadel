@@ -3,7 +3,6 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from loguru import logger as loguru_logger
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -17,6 +16,7 @@ CPU_EIGHTH = max((os.cpu_count() or 8) // 8, 1)
 QWEN_MODEL = "qwen"
 QWEN_HF_REPO = "Qwen/Qwen3.5-4B"
 QWEN_CACHE_DIR = Path.home() / ".cache" / "citadel-qwen" / "hub"
+PADDLEOCR_MODEL = "paddleocr-vl"  # --served-model-name; the recognition model that reads each crop the detector cuts
 EMBED_MODEL = "BAAI/bge-m3"
 EMBED_DEVICE = "cuda"
 EMBED_MAX_TOKENS = 8192  # BGE-M3 context ceiling — token counts are capped here (the encoder truncates past it)
@@ -26,14 +26,14 @@ def configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s", force=True)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-    loguru_logger.disable("mineru_vl_utils")
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CITADEL_", env_file=".env", extra="ignore")
 
-    mineru_host: str = "localhost"
-    mineru_port: int = 8099
+    paddleocr_host: str = "localhost"
+    # vLLM OpenAI-compatible server (PaddleOCR-VL-1.6-0.9B): reads the crops the detector cuts
+    paddleocr_port: int = 8099
 
     qwen_host: str = "localhost"
     qwen_port: int = 8100  # vLLM OpenAI-compatible server (Qwen3.5-4B, guided decoding)
@@ -51,8 +51,8 @@ class Settings(BaseSettings):
     worker_id: str  # stable per-replica id → deterministic Redis consumer names; REQUIRED, set distinctly per replica
 
     @property
-    def mineru_base_url(self) -> str:
-        return f"http://{self.mineru_host}:{self.mineru_port}"
+    def paddleocr_base_url(self) -> str:
+        return f"http://{self.paddleocr_host}:{self.paddleocr_port}"
 
     @property
     def qwen_base_url(self) -> str:

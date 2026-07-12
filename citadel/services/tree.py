@@ -5,14 +5,16 @@ from citadel.schemas.content import Block
 from citadel.schemas.tree import NodeSpec
 from citadel.services.grid import is_math_text
 
+# the block types are the detector's own 25 classes, kept as it labels them rather than flattened into something
+# coarser — it separates a document title from a section title, a displayed formula from an inline one, a figure
+# caption from body text, and every one of those distinctions is information we would otherwise throw away.
+# this maps each to the KIND of leaf it becomes; anything unlisted is prose.
 _KIND_BY_TYPE = {
-    "title": "heading",
-    "code": "code",
+    "doc_title": "heading",
+    "paragraph_title": "heading",
+    "reference": "heading",
     "algorithm": "code",
-    "equation": "equation",
-    "equation_block": "equation",
-    "list": "list",
-    "list_item": "list",
+    "display_formula": "equation",
     "table": "table",
 }
 
@@ -20,9 +22,11 @@ _LIST_MARKER = re.compile(r"^\s*(?:[●○•▪◦‣·*]\s|[-–—]\s|\(?\d{1
 _BULLET_GLYPH = re.compile(r"^\s*[●○•▪◦‣·*\-–—]\s+")
 _HEADING_SPLIT = re.compile(r'(?<=["”:.?)])\s*\n\s*')
 
-PARATEXT_TYPES = {"header", "footer", "page_number", "page_footnote", "aside_text"}
-PAGE_NUMBER_TYPES = {"page_number"}
-EMPTY_IMAGE_TYPES = {"image", "image_block"}
+# page furniture: it recurs on every page and belongs to the page, not to the document. `number` is the detector's
+# label for a page number. a `footnote` is NOT furniture — on the math book the footnotes carry real mathematics
+PARATEXT_TYPES = {"header", "footer", "number", "aside_text", "header_image", "footer_image"}
+PAGE_NUMBER_TYPES = {"number"}
+EMPTY_IMAGE_TYPES = {"image", "header_image", "footer_image", "seal", "chart"}
 
 MIN_PARATEXT_PAGES = 2  # paratext RECURS: a running header appears on many pages, a mis-typed body block appears once
 _DIGITS = re.compile(r"\d+")

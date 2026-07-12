@@ -22,7 +22,7 @@ docker compose exec -T redis redis-cli FLUSHALL >/dev/null
 docker compose down postgres --remove-orphans -v
 docker compose up -d postgres
 
-if ! curl -sf "http://localhost:${CITADEL_MINERU_PORT:-8099}/v1/models" >/dev/null 2>&1; then
+if ! curl -sf "http://localhost:${CITADEL_PADDLEOCR_PORT:-8099}/v1/models" >/dev/null 2>&1; then
     echo "infra not up — run: bash scripts/infra.sh" >&2
     exit 1
 fi
