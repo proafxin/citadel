@@ -1,6 +1,6 @@
 [project]
 name = "citadel"
-version = "0.2.6"
+version = "0.3.0"
 description = "Citadel: personal search engine"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -33,12 +33,12 @@ dependencies = [
     "redis>=8.0.1",
     "scikit-learn>=1.9.0",
     "sentence-transformers>=5.5.1",
-    "sentencepiece>=0.2.1",
+    "sentencepiece>=0.2.2",
     "spacy>=3.8.14",
     "sqlalchemy[asyncio]>=2.0.51",
     "tensorboard>=2.21.0",
     "torch>=2.12.1",
-    "transformers>=5.13.0",
+    "transformers>=5.13.1",
     "xgboost>=3.3.0",
     "zstandard>=0.25.0",
 ]

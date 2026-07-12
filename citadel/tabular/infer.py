@@ -13,8 +13,9 @@ from citadel.schemas.table import TableStructure
 from citadel.tabular.detect import featurize
 
 MODEL = Path(__file__).resolve().parents[2] / "model.json"
-HEADER_WORKERS = max((os.cpu_count() or 8) // 8, 1)  # config.CPU_EIGHTH, recomputed rather than imported: this module
-# is the header pool's forkserver preload, so importing config would pull torch into every one of its workers
+HEADER_WORKERS = 1  # a header worker is an XGBoost predict, but it stands at ~250-650MB like every pool process here,
+# and the work is trivial and rare: the tabular files in a library finish in the first seconds of a GPU-bound run.
+# one worker is the whole stage's demand, and the other two were only ever standing memory
 
 
 def structure_from_mask(grid: list[list[str]], mask: list[bool]) -> list[TableStructure]:

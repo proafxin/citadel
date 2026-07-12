@@ -84,44 +84,49 @@ DOC_TTL = 86_400  # safety expiry on doc/blocks/sheets keys: set at submit, refr
 LAYER_TYPES = ("text", "title")  # filled from the PDF text layer on born-digital pages (skip VLM recognition)
 
 MINERU_CLIENTS = 16
-MINERU_CONN_PER_CLIENT = 16
+MINERU_CONN_PER_CLIENT = (
+    32  # sockets, NOT a concurrency bound — it must stay well ABOVE CROP_CONCURRENCY/MINERU_CLIENTS
+)
+# or it silently becomes one. httpx blocks a request with no free connection INSIDE client.post, so it holds its crop
+# permit and sends nothing. round-robin is even by request COUNT but not by DURATION — a layout call holds its socket
+# ~20x longer than a crop (124s vs 6s) — so pools saturate unevenly and requests queue behind a busy client while other
+# clients sit idle. when this was CROP_CONCURRENCY/MINERU_CLIENTS exactly, mineru saw Running ~130 / Waiting 0 against a
+# semaphore of 256: half the GPU idle with thousands of crops ready to send. 2x headroom makes the semaphore the only bound
 REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connection, never open unbounded sockets
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
 PAGINATE_CONCURRENCY = CPU_EIGHTH
 RENDER_CONCURRENCY = CPU_EIGHTH
-PDFIUM_WORKERS = CPU_EIGHTH + 1  # every pdfium job (count + render + text layer) shares these. a pdfium process costs
-# hundreds of MB standing, so keep it small: the whole stage is a few hundred CPU-seconds across a GPU-bound run, and
-# demand (~2.5 calls/s) sits far under capacity (~100/s). the +1 is headroom, not need — the text layer is awaited
-# INSIDE the ocr path, so this pool does touch the VLM's feed path, and layer_cpu in the stage line is what would say
-# whether it ever costs anything
+PDFIUM_WORKERS = 1  # every pdfium job (count + render + text layer) shares these. measured ~650MB standing per worker
+# (live heap, stable across max_tasks recycles, never reproduced outside the pool), so this is the most expensive
+# process we own per unit of work done — and the work is trivial: the 809-page book spent 165s of render across an 800s
+# wall, so one worker runs at ~20% duty. the stage is a FIFO off the GPU path; finishing a page sooner only makes it
+# wait longer in the buffer, so there is nothing to buy by widening it
 RENDER_TIMEOUT = 120  # page renders in <1s; if a job strands (dead/hung pool worker) free the slot + retry the page
 PDF_POOL_MAX_TASKS = 100  # recycle a pdfium worker every N pages: a long-lived one grows to hundreds of MB and never
 # gives it back, and there are 12 of them. respawn is a fork off the (lean) forkserver, so the cost is milliseconds
 # amortised over 100 pages, against a stage that is already the cheapest in the pipeline
 RAPIDOCR_CONCURRENCY = CPU_THIRD  # scanned-page gap-OCR threads (CPU); bounds RapidOCR so it can't starve
 GAP_FILL = True  # RapidOCR scanned gap-fill; set to False for clean-image benchmarks (pure VLM)
-CROP_CONCURRENCY = 256  # the ONE bottleneck: a crop is the unit of VLM work. this is a semaphore, so it caps what can
-# be outstanding at the model at all (Running + Waiting), which makes it the dial on BOTH throughput and the model's
-# host memory — a queued request holds its decoded image there until the GPU reaches it (measured: crops unbounded ->
-# mineru 11-12GB, crops bounded -> 8.4GB). matches --max-num-seqs so the GPU can fill every sequence slot it has.
-# raising it past the point where Waiting stays healthy buys nothing but queued images on their side.
-CROP_BUFFER = 8192  # crops cut and waiting on the semaphore. it has to cover every page in flight at once, or the pages
-# just queue HERE instead of at the decode gate: a scanned page carries ~26 crops, so at 1024 only ~49 of the 512 pages
-# in flight could hold budget and the rest blocked — budget_wait hit 115s a page on the scanned book, the single largest
-# span in the run. a crop is PNG bytes by the time it is charged (~40KB, not the ~400KB of raw pixels it used to be), so
-# covering all 512 pages costs a few hundred MB. the semaphore still caps what is in flight AT the model; this bound
-# only exists to stop us holding crops we cannot send, and it should never be what throttles us
+CROP_CONCURRENCY = 128  # a crop is the unit of VLM work; this semaphore caps what is outstanding at the model at all
+# (Running + Waiting). it bounds MEMORY, not throughput: a queued request pins its decoded image on their side until
+# the GPU reaches it (unbounded -> ~5400 crops and mineru at 11-12GB, and we OOM'd a 31GB box). the GPU is compute-bound
+# at ~3.3k gen tok/s and was ALREADY saturated at ~130 in flight — measured Running 130 and Running 240 produce the same
+# tokens/s and the same wall time — so everything above saturation is pure cost in pinned images. sit just above it.
+# nothing between here and the model may bound LOWER (see MINERU_CONN_PER_CLIENT) or the GPU starves with no trace:
+# from the outside that looks exactly like a slow model
+CROP_BUFFER = 12288  # crops cut and waiting on the semaphore, sized to scale with PAGES_IN_FLIGHT: if it cannot cover
+# the pages, they simply queue HERE instead — a scanned page carries ~26 crops, and when this was 1024 only ~49 of the
+# 512 pages in flight could hold budget while the rest blocked (budget_wait hit 115s a page on the scanned book, the
+# largest single span in that run). a crop is PNG bytes by the time it is charged (~40KB, not the ~400KB of raw pixels
+# it used to be), so the headroom is cheap. the semaphore still caps what is in flight AT the model; this bound only
+# stops us holding crops we cannot send, and it must never be what throttles us
 CROP_BOUND = CROP_CONCURRENCY + CROP_BUFFER  # hard cap on crops alive at once, across every page and every crop source
-DECODE_HEADROOM = 32  # decode slots ABOVE the bottleneck. a page in this gate is not always issuing a request — it may
-# be cutting, or waiting on crop budget — so sizing it exactly at CROP_CONCURRENCY leaves the model momentarily dry
-# (Waiting dipped to 0 in ~1 sample in 4). the headroom absorbs that jitter for ~10MB a slot
-DECODE_CONCURRENCY = CROP_CONCURRENCY + DECODE_HEADROOM  # pages that may hold a decoded ~10MB bitmap at once — the ONLY
-# place one ever exists, so decoded-page RAM is flat however many pages are in flight waiting on the VLM (those cost
-# ~2MB each). a page must pass through here to issue ANY request — its layout is a request too — so this gate is the
-# crop pipeline's supply, and it must never be the narrower number: at 128 the model ran ~175 outstanding against a 256
-# semaphore we never filled; at 256 it ran ~207 with a real queue behind it.
-# a page holds a slot only while it lays out, charges the budget, and cuts — then drops the bitmap and waits out the
-# VLM holding just its encoded bytes
+DECODE_CONCURRENCY = 16  # pages that may hold a decoded ~10MB bitmap at once — the ONLY place one ever exists, so this
+# is the whole of our bitmap RAM. a page now passes through in ~0.2s (decode, build the model's 1036x1036 layout copy,
+# drop the bitmap; later re-decode, cut, drop it again) because the slow part — waiting on the layout call — is spent
+# OUTSIDE the gate. at a few pages a second, a 0.2s hold needs a handful of slots; 288 was sized for the old shape,
+# where a page squatted here for the whole 66s layout wait. decode_wait is 0.0s on every document, so this gate is not
+# contended and the ~2.2GB it was reserving is better spent on pages in flight, which is what feeds the model
 
 
 @lru_cache
@@ -240,6 +245,12 @@ def get_rapidocr_pool() -> ThreadPoolExecutor:
     return ThreadPoolExecutor(max_workers=RAPIDOCR_CONCURRENCY)
 
 
+@lru_cache
+def get_rapidocr_gate() -> asyncio.Semaphore:
+    # one permit per pool thread: run_in_executor queues silently, so without this the queue wait is charged as OCR work
+    return asyncio.Semaphore(RAPIDOCR_CONCURRENCY)
+
+
 T = TypeVar("T")
 _PROCESS_POOLS: list[ProcessPool] = []
 
@@ -259,8 +270,20 @@ def get_pdfium_pool() -> ProcessPool:
     return pool
 
 
-async def _run_pool[T](pool: ProcessPool, func: Callable[..., T], *args: object, timeout: float) -> T:
-    return await asyncio.wrap_future(pool.schedule(func, args=args, timeout=timeout))
+@lru_cache
+def get_pdfium_gate() -> asyncio.Semaphore:
+    # exactly as many permits as the pool has workers, so holding one means a worker is free. it exists to make the
+    # queue wait VISIBLE: pebble queues inside schedule(), so timing the submit charges the wait to the work
+    return asyncio.Semaphore(PDFIUM_WORKERS)
+
+
+async def _run_pdfium[T](func: Callable[..., T], *args: object, timeout: float) -> tuple[T, float, float]:
+    mark = time.time()
+    async with get_pdfium_gate():
+        wait = time.time() - mark
+        mark = time.time()
+        result = await asyncio.wrap_future(get_pdfium_pool().schedule(func, args=args, timeout=timeout))
+        return result, wait, time.time() - mark
 
 
 _PROFILE_DIRS: list[str] = []
@@ -520,7 +543,7 @@ async def handle_paginate(fields: dict[str, str]) -> None:
             logger.info("paginate file=%s kind=%s", fields["filename"], kind)
         return
     dpi = RENDER_DPI
-    count = await _run_pool(get_pdfium_pool(), count_pdf_pages, str(blob_path(doc_id)), timeout=RENDER_TIMEOUT)
+    count, _, _ = await _run_pdfium(count_pdf_pages, str(blob_path(doc_id)), timeout=RENDER_TIMEOUT)
     if count <= 0:  # empty/unreadable pdf: no page units will ever be recorded, so drive the doc straight to merge
         await redis.hset(f"doc:{doc_id}", "page_count", 0)
         await get_redis().xadd(STREAM_MERGE, {"doc_id": doc_id})
@@ -549,11 +572,11 @@ async def handle_render(fields: dict[str, str]) -> None:
         return  # doc already finished → a reclaimed render job is a safe no-op
     redis = get_redis()
     await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
-    render_t = time.time()
-    image_bytes, digital = await _run_pool(
-        get_pdfium_pool(), render_pdf_page, str(path), page_idx, dpi, timeout=RENDER_TIMEOUT
+    (image_bytes, digital), render_wait, render_cpu = await _run_pdfium(
+        render_pdf_page, str(path), page_idx, dpi, timeout=RENDER_TIMEOUT
     )
-    await _add_stage_seconds(doc_id, "render_s", time.time() - render_t)
+    await _add_stage_seconds(doc_id, "render_wait_s", render_wait)
+    await _add_stage_seconds(doc_id, "render_s", render_cpu)
     await redis.xadd(
         STREAM_PAGES,
         {"doc_id": doc_id, "page_idx": page_idx, "image": image_bytes, "digital": "1" if digital else "0"},
@@ -767,28 +790,44 @@ async def _predict_crop(
     param: SamplingParams | None,
     semaphore: asyncio.Semaphore,
     budget: _CropBudget,
+    spans: _Spans,
 ) -> _PredictResult:
     # one crop, one slot: the semaphore bounds what is in flight at the model, the budget bounds what is alive in RAM,
-    # and both are handed back the instant THIS crop returns — not when its slowest sibling does
+    # and both are handed back the instant THIS crop returns — not when its slowest sibling does.
+    # acquire the semaphore HERE rather than let the client do it inside _aio_predict, so the queue wait is charged to
+    # crop_wait and never to predict. the client is then handed a free semaphore of its own and never blocks on it.
+    mark = time.time()
     try:
-        return await client._aio_predict(payload, prompt, param, None, semaphore, None)
+        async with semaphore:
+            spans.crop_wait += time.time() - mark
+            mark = time.time()
+            result = await client._aio_predict(payload, prompt, param, None, asyncio.Semaphore(1), None)
+            spans.predict += time.time() - mark
+            return result
     finally:
         budget.release(1)
 
 
 @dataclass
 class _Spans:
-    # where a page's time inside handle_ocr actually goes. ocr_gpu alone says only that pages wait, never on what —
-    # every theory about the bottleneck so far has been a guess at which of these five it is
+    # where a page's time inside handle_ocr actually goes. every field is either WAIT (queuing for one of our own
+    # bounds) or WORK (the resource actually doing something) — never both, because a span that mixes them cannot say
+    # what is slow. crop_wait/predict are summed across the page's crops, which run concurrently, so they exceed the
+    # page's wall clock; they are comparable to EACH OTHER, which is the whole question: are we waiting, or is it the model
     decode_wait: float = 0.0  # queuing for a decode slot
-    layout: float = 0.0  # the one VLM call that finds the blocks
-    budget_wait: float = 0.0  # blocked on crop budget, holding the decode slot and the bitmap
-    cut: float = 0.0  # PIL: cutting the crops out (cpu)
-    predict: float = 0.0  # the N VLM calls that read them — the only span that is real work
+    layout_wait: float = 0.0  # queuing for a crop slot to make the ONE layout call
+    layout: float = 0.0  # that call: the VLM generating every block's box as text
+    budget_wait: float = 0.0  # blocked on crop budget, holding nothing but the encoded page
+    cut: float = 0.0  # PIL: re-decode, cut the crops out, PNG them (cpu)
+    crop_wait: float = 0.0  # summed over crops: queuing for a crop slot
+    predict: float = 0.0  # summed over crops: the VLM actually reading them
+
+
+SPAN_FIELDS = ("decode_wait", "layout_wait", "layout", "budget_wait", "cut", "crop_wait", "predict")
 
 
 async def _record_spans(doc_id: str, spans: _Spans) -> None:
-    for field_name in ("decode_wait", "layout", "budget_wait", "cut", "predict"):
+    for field_name in SPAN_FIELDS:
         await _add_stage_seconds(doc_id, f"{field_name}_s", getattr(spans, field_name))
 
 
@@ -814,13 +853,15 @@ async def extract_page(client: MinerUClient, doc_id: str, image: bytes, not_extr
         with Image.open(io.BytesIO(image)) as img:
             layout_image = await client.helper.aio_prepare_for_layout(client.executor, img)
     mark = time.time()  # bitmap gone, slot released — we hold only the small layout copy for the long call
-    layout_call = client._aio_predict(
-        layout_image, _layout_prompt(client), _layout_params(client), None, semaphore, None
-    )
-    output = await layout_call
+    async with semaphore:  # a layout call is one crop slot, and its queue wait is its own span, not the call's
+        spans.layout_wait = time.time() - mark
+        mark = time.time()
+        output = await client._aio_predict(
+            layout_image, _layout_prompt(client), _layout_params(client), None, asyncio.Semaphore(1), None
+        )
+        spans.layout = time.time() - mark
     del layout_image
     layout = ExtractResult(await client.helper.aio_parse_layout_output(client.executor, output.text), output.scored)
-    spans.layout = time.time() - mark
 
     # CUT. re-decode (~50ms) rather than carry the bitmap across the layout wait, and turn every crop into its encoded
     # bytes here: the client would PNG them anyway, so encoding now lets the raw pixel buffers die immediately and
@@ -849,14 +890,12 @@ async def extract_page(client: MinerUClient, doc_id: str, image: bytes, not_extr
     # page squats on all 26 slots long after 25 of them are done — tail latency holding the whole reservation. a
     # 26-crop scanned page then stalls every page behind it in the decode gate (253s per page against 85s unbounded).
     # each crop now returns its slot and drops its image the moment its own request lands.
-    mark = time.time()
     outputs = await asyncio.gather(
         *(
-            _predict_crop(client, payload, prompt, param, semaphore, budget)
+            _predict_crop(client, payload, prompt, param, semaphore, budget, spans)
             for payload, prompt, param in zip(payloads, prompts, params, strict=True)
         )
     )
-    spans.predict = time.time() - mark
     for idx, output in zip(indices, outputs, strict=True):
         layout[idx].content = output.text
         layout[idx].scored = output.scored
@@ -992,16 +1031,25 @@ def _scanned_gap_lines(
     return out
 
 
-async def recover_scanned_gaps(img: Image.Image, blocks: list[Block], page_idx: int) -> None:
+async def recover_scanned_gaps(img: Image.Image, blocks: list[Block], page_idx: int) -> tuple[float, float]:
     # scanned page: the VLM already produced the (good) text; RapidOCR (CPU, bounded) adds only the lines it dropped.
-    # runs in the decoupled gapfill stage, so it never holds the GPU OCR slot or pins a decoded page array under it
-    page = np.asarray(img.convert("RGB"))
+    # runs in the decoupled gapfill stage, so it never holds the GPU OCR slot or pins a decoded page array under it.
+    # the gate has one permit per pool thread, so the wait for a thread is measured here instead of inside the work
+    # BGR, not RGB: RapidOCR only swaps channels for path/bytes/PIL inputs — an ndarray it takes as already-BGR
+    # (its LoadImage.convert_img returns it untouched), so handing it RGB silently transposes red and blue
+    page = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2BGR)
     covered = [list(b.bbox) for b in blocks if b.type in {"table", "image"}]
     text_blocks = [(list(b.bbox), b.text or "") for b in blocks if b.type in LAYER_TYPES]
     loop = asyncio.get_running_loop()
-    gaps = await loop.run_in_executor(get_rapidocr_pool(), _scanned_gap_lines, page, covered, text_blocks)
+    mark = time.time()
+    async with get_rapidocr_gate():
+        wait = time.time() - mark
+        mark = time.time()
+        gaps = await loop.run_in_executor(get_rapidocr_pool(), _scanned_gap_lines, page, covered, text_blocks)
+        work = time.time() - mark
     for bbox, text in gaps:
         blocks.append(Block(type="text", page_idx=page_idx, bbox=bbox, text=text))
+    return wait, work
 
 
 async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
@@ -1017,16 +1065,16 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         text_blocks = [cb for cb in content_blocks if cb.type in LAYER_TYPES]
         path = blob_path(doc_id)
         if text_blocks and path.exists():
-            layer_t = time.time()  # awaited on the OCR path: every digital page waits here, so it gates the VLM's feed
-            layer = await _run_pool(
-                get_pdfium_pool(),
+            # awaited on the OCR path: every digital page waits here, so it gates the VLM's feed
+            layer, layer_wait, layer_cpu = await _run_pdfium(
                 extract_layer_by_bbox,
                 str(path),
                 page_idx,
                 [list(cb.bbox) for cb in text_blocks],
                 timeout=RENDER_TIMEOUT,
             )
-            await _add_stage_seconds(doc_id, "layer_s", time.time() - layer_t)
+            await _add_stage_seconds(doc_id, "layer_wait_s", layer_wait)
+            await _add_stage_seconds(doc_id, "layer_s", layer_cpu)
             for cb, text in zip(text_blocks, layer, strict=True):
                 if text:
                     cb.content = text
@@ -1075,10 +1123,10 @@ async def handle_gapfill(fields: dict[str, str], image: bytes) -> None:
     # decoupled CPU stage: RapidOCR adds the lines the VLM dropped on a scanned page, then the page is finalized
     page_idx = int(fields["page_idx"])
     blocks = _load_blocks(fields["blocks"])
-    gapfill_t = time.time()
     with Image.open(io.BytesIO(image)) as img:
-        await recover_scanned_gaps(img, blocks, page_idx)
-    await _add_stage_seconds(fields["doc_id"], "gapfill_s", time.time() - gapfill_t)
+        gapfill_wait, gapfill_cpu = await recover_scanned_gaps(img, blocks, page_idx)
+    await _add_stage_seconds(fields["doc_id"], "gapfill_wait_s", gapfill_wait)
+    await _add_stage_seconds(fields["doc_id"], "gapfill_s", gapfill_cpu)
     await _emit_page(fields["doc_id"], page_idx, blocks)
 
 
@@ -1090,15 +1138,22 @@ async def emit_vlm_only(fields: dict[str, str]) -> None:
 # ---- merge stage ----------------------------------------------------------------------
 
 
-STAGE_SECONDS = (  # accumulated per-page work, in pipeline order — not wall spans, which are mostly queue wait
+STAGE_SECONDS = (  # accumulated per-page, in pipeline order. every *_wait is US making the page queue on one of our own
+    # bounds; every other field is the resource actually working. they are separated because a span that mixes the two
+    # cannot answer the only question worth asking — is the pipeline slow, or is the model
+    ("render_wait", "render_wait_s"),
     ("render_cpu", "render_s"),
-    ("ocr_gpu", "ocr_s"),
-    ("decode_wait", "decode_wait_s"),  # the five below decompose ocr_gpu: which of them dominates IS the bottleneck
+    ("ocr_wall", "ocr_s"),  # the page's elapsed time in handle_ocr; the fields below decompose it
+    ("decode_wait", "decode_wait_s"),
+    ("layout_wait", "layout_wait_s"),
     ("layout", "layout_s"),
     ("budget_wait", "budget_wait_s"),
     ("cut", "cut_s"),
+    ("crop_wait", "crop_wait_s"),
     ("predict", "predict_s"),
+    ("layer_wait", "layer_wait_s"),
     ("layer_cpu", "layer_s"),
+    ("gapfill_wait", "gapfill_wait_s"),
     ("gapfill_cpu", "gapfill_s"),
 )
 

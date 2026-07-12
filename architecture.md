@@ -77,26 +77,42 @@ per page.
 
 ### What bounds the pipeline
 
-The vision model's unit of work is not a page but a **crop**: a page is laid out once, and every block it
-finds is then cut out and read as its own request. A page is therefore worth wildly different amounts of
-GPU work — a scanned page yields tens of crops, while a born-digital one yields only a couple, because its
-text comes from the page's own text layer and is never sent to the model at all. No page count can be
-right for both: set it for scanned pages and the model starves on digital ones; set it for digital pages
-and a scanned document floods it.
+The vision model is asked two different things per page, and they cost very different amounts:
 
-So **crops are the only concurrency that is configured, and everything else derives from it.** A page is
-admitted only against free crop budget, so how many pages run at once is simply whatever the budget
-affords — many digital pages, few scanned ones, both keeping the model equally saturated. Crops are
-charged before they are cut, so none can exist uncharged, and every source of them — a page's own blocks,
-re-read fill-in fields, empty image regions — draws on the same budget.
+- **Layout** — one call on the whole page. It returns nothing but boxes, yet it is the single most
+  expensive request we make: the model *writes out* every block it finds, so a dense page (hundreds of
+  blocks) is a long generation. Across a real corpus this is roughly **half of all GPU time**, for one
+  request per page.
+- **Reading** — one call per block, on a crop of it. A scanned page yields tens of these; a born-digital
+  one yields only a couple, because its text comes from the page's own text layer and is never sent to the
+  model at all.
 
-Memory follows from the same idea. A decoded page bitmap is needed to lay out and to cut, never to wait on
-the model, so it is dropped as soon as the crops exist and a page spends the long part of its life holding
-only its (far smaller) encoded bytes. Bitmaps are bounded separately and tightly; crops are bounded by the
-budget; the render buffer is sized to feed the decode gate. Host memory is therefore **flat** — a function
-of these bounds alone, not of how many documents are uploaded, how large they are, or how long the queue
-gets. Backpressure propagates the whole way back: crops fill → pages stop being admitted → rendered pages
-back up → render stalls → paginate stalls.
+So a page is worth wildly different amounts of work depending on what it is, and **no page count can be
+right for both**: set it for scanned pages and the model starves on digital ones; set it for digital pages
+and a scanned document floods it. Concurrency is therefore expressed in **requests**, not pages — one
+semaphore caps what is outstanding at the model, and everything else exists only to cap *memory*.
+
+The rule that follows is the important one: **a memory bound must never become the throughput constraint.**
+Each is sized so the request semaphore runs out first. Get that wrong and the symptom is invisible from the
+outside — the model simply idles while the pipeline queues against itself, and every knob looks innocent.
+The stage line therefore reports where a page's time actually went (waiting for a decode slot, waiting on
+crop budget, in layout, cutting, or being read), because *which* wait dominates is the only thing that
+distinguishes these cases, and guessing at it is reliably wrong.
+
+Memory then follows from what each thing is needed *for*, not how long it is referenced:
+
+- A **decoded bitmap** is needed to lay out and to cut — never to wait on the model, which is the long
+  part. It is built, used, and dropped inside a bounded gate; a page waits out its requests holding only
+  its (far smaller) encoded bytes.
+- A **crop** is compressed the moment it is cut, so what is held during the wait is the wire format, not
+  raw pixels.
+- **Pages in flight** are bounded only because a page must be claimed before it can be laid out, and until
+  it is laid out nothing downstream can account for it.
+
+Host memory is therefore **flat** — a function of these bounds alone, not of how many documents are
+uploaded, how large they are, how dense their pages are, or how long the queue gets. Backpressure
+propagates the whole way back: requests fill → pages stop being admitted → rendered pages back up → render
+stalls → paginate stalls.
 
 ### Reading pages (ocr)
 
@@ -374,9 +390,15 @@ design intends.
   questions well but can keep too little for an open "summarize everything about X": the answer is correct
   but thinner than the corpus could support. This is a prompt-tuning axis, not a structural limit.
 
-- **Throughput is bounded by the visual-OCR model.** With the bus under backpressure and the source
-  memory-mapped rather than streamed as bytes, host memory stays flat regardless of how many or how large
-  the uploads are, so the ceiling is no longer host RAM but the vision model's page-read rate on the GPU —
-  reading a page costs far more than rendering or converting it, and it saturates the GPU well before the
-  CPU stages do. More throughput comes from a faster or smaller vision model, or less work per page (fewer
-  non-text crops), not from more host RAM.
+- **Throughput is bounded by the visual model, and layout is half of it.** Every CPU stage — converting,
+  rendering, cutting, text-layer extraction, gap-fill — is a rounding error beside the GPU; measured
+  end-to-end, a page's time is almost entirely the two model calls, and roughly half of that is the single
+  **layout** request, which returns only boxes but must write out every block it finds. So more throughput
+  comes from a faster or smaller vision model, or from asking it for less (fewer blocks to enumerate, fewer
+  non-text crops, a coarser page) — not from more concurrency, and not from more host RAM.
+
+- **A memory bound that becomes the throughput constraint is invisible from the outside.** The failure
+  looks identical to a slow GPU: the model idles, the queue drains, and every knob looks innocent. It is
+  only distinguishable by asking where a page's time actually went — which is why the stage line reports
+  the waits (decode slot, crop budget) separately from the work (layout, read). Tuning these by inference
+  rather than measurement reliably picks the wrong one.

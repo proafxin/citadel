@@ -21,19 +21,26 @@ services:
       - 0.0.0.0
       - --port
       - "${CITADEL_MINERU_PORT:-8099}"
+      # KV was never close to the limit: measured 17-18% used while running 256 sequences, so the pool is ~5x oversized.
+      # 0.25 still leaves ~3x headroom at 192 seqs and hands the rest of the card to qwen + the BGE-M3 embedder.
       - --gpu-memory-utilization
-      - "0.35"
+      - "0.25"
+      # NOT a free knob: vLLM pre-allocates HOST memory for multimodal staging in proportion to this and it scales worse
+      # than linearly — 7GB idle at 256 against 16.25GB idle at 384, on a 31GB box. the GPU was never the limit (KV
+      # holds 858k tokens, ~12% used); host RAM is. our crop semaphore must equal this and never exceed it — exceeding
+      # it only queues requests INSIDE mineru, each pinning a decoded image (288 measured 892s / 14.72GB against 840s /
+      # 8.4GB at 256). raising it is pointless while Running sits below it: that means we are not feeding it, not that
+      # it is full.
       - --max-num-seqs
-      - "256"
+      - "128"
       - --quantization
       - fp8
       - --kv-cache-dtype
       - fp8
-      # MM processor cache: enabled but capped (it lives in HOST RAM). a real win on repeated/templated pages
-      # (forms, letterheads) + within-page re-encodes; bounded to 2GB so it can't balloon the host footprint.
-      # cache only affects speed, never the output — so it doesn't touch the OmniDocBench quality numbers.
+      # MM processor cache: OFF. it lives in HOST RAM, which is the scarce resource here, and it earns almost nothing:
+      # measured hit rate 0.3-15%, because every page is a different image. cache only affects speed, never the output.
       - --mm-processor-cache-gb
-      - "1"
+      - "0"
       - --uvicorn-log-level
       - warning
     ports:
