@@ -21,10 +21,11 @@ services:
       - 0.0.0.0
       - --port
       - "${CITADEL_MINERU_PORT:-8099}"
-      # KV was never close to the limit: measured 17-18% used while running 256 sequences, so the pool is ~5x oversized.
-      # 0.25 still leaves ~3x headroom at 192 seqs and hands the rest of the card to qwen + the BGE-M3 embedder.
+      # KV never needed 0.35 (17-18% used there) but 0.25 ran it to 82% with requests queuing. 0.30 splits it, and the
+      # VRAM this frees is not idle: the embedder sizes its batch from whatever is unclaimed on the card, so what mineru
+      # does not reserve becomes embedding throughput.
       - --gpu-memory-utilization
-      - "0.25"
+      - "0.30"
       # NOT a free knob: vLLM pre-allocates HOST memory for multimodal staging in proportion to this and it scales worse
       # than linearly — 7GB idle at 256 against 16.25GB idle at 384, on a 31GB box. the GPU was never the limit (KV
       # holds 858k tokens, ~12% used); host RAM is. our crop semaphore must equal this and never exceed it — exceeding
@@ -41,6 +42,15 @@ services:
       # measured hit rate 0.3-15%, because every page is a different image. cache only affects speed, never the output.
       - --mm-processor-cache-gb
       - "0"
+      # the GPU is NOT the bottleneck at these settings: measured Running pinned at ~125/128 with Waiting 0 while the
+      # card sat at 30-60% util, high clocks and LOW power — a GPU with nothing to run, not one that is saturated. with
+      # a 1.2B model a decode step is milliseconds, so the per-step CPU work (scheduling, and preprocessing a fresh
+      # image for EVERY request since the mm cache is off) is what the GPU waits on. async scheduling overlaps the
+      # scheduler with execution; extra api servers stop the frontend (HTTP, base64, image preprocess) serialising on
+      # one GIL. we have 24 cores and they are mostly idle.
+      - --async-scheduling
+      - --api-server-count
+      - "4"
       - --uvicorn-log-level
       - warning
     ports:

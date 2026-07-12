@@ -30,7 +30,13 @@ RETRIEVAL_CONCURRENCY = 8  # cap concurrent dense/sparse searches so a many-vari
 
 EMBED_VRAM_HEADROOM = 0.7
 MODEL_MAX_TOKENS = 8192
-BYTES_PER_TOKEN = 23_000
+BYTES_PER_TOKEN = 21_750  # activations: linear in tokens, so batch x longest bounds them
+MASK_BYTES_PER_TOKEN = 2  # the attention mask is NOT linear. transformers materializes it as (batch, 1, L, L) to hand
+# to sdpa, in the model's bf16 — one element per token PER key — so it costs 2 x longest bytes per token, i.e. it grows
+# with the SQUARE of sequence length. at longest=917 that is 2KB a token against 21.75KB of activations and it hides
+# inside the linear fit; at longest=8192 it is 16KB a token and dominates. sizing a batch on tokens alone therefore
+# reads the same for a group of short nodes and a group of long ones, and OOMs on the long one: 31 x 8192^2 x 2 =
+# 3.88GiB, which is exactly the allocation that failed
 UPSERT_COLS = 4
 UPSERT_CHUNK = 32767 // UPSERT_COLS
 
@@ -51,25 +57,37 @@ def available_vram() -> int:
     return driver_free + cached_free
 
 
+def bytes_per_token(longest: int) -> int:
+    # what ONE padded token of a batch actually costs: its activations, plus its row of the (L x L) attention mask
+    return BYTES_PER_TOKEN + MASK_BYTES_PER_TOKEN * longest
+
+
+def vram_budget() -> int:
+    return int(EMBED_VRAM_HEADROOM * available_vram())
+
+
 def token_budget() -> int:
-    return max(MODEL_MAX_TOKENS, int(EMBED_VRAM_HEADROOM * available_vram() / BYTES_PER_TOKEN))
+    # how many tokens a group may pack. priced at the model's longest possible node, since a group is packed before its
+    # longest is known and a single long node would otherwise blow the batch it lands in
+    return max(MODEL_MAX_TOKENS, vram_budget() // bytes_per_token(MODEL_MAX_TOKENS))
 
 
 def embed_texts(texts: list[str], longest: int) -> list[list[float]]:
     if not texts:
         return []
-    budget = token_budget()
-    batch_size = max(1, budget // max(longest, 1))
+    budget = vram_budget()
+    batch_size = max(1, budget // (max(longest, 1) * bytes_per_token(longest)))
     torch.cuda.reset_peak_memory_stats()
     baseline = torch.cuda.memory_allocated()
     vectors = get_embedder().encode(texts, batch_size=batch_size, normalize_embeddings=True, show_progress_bar=False)
     activation = torch.cuda.max_memory_allocated() - baseline
     logger.info(
-        "embed_encode rows=%d longest=%d batch=%d budget=%d act=%dMiB avail=%dMiB",
+        "embed_encode rows=%d longest=%d batch=%d per_token=%d budget=%dMiB act=%dMiB avail=%dMiB",
         len(texts),
         longest,
         batch_size,
-        budget,
+        bytes_per_token(longest),
+        budget >> 20,
         activation >> 20,
         available_vram() >> 20,
     )
