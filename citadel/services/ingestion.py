@@ -783,6 +783,29 @@ def _encode_crops(crops: list[Image.Image | bytes]) -> list[bytes]:
     return out
 
 
+@dataclass
+class _Spans:
+    # where a page's time inside handle_ocr actually goes. every field is either WAIT (queuing for one of our own
+    # bounds) or WORK (the resource actually doing something) — never both, because a span that mixes them cannot say
+    # what is slow. crop_wait/predict are summed across the page's crops, which run concurrently, so they exceed the
+    # page's wall clock; they are comparable to EACH OTHER, which is the whole question: are we waiting, or is it the model
+    decode_wait: float = 0.0  # queuing for a decode slot
+    layout_wait: float = 0.0  # queuing for a crop slot to make the ONE layout call
+    layout: float = 0.0  # that call: the VLM generating every block's box as text
+    budget_wait: float = 0.0  # blocked on crop budget, holding nothing but the encoded page
+    cut: float = 0.0  # PIL: re-decode, cut the crops out, PNG them (cpu)
+    crop_wait: float = 0.0  # summed over crops: queuing for a crop slot
+    predict: float = 0.0  # summed over crops: the VLM actually reading them
+
+
+SPAN_FIELDS = ("decode_wait", "layout_wait", "layout", "budget_wait", "cut", "crop_wait", "predict")
+
+
+async def _record_spans(doc_id: str, spans: _Spans) -> None:
+    for field_name in SPAN_FIELDS:
+        await _add_stage_seconds(doc_id, f"{field_name}_s", getattr(spans, field_name))
+
+
 async def _predict_crop(
     client: MinerUClient,
     payload: bytes,
@@ -806,29 +829,6 @@ async def _predict_crop(
             return result
     finally:
         budget.release(1)
-
-
-@dataclass
-class _Spans:
-    # where a page's time inside handle_ocr actually goes. every field is either WAIT (queuing for one of our own
-    # bounds) or WORK (the resource actually doing something) — never both, because a span that mixes them cannot say
-    # what is slow. crop_wait/predict are summed across the page's crops, which run concurrently, so they exceed the
-    # page's wall clock; they are comparable to EACH OTHER, which is the whole question: are we waiting, or is it the model
-    decode_wait: float = 0.0  # queuing for a decode slot
-    layout_wait: float = 0.0  # queuing for a crop slot to make the ONE layout call
-    layout: float = 0.0  # that call: the VLM generating every block's box as text
-    budget_wait: float = 0.0  # blocked on crop budget, holding nothing but the encoded page
-    cut: float = 0.0  # PIL: re-decode, cut the crops out, PNG them (cpu)
-    crop_wait: float = 0.0  # summed over crops: queuing for a crop slot
-    predict: float = 0.0  # summed over crops: the VLM actually reading them
-
-
-SPAN_FIELDS = ("decode_wait", "layout_wait", "layout", "budget_wait", "cut", "crop_wait", "predict")
-
-
-async def _record_spans(doc_id: str, spans: _Spans) -> None:
-    for field_name in SPAN_FIELDS:
-        await _add_stage_seconds(doc_id, f"{field_name}_s", getattr(spans, field_name))
 
 
 async def extract_page(client: MinerUClient, doc_id: str, image: bytes, not_extract: list[str] | None) -> ExtractResult:
