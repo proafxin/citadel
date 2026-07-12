@@ -1,10 +1,15 @@
 import functools
+import threading
 
 import cv2
 import numpy as np
 from paddleocr import LayoutDetection
 from pydantic import BaseModel
 
+# NOTE: paddle PRE-ALLOCATES ~92% of the card the moment it initialises, regardless of what else is already on it — we
+# watched it do exactly that and then die trying to allocate 144MB. FLAGS_allocator_strategy=auto_growth and
+# FLAGS_fraction_of_gpu_memory_to_use=0 are exported by scripts/run.sh, because they must be set before paddle is
+# imported and this process shares the card with the recognition model, the SLM and the embedder.
 DETECT_MODEL = "PP-DocLayoutV3"
 
 
@@ -16,8 +21,15 @@ class DetBlock(BaseModel):
 
 
 @functools.lru_cache
-def _detector() -> LayoutDetection:
+def _thread_detector(_thread_id: int) -> LayoutDetection:
+    # one detector per calling thread. the predictor is not documented as re-entrant, and a shared instance across
+    # threads could race and garble the boxes — the same reason the scanned-page OCR engines were per-thread. keying on
+    # thread id gives each worker its own; the pool is fixed and small, so this is a bounded few
     return LayoutDetection(model_name=DETECT_MODEL)
+
+
+def _detector() -> LayoutDetection:
+    return _thread_detector(threading.get_ident())
 
 
 def detect_layout(image: bytes) -> list[DetBlock]:

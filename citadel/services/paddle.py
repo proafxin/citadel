@@ -23,7 +23,10 @@ VLM_CONN_HEADROOM = 4  # sockets per client as a MULTIPLE of that client's mean 
 # model would starve with nothing in our logs to say so
 VLM_CONN_PER_CLIENT = VLM_CONN_HEADROOM * CROP_CONCURRENCY // VLM_CLIENTS
 VLM_TIMEOUT = 600
-VLM_MAX_TOKENS = 8192  # a dense table is the longest thing the model emits; below this it would truncate mid-row
+VLM_MAX_TOKENS = 4096  # the model's context is prompt + completion TOGETHER, so this cannot be the whole 8192 window:
+# every request would overflow before it started (measured: a 400, "you requested 8192 output tokens"). a crop's prompt
+# is 183 image tokens for a line of prose and ~1.3k for a dense table, and the longest thing the model emits is that
+# table at ~800 tokens — so 4096 is several times what any crop needs and still leaves the window room to spare
 
 # the prompts are the model's own task selectors — four tasks, chosen by what the detector says the region IS.
 # taken verbatim from the reference pipeline; they are not ours to reword

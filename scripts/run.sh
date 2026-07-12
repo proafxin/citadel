@@ -6,6 +6,12 @@ cd "$(dirname "$0")/.."
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
+# paddle (the layout detector) PRE-ALLOCATES ~92% of the GPU the instant it initialises, whatever else is on the
+# card — we watched it grab the lot and then die allocating 144MB. it shares this GPU with the recognition model,
+# the SLM and the embedder, so make it grow on demand instead. must be set before python imports paddle.
+export FLAGS_allocator_strategy=auto_growth
+export FLAGS_fraction_of_gpu_memory_to_use=0
+
 # a pool worker churns big transient buffers — a rendered page is a ~19MB bitmap plus a PIL copy plus a PNG — and glibc
 # turns that into a ratchet it never releases: measured 219MB of [heap] in a worker whose live data is a few MB.
 # MMAP_THRESHOLD_ is the one that matters. glibc mmaps blocks over the threshold and munmaps them on free, but on each

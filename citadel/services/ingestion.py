@@ -11,6 +11,7 @@ import tempfile
 import time
 from collections import deque
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -98,9 +99,9 @@ RENDER_TIMEOUT = 120  # page renders in <1s; if a job strands (dead/hung pool wo
 PDF_POOL_MAX_TASKS = 100  # recycle a pdfium worker every N pages: a long-lived one grows to hundreds of MB and never
 # gives it back. respawn is a fork off the (lean) forkserver, so the cost is milliseconds amortised over 100 pages,
 # against a stage that is already the cheapest in the pipeline
-DETECT_WORKERS = 2  # layout detector processes. one covers ~22 pages/s against a demand of a few, so two is headroom,
-# not need — but the detector must never become the bound it exists to remove
-DETECT_TIMEOUT = 120
+DETECT_WORKERS = 2  # detector threads, each with its own model (the predictor is not re-entrant). one covers ~22
+# pages/s against a demand of a few, so two is headroom, not need — but the detector must never become the bound it
+# exists to remove. batching it is pointless: 44ms/page at batch 1, 42ms at batch 16, because the cost is CPU-side
 CROP_BUFFER = 12288  # crops cut and waiting on the semaphore. if it cannot cover the pages in flight they simply queue
 # HERE instead, and budget_wait — not the model — becomes what limits us. a crop is PNG bytes by the time it is charged
 # (~40KB, not the ~400KB of raw pixels), so the headroom is cheap. the semaphore still caps what is in flight AT the
@@ -216,35 +217,33 @@ def get_pdfium_gate() -> asyncio.Semaphore:
 
 
 @lru_cache
-def get_detect_pool() -> ProcessPool:
-    # layout is a DETECTOR here, not a generation: one RT-DETR forward pass per page, boxes and reading order out.
-    # it holds ~400MB of VRAM and runs at ~22 pages/s per worker against a demand of a few pages a second, so it is not
-    # — and must never become — the bottleneck. the cost is CPU-side (batching changes nothing: 44ms/page at batch 1,
-    # 42ms at batch 16), so workers, not batches, are what scale it.
+def get_detect_pool() -> ThreadPoolExecutor:
+    # layout is a DETECTOR: one RT-DETR forward pass per page, boxes and reading order out. it runs at ~22 pages/s
+    # against a demand of a few pages a second, so it is not — and must never become — the bottleneck.
     #
-    # SPAWN, not forkserver. a cuda context cannot survive fork(): a child that inherits one is born broken. and the
-    # forkserver is worse than it looks — python keeps ONE per process and set_forkserver_preload is global, so the
-    # pdfium, tabular and detect pools would all share a single forkserver whose preload is whatever the last caller
-    # set. paddle would end up imported in the parent of every pdfium worker, and every detect worker would inherit a
-    # dead context. spawn gives each worker a fresh interpreter that initialises cuda for itself, after it exists.
-    ctx = multiprocessing.get_context("spawn")
-    pool = ProcessPool(max_workers=DETECT_WORKERS, context=ctx)
-    _PROCESS_POOLS.append(pool)
-    return pool
+    # THREADS, not processes, and the reason is CUDA. a cuda context cannot survive fork(), so a forked child is born
+    # broken; and python keeps ONE forkserver per process with a GLOBAL preload list, so the pdfium, tabular and detect
+    # pools would all share a single forkserver whose preload is whatever the last caller happened to set. spawn avoids
+    # the inherited context but gives every child a fresh interpreter that must re-import this module — torch, paddle
+    # and all — and it died there, silently, inside the pool.
+    # a thread sidesteps the whole question: one process, one cuda context, initialised once. paddle releases the GIL
+    # for the forward pass, and the work is a fraction of a second, so threads give us the concurrency we actually need.
+    return ThreadPoolExecutor(max_workers=DETECT_WORKERS, thread_name_prefix="detect")
 
 
 @lru_cache
 def get_detect_gate() -> asyncio.Semaphore:
+    # one permit per thread: run_in_executor queues silently, so without this the queue wait is charged as detector work
     return asyncio.Semaphore(DETECT_WORKERS)
 
 
 async def _run_detect(image: bytes) -> tuple[list[DetBlock], float, float]:
+    loop = asyncio.get_running_loop()
     mark = time.time()
     async with get_detect_gate():
         wait = time.time() - mark
         mark = time.time()
-        future = get_detect_pool().schedule(detect_layout, args=[image], timeout=DETECT_TIMEOUT)
-        blocks: list[DetBlock] = await asyncio.wrap_future(future)
+        blocks = await loop.run_in_executor(get_detect_pool(), detect_layout, image)
         return blocks, wait, time.time() - mark
 
 
@@ -278,14 +277,14 @@ def _reap_profile_dirs() -> None:
 
 def release_idle() -> None:
     # ingestion is bursty but the worker is always-on, so what it warms up it then holds forever. the process pools are
-    # the whole cost — several hundred MB per worker (the detector also holds ~400MB of VRAM), idle between uploads —
-    # and they rebuild lazily as a fork off the forkserver, in milliseconds.
+    # the whole cost — several hundred MB per worker, idle between uploads — and they rebuild lazily as a fork off the
+    # forkserver, in milliseconds. the detector is NOT dropped: it is a thread in this process holding a cuda context
+    # and ~400MB of VRAM, and tearing that down would mean re-initialising cuda on the next upload for nothing.
     while _PROCESS_POOLS:
         pool = _PROCESS_POOLS.pop()
         pool.stop()
         pool.join()
     get_pdfium_pool.cache_clear()
-    get_detect_pool.cache_clear()
     release_header_pool()
     gc.collect()
     ctypes.CDLL("libc.so.6").malloc_trim(0)  # glibc keeps freed pages; without this the process footprint never drops
@@ -297,6 +296,8 @@ async def shutdown() -> None:
         pool = _PROCESS_POOLS.pop()
         pool.stop()
         pool.join()
+    if get_detect_pool.cache_info().currsize:
+        get_detect_pool().shutdown(wait=False)
     await close_vlm_clients()
     _reap_profile_dirs()
     if get_redis.cache_info().currsize:
