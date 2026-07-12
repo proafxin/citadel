@@ -11,6 +11,7 @@ from citadel.services.document import (
     compress_tree,
     delete_document_blocks,
     delete_document_tree,
+    library_inflight,
     load_document_tree,
     notify_embed,
 )
@@ -62,7 +63,11 @@ async def update_library(library_id: int, name: str, tier: Tier) -> LibraryRead:
         library.name = name
         library.tier = tier
         result = _to_read(library)
-    if upgraded:
+        # an upgrade only SCHEDULES embedding — it must not start it while documents are still ingesting, or BGE-M3
+        # runs against a partial library and fights the OCR model for the GPU. if work is still in flight, the
+        # ingestion path's own completion hook notifies once the last document lands (the tier is already tier_2 by then)
+        ready = upgraded and await library_inflight(session, library_id) == 0
+    if ready:
         await notify_embed(library_id)
     return result
 

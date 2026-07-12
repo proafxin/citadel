@@ -38,19 +38,20 @@ services:
       - fp8
       - --kv-cache-dtype
       - fp8
-      # MM processor cache: OFF. it lives in HOST RAM, which is the scarce resource here, and it earns almost nothing:
-      # measured hit rate 0.3-15%, because every page is a different image. cache only affects speed, never the output.
+      # MM processor cache: caches the PREPROCESSED form of an image, keyed by the image. it lives in HOST RAM. we have
+      # never actually measured its hit rate here (the 0.3-15% figure that used to be quoted was the KV PREFIX cache, a
+      # different thing), and the mechanism says it should be ~0 for us: every image we send is unique — one layout
+      # render per page, one crop per block, nothing repeats. it is on at 1GB to MEASURE that, since vLLM logs the hit
+      # rate when enabled. if it is ~0, turn it off and take the gigabyte back. it only ever affects speed, never output.
       - --mm-processor-cache-gb
-      - "0"
-      # the GPU is NOT the bottleneck at these settings: measured Running pinned at ~125/128 with Waiting 0 while the
-      # card sat at 30-60% util, high clocks and LOW power — a GPU with nothing to run, not one that is saturated. with
-      # a 1.2B model a decode step is milliseconds, so the per-step CPU work (scheduling, and preprocessing a fresh
-      # image for EVERY request since the mm cache is off) is what the GPU waits on. async scheduling overlaps the
-      # scheduler with execution; extra api servers stop the frontend (HTTP, base64, image preprocess) serialising on
-      # one GIL. we have 24 cores and they are mostly idle.
+      - "1"
+      # already the default in this build, pinned explicitly so a future default cannot silently un-overlap the CPU
+      # scheduler from GPU execution.
+      # NOT set: --api-server-count. four frontends measured no throughput at all (799s against 810s and 843s, all
+      # inside a +-40s run-to-run band) and it DISABLES vLLM's stats logging — no Running/Waiting/throughput lines. that
+      # log is the only window we have into whether we are feeding the model; it is what caught the socket pool silently
+      # capping us at half the GPU. do not trade it for nothing.
       - --async-scheduling
-      - --api-server-count
-      - "4"
       - --uvicorn-log-level
       - warning
     ports:

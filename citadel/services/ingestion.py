@@ -84,14 +84,14 @@ DOC_TTL = 86_400  # safety expiry on doc/blocks/sheets keys: set at submit, refr
 LAYER_TYPES = ("text", "title")  # filled from the PDF text layer on born-digital pages (skip VLM recognition)
 
 MINERU_CLIENTS = 16
-MINERU_CONN_PER_CLIENT = (
-    32  # sockets, NOT a concurrency bound — it must stay well ABOVE CROP_CONCURRENCY/MINERU_CLIENTS
-)
-# or it silently becomes one. httpx blocks a request with no free connection INSIDE client.post, so it holds its crop
-# permit and sends nothing. round-robin is even by request COUNT but not by DURATION — a layout call holds its socket
-# ~20x longer than a crop (124s vs 6s) — so pools saturate unevenly and requests queue behind a busy client while other
-# clients sit idle. when this was CROP_CONCURRENCY/MINERU_CLIENTS exactly, mineru saw Running ~130 / Waiting 0 against a
-# semaphore of 256: half the GPU idle with thousands of crops ready to send. 2x headroom makes the semaphore the only bound
+MINERU_CONN_HEADROOM = 4  # sockets per client, as a MULTIPLE of that client's mean share of the crop semaphore
+# (CROP_CONCURRENCY / MINERU_CLIENTS). derived, never a literal, because a socket count is not a concurrency bound and
+# must never become one: httpx blocks a request that cannot get a connection INSIDE client.post, so it sits there
+# holding its crop permit and sending nothing. round-robin hands each client an equal COUNT of requests but not an equal
+# DURATION — a layout call holds its socket ~10x longer than a crop — so occupancy is uneven and a client can fill up
+# while others idle. when this was exactly CROP_CONCURRENCY/MINERU_CLIENTS, mineru ran ~130 of 256 sequences with an
+# empty queue: half the GPU idle while thousands of crops waited on OUR side, and nothing in our logs said so.
+# sockets are ~KB each, so headroom is nearly free; the failure it prevents is invisible and cost us a day
 REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connection, never open unbounded sockets
 RENDER_DPI = 150  # validated equal to 200 (the VLM resizes internally) and ~26% faster
 PAGINATE_CONCURRENCY = CPU_EIGHTH
@@ -121,6 +121,8 @@ CROP_BUFFER = 12288  # crops cut and waiting on the semaphore, sized to scale wi
 # it used to be), so the headroom is cheap. the semaphore still caps what is in flight AT the model; this bound only
 # stops us holding crops we cannot send, and it must never be what throttles us
 CROP_BOUND = CROP_CONCURRENCY + CROP_BUFFER  # hard cap on crops alive at once, across every page and every crop source
+MINERU_CONN_PER_CLIENT = MINERU_CONN_HEADROOM * CROP_CONCURRENCY // MINERU_CLIENTS  # tracks the semaphore, so raising
+# CROP_CONCURRENCY can never silently starve the model behind a socket pool that stayed the same size
 DECODE_CONCURRENCY = 16  # pages that may hold a decoded ~10MB bitmap at once — the ONLY place one ever exists, so this
 # is the whole of our bitmap RAM. a page now passes through in ~0.2s (decode, build the model's 1036x1036 layout copy,
 # drop the bitmap; later re-decode, cut, drop it again) because the slow part — waiting on the layout call — is spent

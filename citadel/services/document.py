@@ -55,6 +55,20 @@ async def notify_embed(library_id: int) -> None:
 _LIBRARY_LOCK_CLASS = 1  # namespace for the per-library advisory lock (two-arg space, disjoint from the doc lock)
 
 
+async def library_inflight(session: AsyncSession, library_id: int) -> int:
+    # documents the library is still working on. embedding must never start while this is nonzero: it would run BGE-M3
+    # against a partial library AND contend with the OCR model for the same GPU
+    count = await session.scalar(
+        select(func.count())
+        .select_from(Document)
+        .where(
+            Document.library_id == library_id,
+            Document.status.in_((DocumentStatus.QUEUED, DocumentStatus.PROCESSING)),
+        )
+    )
+    return count or 0
+
+
 async def _maybe_notify_embed(session: AsyncSession, library_id: int) -> None:
     # serialize completion of docs in the SAME library: without this, two docs finishing concurrently each see the other
     # still PROCESSING (uncommitted), so neither observes inflight==0 and neither notifies → the library never embeds.
@@ -67,15 +81,7 @@ async def _maybe_notify_embed(session: AsyncSession, library_id: int) -> None:
     library = await session.get(Library, library_id)
     if library is None:
         return
-    inflight = await session.scalar(
-        select(func.count())
-        .select_from(Document)
-        .where(
-            Document.library_id == library_id,
-            Document.status.in_((DocumentStatus.QUEUED, DocumentStatus.PROCESSING)),
-        )
-    )
-    if inflight != 0:
+    if await library_inflight(session, library_id) != 0:
         return
     now = datetime.now(UTC)
     if library.ingested_at is None:

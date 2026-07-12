@@ -57,13 +57,11 @@ PAGES_BUFFER = DECODE_CONCURRENCY  # rendered pages sitting UNCLAIMED in `pages`
 # crop budget allows), so it is purely a render-ahead buffer and purely a RAM bound (~2MB an image), deep enough that
 # ocr never waits on pdfium and shallow enough that an 800-page PDF cannot rasterize itself into redis.
 PAGES_IN_FLIGHT = CROP_CONCURRENCY  # pages CLAIMED at once — each pins its ~2MB encoded image in redis AND here (~4MB
-# apiece), so this is pure memory. it does not need to SCALE with the model's slots, only to guarantee they can be
-# filled, and equality already guarantees it: a claimed page always offers at least one request (its layout call), so
-# even if every page were laying out at once they would still offer one request per slot. in practice each page past
-# layout offers ~26 crops, and a page is inside a VLM call ~99% of its claimed life (per page: 290s of layout+predict
-# against 0.06s of cutting; gapfill and merge run on their own streams, after the page is acked). so there is almost no
-# dead time to buffer against, and every page above this is a pinned image buying nothing — the GPU is compute-bound.
-# at 768 it sat pegged at its cap holding ~3GB, which is what put the box on swap.
+# apiece). raising it does NOT feed the model: measured, doubling this to 2C tripled the queue on our own semaphore
+# (crop_wait 260k -> 772k seconds on the scanned book) while the model did the same amount of work (predict unchanged at
+# ~42k) and wall time got WORSE (799s -> 844s). the crops were never short of supply — a page sitting in crop_wait is a
+# page whose crops are already cut and DEMANDING slots, so the semaphore is saturated long before the page cap binds.
+# every page above C is therefore a pinned image lengthening a queue that is already full.
 # it must exist at all: a page has to be claimed before it can lay out, and the crop budget cannot see it until it
 # does, so without a cap admission never blocks and claimed pages grow without end (measured: ~1700 claimed, ~3.4GB).
 GAPFILL_BUFFER = 64  # scanned pages OCR may run ahead of RapidOCR gap-fill before it backpressures (keeps the GPU

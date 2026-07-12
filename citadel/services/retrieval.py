@@ -272,6 +272,14 @@ async def embed_library(library_id: int) -> int:
     await redis.hset(f"embed:{library_id}", "t_start", time.time())
     await redis.expire(f"embed:{library_id}", EMBED_TTL)
     pending = await _pending_nodes(library_id)
+    # sort by length so every group is HOMOGENEOUS, which is what makes the memory estimate exact rather than merely
+    # safe. sentence-transformers sorts each call internally and pads every mini-batch to ITS OWN max, so in a group
+    # spanning 62..8192 tokens the group's `longest` is not the width any mini-batch actually runs at: we price them all
+    # at the ceiling and are still wrong, over-reserving for the short ones and under-reserving for the worst one
+    # (measured act 6695MiB against a 5548MiB budget — survived only on the 0.7 headroom). when every node in a group is
+    # the same length, `longest` IS each mini-batch's padded width, the estimate becomes arithmetic, and no padding is
+    # wasted. embed order is irrelevant — rows are upserted by content_id
+    pending.sort(key=lambda node: node.token_len)
     total = len(pending)
     logger.info("embed library=%d nodes=%d", library_id, total)
     embedded = 0

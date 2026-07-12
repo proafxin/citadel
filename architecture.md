@@ -50,10 +50,9 @@ Plain text is a degenerate markup case: split on blank lines into paragraphs.
 
 Ingestion runs as streaming workers on a bus — an upload feeds an always-running pipeline, not a
 per-upload script. Each phase is an independent, asynchronous consumer running concurrently, and work is
-**page-granular**: the pages of one document interleave with every other document's, so a large scan never
-blocks a one-page form and the whole corpus reads in parallel. Every stage is a FIFO-fed sliding window —
-it claims only as much as it can hold, and a slot frees the moment one item completes, never in batches.
-The phases:
+**page-granular**: the unit of work is a page, not a document, so the whole corpus reads in parallel. Every
+stage is a FIFO-fed sliding window — it claims only as much as it can hold, and a slot frees the moment one
+item completes, never in batches. The phases:
 
 ```
 upload → normalize → paginate → render → ocr ─────────────────→ merge → relational store
@@ -79,10 +78,10 @@ per page.
 
 The vision model is asked two different things per page, and they cost very different amounts:
 
-- **Layout** — one call on the whole page. It returns nothing but boxes, yet it is the single most
+- **Layout** — one call on the whole page. It returns nothing but boxes, yet it is by far the most
   expensive request we make: the model *writes out* every block it finds, so a dense page (hundreds of
-  blocks) is a long generation. Across a real corpus this is roughly **half of all GPU time**, for one
-  request per page.
+  blocks) is a long generation. Measured against true model time — queue wait excluded — layout is
+  **84–89% of all GPU work** on dense documents, from one request per page against dozens of crops.
 - **Reading** — one call per block, on a crop of it. A scanned page yields tens of these; a born-digital
   one yields only a couple, because its text comes from the page's own text layer and is never sent to the
   model at all.
@@ -92,12 +91,23 @@ right for both**: set it for scanned pages and the model starves on digital ones
 and a scanned document floods it. Concurrency is therefore expressed in **requests**, not pages — one
 semaphore caps what is outstanding at the model, and everything else exists only to cap *memory*.
 
-The rule that follows is the important one: **a memory bound must never become the throughput constraint.**
-Each is sized so the request semaphore runs out first. Get that wrong and the symptom is invisible from the
-outside — the model simply idles while the pipeline queues against itself, and every knob looks innocent.
-The stage line therefore reports where a page's time actually went (waiting for a decode slot, waiting on
-crop budget, in layout, cutting, or being read), because *which* wait dominates is the only thing that
-distinguishes these cases, and guessing at it is reliably wrong.
+Two rules follow, and both were learned the hard way.
+
+**Nothing between that semaphore and the model may bound lower than it does.** The HTTP client pool is the
+trap: a request that cannot get a socket blocks *inside* the client, holding its permit and sending nothing.
+Requests are handed to clients evenly by count but not by duration — a layout call occupies its socket an
+order of magnitude longer than a crop — so pools saturate unevenly, and a socket count sized "exactly right"
+silently becomes the real bound. Sockets are therefore **derived** from the semaphore with several times the
+per-client mean as headroom, never chosen as a literal.
+
+**A memory bound must never become the throughput constraint.** Each is sized so the request semaphore runs
+out first. Get either rule wrong and the symptom is identical to a slow GPU: the model idles, every knob
+looks innocent, and nothing in our own logs says otherwise.
+
+Which is why the stage line separates **waiting** from **working** — every span is one or the other, never
+both. A span that mixes them cannot answer the only question worth asking. (This is not hypothetical: while
+the spans conflated queue wait with model time, layout appeared to cost about the same as reading. Separated,
+it is five to eight times more.)
 
 Memory then follows from what each thing is needed *for*, not how long it is referenced:
 
@@ -107,7 +117,10 @@ Memory then follows from what each thing is needed *for*, not how long it is ref
 - A **crop** is compressed the moment it is cut, so what is held during the wait is the wire format, not
   raw pixels.
 - **Pages in flight** are bounded only because a page must be claimed before it can be laid out, and until
-  it is laid out nothing downstream can account for it.
+  it is laid out nothing downstream can account for it. It is a memory bound and nothing more: raising it
+  does not feed the model. A page waiting on crop budget is a page whose crops are already cut and already
+  *demanding* slots, so the semaphore saturates long before the page cap binds — measured, doubling pages in
+  flight tripled the queue, produced no additional model work, and cost a gigabyte.
 
 Host memory is therefore **flat** — a function of these bounds alone, not of how many documents are
 uploaded, how large they are, how dense their pages are, or how long the queue gets. Backpressure
@@ -390,15 +403,35 @@ design intends.
   questions well but can keep too little for an open "summarize everything about X": the answer is correct
   but thinner than the corpus could support. This is a prompt-tuning axis, not a structural limit.
 
-- **Throughput is bounded by the visual model, and layout is half of it.** Every CPU stage — converting,
+- **Throughput is bounded by the visual model, and layout is most of it.** Every CPU stage — converting,
   rendering, cutting, text-layer extraction, gap-fill — is a rounding error beside the GPU; measured
-  end-to-end, a page's time is almost entirely the two model calls, and roughly half of that is the single
+  end-to-end, a page's time is almost entirely the two model calls, and **84–89%** of that is the single
   **layout** request, which returns only boxes but must write out every block it finds. So more throughput
-  comes from a faster or smaller vision model, or from asking it for less (fewer blocks to enumerate, fewer
-  non-text crops, a coarser page) — not from more concurrency, and not from more host RAM.
+  comes from a faster or smaller vision model, or from asking it for less — not from more concurrency, and
+  not from more host RAM. The largest available win is a model whose layout stage is a **detector** rather
+  than a generation: it deletes the dominant cost outright, and cannot fail the way a generation can (a
+  degenerate layout generation occasionally returns zero blocks for a whole page).
+
+- **The GPU idles 30–60% of the time on a full queue, and we cannot explain it.** The model reports every
+  sequence slot occupied and nothing queued behind them, while the card shows no kernel resident for much of
+  the run — at high clocks and low power, which is an idle GPU, not a saturated or throttled one. It is not
+  page supply (doubling it did no extra work), not the crop semaphore (crops queue 6–18× deeper than they
+  run), not the socket pool, not the inference server's frontend (more of them changed nothing), and not
+  power or heat. This is the single largest known gap between the pipeline's throughput and the hardware's.
+
+- **Documents are admitted strictly FIFO, so a large one blocks the queue behind it.** Render jobs enter one
+  ordered stream in the order documents are paginated, and a stream cannot be skipped — so an 800-page book
+  monopolizes every page slot until it drains. Measured: a one-page PDF waited **587 seconds** to be looked
+  at. It costs little wall time (total work is unchanged by order) but it starves the tail, where the only
+  work left comes from documents too small to fill the model, and it makes small files finish last.
+  Fair-share admission across documents is the fix; it has not been built.
 
 - **A memory bound that becomes the throughput constraint is invisible from the outside.** The failure
   looks identical to a slow GPU: the model idles, the queue drains, and every knob looks innocent. It is
-  only distinguishable by asking where a page's time actually went — which is why the stage line reports
-  the waits (decode slot, crop budget) separately from the work (layout, read). Tuning these by inference
-  rather than measurement reliably picks the wrong one.
+  only distinguishable by asking where a page's time actually went — which is why every span in the stage
+  line is either a wait or a work, never both. Tuning these by inference rather than measurement reliably
+  picks the wrong one.
+
+- **Run-to-run variance is ±5%.** Identical configurations have measured 810s and 843s. Any single-run
+  comparison inside that band is noise, and treating it as a result is how most of a day gets spent tuning
+  constants that never mattered.
