@@ -90,11 +90,12 @@ REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connect
 RENDER_DPI = 150  # validated equal to 200 and ~26% faster
 PAGINATE_CONCURRENCY = CPU_EIGHTH
 RENDER_CONCURRENCY = CPU_EIGHTH
-PDFIUM_WORKERS = 1  # every pdfium job (count + render + text layer) shares these. measured ~650MB standing per worker
-# (live heap, stable across max_tasks recycles, never reproduced outside the pool), so this is the most expensive
-# process we own per unit of work done — and the work is trivial: the 809-page book spent 165s of render across an 800s
-# wall, so one worker runs at ~20% duty. the stage is a FIFO off the GPU path; finishing a page sooner only makes it
-# wait longer in the buffer, so there is nothing to buy by widening it
+PDFIUM_WORKERS = 4  # every pdfium job — counting, rendering AND text-layer extraction — shares these, and the text
+# layer is the one that matters: it is awaited INSIDE the ocr path, so a page waiting for a pdfium worker is a page not
+# feeding the model. one worker was right when layout was a 20s generation and pdfium had all the time in the world;
+# with a detector doing layout in 95ms, digital pages arrive at the text layer immediately and one worker cannot keep
+# up — measured layer_wait=262s against layer_cpu=8.9s, i.e. 97% queueing. each worker stands at ~650MB, which is real,
+# but host RAM is no longer the scarce thing it was (the OCR model's 11GB and the gap-fill engines are both gone)
 RENDER_TIMEOUT = 120  # page renders in <1s; if a job strands (dead/hung pool worker) free the slot + retry the page
 PDF_POOL_MAX_TASKS = 100  # recycle a pdfium worker every N pages: a long-lived one grows to hundreds of MB and never
 # gives it back. respawn is a fork off the (lean) forkserver, so the cost is milliseconds amortised over 100 pages,
@@ -698,18 +699,18 @@ def _is_vlm_refusal(text: str) -> bool:
 
 @dataclass
 class _Spans:
-    # where a page's time inside handle_ocr actually goes. every field is either WAIT (queuing for one of our own
-    # bounds) or WORK (the resource actually doing something) — never both, because a span that mixes them cannot say
-    # what is slow. crop_wait/predict are summed across the page's crops, which run concurrently, so they exceed the
-    # page's wall clock; they are comparable to EACH OTHER, which is the whole question: are we waiting, or is it
-    # the model that is slow
+    # where a page's time inside handle_ocr actually goes. every field is either a WAIT (queuing on one of our own
+    # bounds) or WORK (the resource actually doing something), never both — a span that mixes them cannot say what is
+    # slow. these are ACCUMULATORS: pages run concurrently and so do the crops within a page, so the raw sums overlap
+    # and are not durations of anything. they are divided by their unit count before they are ever reported.
     decode_wait: float = 0.0  # queuing for a decode slot
-    layout_wait: float = 0.0  # queuing for a detector worker
+    layout_wait: float = 0.0  # queuing for a detector thread
     layout: float = 0.0  # the detector: ONE forward pass. no generation, so it cannot loop or return an empty page
     budget_wait: float = 0.0  # blocked on crop budget, holding nothing but the encoded page
     cut: float = 0.0  # PIL: re-decode, cut the crops out, resize them into the model's pixel window, PNG them (cpu)
-    crop_wait: float = 0.0  # summed over crops: queuing for a crop slot
-    predict: float = 0.0  # summed over crops: the model actually reading them
+    crop_wait: float = 0.0  # over the page's crops: queuing for a crop slot
+    predict: float = 0.0  # over the page's crops: the model actually reading them
+    crops: int = 0  # how many crops those two are summed over — without it the sums mean nothing
 
 
 SPAN_FIELDS = ("decode_wait", "layout_wait", "layout", "budget_wait", "cut", "crop_wait", "predict")
@@ -718,6 +719,7 @@ SPAN_FIELDS = ("decode_wait", "layout_wait", "layout", "budget_wait", "cut", "cr
 async def _record_spans(doc_id: str, spans: _Spans) -> None:
     for field_name in SPAN_FIELDS:
         await _add_stage_seconds(doc_id, f"{field_name}_s", getattr(spans, field_name))
+    await _add_stage_seconds(doc_id, "crops_n", float(spans.crops))
 
 
 def reading_order(blocks: list[DetBlock]) -> list[DetBlock]:
@@ -808,6 +810,7 @@ async def extract_page(doc_id: str, image: bytes, digital: bool) -> list[Block]:
                 budget.release(granted)  # the crops never existed, so no _read_crop will hand this back
                 raise
     spans.cut = time.time() - mark
+    spans.crops = len(payloads)
     budget.release(granted - len(payloads))  # refund the estimate's slack; from here each crop hands its own slot back
 
     texts = await asyncio.gather(
@@ -975,38 +978,47 @@ async def _emit_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
 # ---- merge stage ----------------------------------------------------------------------
 
 
-STAGE_SECONDS = (  # accumulated per-page, in pipeline order. every *_wait is US making the page queue on one of our own
-    # bounds; every other field is the resource actually working. they are separated because a span that mixes the two
-    # cannot answer the only question worth asking — is the pipeline slow, or is the model
-    ("render_wait", "render_wait_s"),
-    ("render_cpu", "render_s"),
-    ("ocr_wall", "ocr_s"),  # the page's elapsed time in handle_ocr; the fields below decompose it
-    ("decode_wait", "decode_wait_s"),
-    ("layout_wait", "layout_wait_s"),
-    ("layout", "layout_s"),
-    ("budget_wait", "budget_wait_s"),
-    ("cut", "cut_s"),
-    ("crop_wait", "crop_wait_s"),
-    ("predict", "predict_s"),
-    ("layer_wait", "layer_wait_s"),
-    ("layer_cpu", "layer_s"),
-    ("gapfill_wait", "gapfill_wait_s"),
-    ("gapfill_cpu", "gapfill_s"),
+STAGE_SECONDS = (  # (label, redis key, unit). every *_wait is US making something queue on one of our own bounds; every
+    # other field is the resource actually working. they are kept apart because a span that mixes them cannot answer the
+    # only question worth asking — is the pipeline slow, or is the model.
+    # the UNIT is not decoration. these are accumulators over units that run CONCURRENTLY — many pages at once, and many
+    # crops at once within a page — so the raw sum is not a duration of anything and comparing it to wall time is
+    # meaningless. each is reported as a MEAN over the unit it was summed across, which is a real number you can reason
+    # about: "the model spends 0.4s on a crop" and "a crop waits 1.2s for a slot" are comparable; 688 and 195 are not.
+    ("render_wait", "render_wait_s", "pg"),
+    ("render_cpu", "render_s", "pg"),
+    ("ocr_wall", "ocr_s", "pg"),  # a page's elapsed time in handle_ocr; the fields below decompose it
+    ("decode_wait", "decode_wait_s", "pg"),
+    ("layout_wait", "layout_wait_s", "pg"),
+    ("layout", "layout_s", "pg"),
+    ("budget_wait", "budget_wait_s", "pg"),
+    ("cut", "cut_s", "pg"),
+    ("crop_wait", "crop_wait_s", "crop"),
+    ("predict", "predict_s", "crop"),
+    ("layer_wait", "layer_wait_s", "pg"),
+    ("layer_cpu", "layer_s", "pg"),
 )
 
 
 def _stage_line(doc: dict[bytes, bytes]) -> str:
-    # render/ocr wall time is meaningless: render is backpressured on the pages stream, so its span is GPU queue wait,
-    # not work. report the ACTUAL cpu/gpu seconds each stage spent (accumulated per page) plus the queue wait separately
+    # NEVER print a raw accumulator. pages run concurrently and so do the crops inside a page, so every sum here is a
+    # sum of OVERLAPPING spans — it is not a duration, and set next to wall time it is nonsense. divide each by the
+    # units it was summed over and report the mean, which is a number that means something on its own.
     def g(key: str) -> float:
         return float(doc.get(key.encode(), 0) or 0)
 
     proc, paginate, paginated = g("t_proc"), g("t_paginate"), g("t_paginated")
     pages, merge, done = g("t_pages"), g("t_merge"), g("t_done")
+    units = {"pg": g("page_count"), "crop": g("crops_n")}
     head = (("normalize", proc, paginate), ("paginate", paginate, paginated), ("queued", paginated, pages))
     tail = (("pages_wall", pages, merge), ("merge", merge, done))
     walls = [f"{name}={end - start:.1f}s" for name, start, end in head if start and end]
-    walls += [f"{name}={g(key):.1f}s" for name, key in STAGE_SECONDS if g(key)]
+    walls += [
+        f"{name}={g(key) / units[unit] * 1000:.0f}ms/{unit}"
+        for name, key, unit in STAGE_SECONDS
+        if g(key) and units[unit]
+    ]
+    walls += [f"crops={g('crops_n'):.0f}"]
     walls += [f"{name}={end - start:.1f}s" for name, start, end in tail if start and end]
     return " ".join(walls)
 

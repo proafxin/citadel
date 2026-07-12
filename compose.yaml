@@ -42,8 +42,12 @@ services:
       # Running/Waiting lines are the only window we have into whether we are feeding the model, and that log is what
       # caught a socket pool silently capping us at half the GPU. Do not trade it for nothing.
       - --async-scheduling
+      # info, not warning: at warning the server logs NOTHING about a request it drops, which is why the disconnects
+      # could only be guessed at. the access log says whether a failing request ever reached uvicorn — if it did, the
+      # server chose to drop it and will say why; if it did not, it died in the socket layer beneath. those are
+      # different bugs and nothing else distinguishes them.
       - --uvicorn-log-level
-      - warning
+      - info
     ports:
       - "${CITADEL_PADDLEOCR_PORT:-8099}:${CITADEL_PADDLEOCR_PORT:-8099}"
     ulimits:
