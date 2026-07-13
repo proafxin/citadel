@@ -78,9 +78,17 @@ services:
               count: all
               capabilities: [gpu]
 
-  # Qwen3.5-4B (Gated DeltaNet hybrid) served by vLLM with strict guided decoding (xgrammar) so structured
+  # Qwen3.5-9B (Gated DeltaNet hybrid) served by vLLM with strict guided decoding (xgrammar) so structured
   # output (table structure, filters) is grammar-enforced, not best-effort. fp8 online-quantized; multimodal
-  # model served text-only (no images sent). gpu-mem 0.30 co-locates with the recognition model (0.30) + the BGE-M3 embedder.
+  # model served text-only (no images sent). co-locates with the recognition model + the BGE-M3 embedder.
+  #
+  # 9B, not 4B, and the KV cache is WHY it is affordable. the 9B is architecturally identical to the 4B everywhere the
+  # cache is concerned — 32 layers of which 8 are full attention, 4 kv heads, head_dim 256 — and the cache is sized by
+  # exactly those three numbers. only hidden_size grows (2560 -> 4096), and that is weights. so 2.25x the parameters
+  # costs ~4.7GB of weights and NOT ONE BYTE of extra cache: 17.8 KB/token either way.
+  # every open weakness in the query layer is a judgment call (a stray query on a prose question, a filter that keeps too
+  # little on a broad one), and judgment is what parameters buy. there is no official fp8/fp4 checkpoint for this size —
+  # only bf16 — so quantization is vLLM's online fp8, the same path the 4B already used.
   qwen:
     image: vllm/vllm-openai:latest
     container_name: citadel-qwen
@@ -88,7 +96,7 @@ services:
     ipc: host
     command:
       - --model
-      - Qwen/Qwen3.5-4B
+      - Qwen/Qwen3.5-9B
       - --served-model-name
       - qwen
       - --host
@@ -108,14 +116,16 @@ services:
       # batch size. neither starves the other; the embedder just runs smaller batches.
       - --gpu-memory-utilization
       - "0.55"
+      # a sequence slot is only worth having if the cache can hold that sequence at FULL length: 3 x 64k = 196,608 tokens,
+      # which the cache holds outright, so every admitted request runs and none is preempted mid-flight to make room for
+      # another. 3 rather than 4 is what the 9B's extra weights cost us, and it costs almost nothing: the 64k window only
+      # matters to SYNTHESIS, which is a single call, and the filter's batches are ~30k, so it never reaches this bound.
       - --max-num-seqs
-      - "32"
-      # 64k of evidence + 8k of answer. this is a CAP, not an allocation: the batched filter stage still packs to its own
-      # (much smaller) budget, so raising it does not cost concurrency — only the single synthesis call at the end of a
-      # query ever fills it, and one request of that size is 1.5GB of the 6GB cache. the model is native 256k
-      # (max_position_embeddings=262144), so nothing here is rope-extended.
+      - "3"
+      # 64k total, prompt AND completion together — that is how vLLM counts it. the model is native 256k
+      # (max_position_embeddings=262144), so nothing here is rope-extended or degraded.
       - --max-model-len
-      - "73728"
+      - "65536"
       - --enforce-eager
       - --enable-prefix-caching
       - --language-model-only

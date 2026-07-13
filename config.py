@@ -14,7 +14,7 @@ CPU_QUARTER = max((os.cpu_count() or 4) // 4, 1)
 CPU_EIGHTH = max((os.cpu_count() or 8) // 8, 1)
 
 QWEN_MODEL = "qwen"
-QWEN_HF_REPO = "Qwen/Qwen3.5-4B"
+QWEN_HF_REPO = "Qwen/Qwen3.5-9B"  # MUST match compose.yaml --model: count_tokens sizes every budget with this tokenizer
 QWEN_CACHE_DIR = Path.home() / ".cache" / "citadel-qwen" / "hub"
 PADDLEOCR_MODEL = "paddleocr-vl"  # --served-model-name; the recognition model that reads each crop the detector cuts
 EMBED_MODEL = "BAAI/bge-m3"
@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     paddleocr_port: int = 8099
 
     qwen_host: str = "localhost"
-    qwen_port: int = 8100  # vLLM OpenAI-compatible server (Qwen3.5-4B, guided decoding)
+    qwen_port: int = 8100  # vLLM OpenAI-compatible server (Qwen3.5-9B, guided decoding)
 
     redis_url: str = "redis://localhost:6379/0"
 

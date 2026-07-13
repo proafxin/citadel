@@ -11,7 +11,8 @@ from citadel.schemas.table import Column
 from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL, get_settings
 
 SLM_TIMEOUT = 180
-SLM_CONCURRENCY = 32  # concurrent SLM calls; keep <= qwen --max-num-seqs (bounded by GDN Mamba cache blocks)
+SLM_CONCURRENCY = 3  # concurrent SLM calls; MUST equal qwen --max-num-seqs. above it the excess only queues inside the
+# model, where a waiting request pins its whole prompt in the KV cache and buys nothing
 STRUCT_MAX_TOKENS = 4096  # structured calls emit short JSON (indices, a concise merge summary, SQL)
 SYNTH_MAX_TOKENS = 8192  # the streamed answer; the evidence budget reserves this much of the context window for it
 

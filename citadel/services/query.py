@@ -45,7 +45,9 @@ FILTER_BUDGET = FILTER_CTX - STRUCT_MAX_TOKENS - 2048
 # SYNTHESIS is ONE call, at the end, and its input budget is exactly what decides how much of the evidence reaches the
 # answer — the difference between an answer the corpus supports and a thinner one. a single request can afford the whole
 # window, so it gets it. must stay <= the server's --max-model-len, which counts prompt and completion TOGETHER.
-SYNTH_CTX = 73728  # 64k of evidence + 8k of answer
+SYNTH_CTX = (
+    65536  # the server's whole window; it counts prompt and completion TOGETHER, so the answer comes out of this
+)
 SYNTH_BUDGET = SYNTH_CTX - SYNTH_MAX_TOKENS - 2048
 RESULTS_BUDGET = SYNTH_BUDGET // 2  # tabular results are exact: reserve up to half the window before reducing text
 EARLY_STOP_N = 3
