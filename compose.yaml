@@ -110,12 +110,13 @@ services:
       # 0.30 was sized when the OCR model owned the card. it left 1.79GiB of KV = 94,854 tokens, and vLLM's own boot
       # line said what that means: "Maximum concurrency for 32,768 tokens per request: 2.89x". the filter packs each
       # call up to BUDGET (~30k tokens) and runs 32 of them at once — so ~3 ran and 29 queued, every query, invisibly.
-      # the ceiling is not the free card: the detector process (~1.4GB, its own cuda context) and the app's BGE-M3
-      # embedder (~1.2GB, growing by a batch while it runs) live on the SAME card. what is left after those is what the
-      # embedder sizes its batches against — it takes min(0.7 x free, 2GB) — so this trades qwen's KV against embedding
-      # batch size. neither starves the other; the embedder just runs smaller batches.
+      # this is a fraction of the WHOLE card, and it is what the 9B's weights come out of first — at 0.55 they left only
+      # 2.14GiB of cache (125,373 tokens), which is less than the 3 x 64k = 196,608 the sequence slots below promise, so
+      # the third request would be preempted rather than run. the ceiling is not the free card either: the detector
+      # process (~1.4GB, its own cuda context) and the app's BGE-M3 embedder (~1.2GB, growing by a batch while it runs)
+      # live on the SAME card, and the embedder sizes its batches against whatever is left — min(0.7 x free, 2GB).
       - --gpu-memory-utilization
-      - "0.55"
+      - "0.62"
       # a sequence slot is only worth having if the cache can hold that sequence at FULL length: 3 x 64k = 196,608 tokens,
       # which the cache holds outright, so every admitted request runs and none is preempted mid-flight to make room for
       # another. 3 rather than 4 is what the 9B's extra weights cost us, and it costs almost nothing: the 64k window only
