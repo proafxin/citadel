@@ -32,10 +32,22 @@ from citadel.services.retrieval import Passage, TableCand, load_passages, load_t
 logger = logging.getLogger(__name__)
 
 STATEMENT_TIMEOUT_MS = 3000
-CTX_TOKENS = 32768
-OUT_TOKENS = SYNTH_MAX_TOKENS
-BUDGET = CTX_TOKENS - OUT_TOKENS - 2048
-RESULTS_BUDGET = BUDGET // 2  # tabular results are exact: reserve up to half the window before reducing text
+
+# the two stages want opposite things from the window, so they no longer share a budget.
+#
+# FILTER runs BATCHED and CONCURRENT — SLM_CONCURRENCY of them at once — and every request in flight pins its whole
+# prompt in the KV cache. a bigger batch buys nothing here: the same candidates get read either way, so the total
+# prefill is identical whether they arrive in ten calls or thirty. all a bigger batch does is trade concurrency for
+# fewer round trips. so this stage stays small on purpose, and its ceiling is what keeps the cache from thrashing.
+FILTER_CTX = 32768
+FILTER_BUDGET = FILTER_CTX - STRUCT_MAX_TOKENS - 2048
+
+# SYNTHESIS is ONE call, at the end, and its input budget is exactly what decides how much of the evidence reaches the
+# answer — the difference between an answer the corpus supports and a thinner one. a single request can afford the whole
+# window, so it gets it. must stay <= the server's --max-model-len, which counts prompt and completion TOGETHER.
+SYNTH_CTX = 73728  # 64k of evidence + 8k of answer
+SYNTH_BUDGET = SYNTH_CTX - SYNTH_MAX_TOKENS - 2048
+RESULTS_BUDGET = SYNTH_BUDGET // 2  # tabular results are exact: reserve up to half the window before reducing text
 EARLY_STOP_N = 3
 MERGE_INPUT_BUDGET = STRUCT_MAX_TOKENS // 2  # a merge call must fit its summary in STRUCT_MAX_TOKENS; keep input under
 # half that so even near-lossless (barely-compressed) output cannot overrun the cap and truncate the JSON
@@ -196,7 +208,7 @@ async def _filter(question: str, items: list[str]) -> list[tuple[int, int]]:
     start = 0
     empty = 0
     while start < len(items):
-        size = max(1, _fit(counts, start, BUDGET))
+        size = max(1, _fit(counts, start, FILTER_BUDGET))
         chosen = await select_evidence(question, items[start : start + size])
         if chosen:
             kept.extend((start + index, score) for index, score in chosen)
@@ -365,7 +377,7 @@ async def answer(question: str, library_id: int) -> AsyncIterator[str]:
     )
     fitted_results = _fit_results(results, RESULTS_BUDGET)
     rendered = [_result_render(result) for result in fitted_results]
-    passage_budget = max(BUDGET - sum(count_tokens(block) for block in rendered), 0)
+    passage_budget = max(SYNTH_BUDGET - sum(count_tokens(block) for block in rendered), 0)
     evidences = await _reduce_passages(question, kept_passages, passage_budget)
     covered = {source for evidence in evidences for source in evidence.sources}
     uncovered = [passage.content_id for passage in kept_passages if passage.content_id not in covered]

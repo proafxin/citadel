@@ -55,9 +55,8 @@ stage is a FIFO-fed sliding window — it claims only as much as it can hold, an
 item completes, never in batches. The phases:
 
 ```
-upload → normalize → paginate → render → ocr ─────────────────→ merge → relational store
-                                           └─ gapfill (scanned) ──┘
-                     └──────────────────→ tabular ──────────────→ merge
+upload → normalize → paginate → render → ocr ──────────────────→ merge → relational store
+                     └──────────────────→ tabular ─────────────→ merge
 ```
 
 | Phase | Work |
@@ -65,8 +64,7 @@ upload → normalize → paginate → render → ocr ─────────
 | normalize | route + convert to one of the three lanes |
 | paginate | count PDF pages and emit one render job each; or split markup/text/tabular into units |
 | render | rasterize one PDF page |
-| ocr | read each page visually → blocks |
-| gapfill | scanned pages only: recover the lines the visual read dropped |
+| ocr | detect the page's regions, then read each one → blocks |
 | merge | blocks → split paratext → stitch tables → structure embedded tables → content tree → persist |
 | tabular | per sheet/file: structure → canonical Table (its retrieval description is written later, at finalize) |
 
@@ -76,38 +74,56 @@ per page.
 
 ### What bounds the pipeline
 
-The vision model is asked two different things per page, and they cost very different amounts:
+A page is read in two steps, and they are two different kinds of computation:
 
-- **Layout** — one call on the whole page. It returns nothing but boxes, yet it is by far the most
-  expensive request we make: the model *writes out* every block it finds, so a dense page (hundreds of
-  blocks) is a long generation. Measured against true model time — queue wait excluded — layout is
-  **84–89% of all GPU work** on dense documents, from one request per page against dozens of crops.
-- **Reading** — one call per block, on a crop of it. A scanned page yields tens of these; a born-digital
-  one yields only a couple, because its text comes from the page's own text layer and is never sent to the
-  model at all.
+- **Detect** — one forward pass over the whole page. It returns boxes, classes and a reading order, and
+  nothing else. It is a *detector*, not a generation: it emits no tokens, so its cost does not grow with how
+  dense the page is, and it cannot loop, hallucinate, or return an empty page. It runs in the worker's own
+  process pool, off the inference server entirely, at **70–90 ms per page** — a rounding error beside the
+  reading that follows.
+- **Read** — one request per region, on a crop of it, with the task chosen by what the detector says the
+  region *is*: prose, table, formula, chart, or seal. A scanned page yields tens of these; a born-digital one
+  yields only a few, because its text comes from the page's own text layer and is never sent to the model at
+  all.
+
+This split is the whole reason the pipeline is fast. Layout used to be a *generation* — the model wrote out
+every block it found, which made one request per page cost more than all of that page's crops combined, and
+made throughput a function of page density. As a detector it is not on the critical path at all.
 
 So a page is worth wildly different amounts of work depending on what it is, and **no page count can be
 right for both**: set it for scanned pages and the model starves on digital ones; set it for digital pages
 and a scanned document floods it. Concurrency is therefore expressed in **requests**, not pages — one
 semaphore caps what is outstanding at the model, and everything else exists only to cap *memory*.
 
+What is left is **prefill-bound**. A crop's request is roughly 200 image tokens in and 70 tokens out, so the
+GPU spends most of its time reading pixels, not writing text. The remaining levers are therefore about
+sending the model *less*, not about feeding it *more*: it is already saturated.
+
 Two rules follow, and both were learned the hard way.
 
 **Nothing between that semaphore and the model may bound lower than it does.** The HTTP client pool is the
-trap: a request that cannot get a socket blocks *inside* the client, holding its permit and sending nothing.
-Requests are handed to clients evenly by count but not by duration — a layout call occupies its socket an
-order of magnitude longer than a crop — so pools saturate unevenly, and a socket count sized "exactly right"
-silently becomes the real bound. Sockets are therefore **derived** from the semaphore with several times the
-per-client mean as headroom, never chosen as a literal.
+trap: a request that cannot get a socket blocks *inside* the client, holding its permit and sending nothing —
+so the model starves with nothing in our own logs to say so. Sockets are therefore **derived** from the
+semaphore with several times the per-client mean as headroom, never chosen as a literal. The semaphore in
+turn equals the server's own sequence limit: below it the GPU cannot fill its slots; above it the excess
+merely queues *inside* the model, where every waiting request pins a decoded image.
+
+**Nothing that holds the interpreter may sit on the request path.** The detector is CPU-bound Python, and
+run as in-process threads it held the GIL and starved the event loop driving every crop request in flight —
+the GPU stuttered and pages waited seconds on a call that takes 80 ms. It runs in a **separate process** for
+that reason alone, and exactly one: two detector processes contend for the card and measure *slower* than
+one, while each carries its own CUDA context.
 
 **A memory bound must never become the throughput constraint.** Each is sized so the request semaphore runs
 out first. Get either rule wrong and the symptom is identical to a slow GPU: the model idles, every knob
 looks innocent, and nothing in our own logs says otherwise.
 
 Which is why the stage line separates **waiting** from **working** — every span is one or the other, never
-both. A span that mixes them cannot answer the only question worth asking. (This is not hypothetical: while
-the spans conflated queue wait with model time, layout appeared to cost about the same as reading. Separated,
-it is five to eight times more.)
+both. A span that mixes them cannot answer the only question worth asking. And no span is ever reported as a
+raw sum: pages run concurrently, and so do the crops inside a page, so every accumulator is a sum of
+*overlapping* intervals, not a duration. Each is divided by the units it was summed over — per page, or per
+crop — and reported as a mean, with the crop count printed beside it so the denominator is never in doubt.
+A sum of overlapping spans is not a number that means anything.
 
 Memory then follows from what each thing is needed *for*, not how long it is referenced:
 
@@ -129,18 +145,24 @@ stalls → paginate stalls.
 
 ### Reading pages (ocr)
 
-A page is read differently depending on whether its characters already exist, because re-recognizing text
-that is already present only introduces errors:
+The detector runs on every page and produces the same thing regardless: regions, their classes, and the order
+a human would read them in. What happens to each region then depends on whether its characters already exist,
+because re-recognizing text that is already present only introduces errors:
 
-- **Digital page** (real text layer) — the vision model produces the layout and reads only the non-text
-  regions; text and headings are taken from the page's own text layer at each block's box, so they are
-  the document's own characters, not re-recognized. Blank and fill-in fields are then re-read from a close
-  crop to catch ink the text layer lacks.
-- **Scanned page** — the vision model reads the text; a lightweight secondary pass then adds only the
-  lines it dropped, kept if confident and not already covered.
-- **Non-text regions** marked as image but left empty — seals, stamps, logos, figures — are cropped and
-  read as text; QR and barcodes are decoded to their real value, not described. Equations are kept as
-  LaTeX.
+- **Digital page** (real text layer) — prose regions are taken from the page's own text layer at each
+  region's box, so they are the document's own characters, never re-recognized, and never sent to the model.
+  Only what the text layer cannot supply is cropped and read. Blank and fill-in fields are re-read from a
+  close crop to catch ink the text layer lacks.
+- **Scanned page** — every readable region is cropped and read. There is no second pass: the detector finds
+  the regions and each one is read once. A generation-based layout could silently drop a whole page's blocks
+  and needed a gap-filling pass behind it to recover them; a detector cannot, so that pass no longer exists.
+- **By region type** — a table is read as a grid, a formula as LaTeX, a chart and a seal each as their own
+  task. Photographs and figures are never sent: they have no text to recognize. An inline formula is not read
+  separately, because it lies *inside* a text region whose read already returns it inline.
+
+Tables come back in a token-efficient grid notation — one token per cell rather than styled markup — and are
+translated to HTML at the model boundary, so a dense table costs a fraction of the tokens and everything
+downstream still sees the one grid format it was written against.
 
 Markup and visual pages converge on the same block shape, so everything after is format-agnostic.
 
@@ -374,10 +396,21 @@ rank-based way.
 ## Models
 
 One general model, run without a separate reasoning pass, performs every model step across ingestion and
-query — table structuring and description, reformulation, filtering, query writing,
-priority, and synthesis. A vision model reads documents that exist only as pixels. A multilingual dense
-representation carries meaning for search. Nothing in the pipeline asks a model to hold data in its head:
-it reads, judges, and writes queries; the database keeps the numbers.
+query — table structuring and description, reformulation, filtering, query writing, priority, and synthesis.
+
+Reading a document that exists only as pixels takes **two** models, deliberately split:
+
+- a **layout detector**, which finds the regions and their reading order in a single forward pass. It emits
+  no tokens, so it is cheap, bounded, and structurally incapable of the failure a generation has — inventing
+  a region, looping, or returning an empty page.
+- a **recognition model**, which is shown one region at a time and asked only to read it. It never sees a
+  whole page, so it is never asked to decide what a page *is* while also reading it.
+
+Splitting them is what makes the throughput possible, and it is also what makes the layout trustworthy: the
+two questions have different failure modes and no longer share an answer.
+
+A multilingual dense representation carries meaning for search. Nothing in the pipeline asks a model to hold
+data in its head: it reads, judges, and writes queries; the database keeps the numbers.
 
 ---
 
@@ -403,28 +436,42 @@ design intends.
   questions well but can keep too little for an open "summarize everything about X": the answer is correct
   but thinner than the corpus could support. This is a prompt-tuning axis, not a structural limit.
 
-- **Throughput is bounded by the visual model, and layout is most of it.** Every CPU stage — converting,
-  rendering, cutting, text-layer extraction, gap-fill — is a rounding error beside the GPU; measured
-  end-to-end, a page's time is almost entirely the two model calls, and **84–89%** of that is the single
-  **layout** request, which returns only boxes but must write out every block it finds. So more throughput
-  comes from a faster or smaller vision model, or from asking it for less — not from more concurrency, and
-  not from more host RAM. The largest available win is a model whose layout stage is a **detector** rather
-  than a generation: it deletes the dominant cost outright, and cannot fail the way a generation can (a
-  degenerate layout generation occasionally returns zero blocks for a whole page).
+- **Throughput is bounded by the GPU's power limit, and there is no lever left but doing less work.** The
+  card runs pinned at its cap — 142 W of 145 W, clocks sagging from 2205 to 1867 MHz as it heats — at 93%
+  utilization, with the inference server reporting a full set of running sequences and *nothing waiting*
+  behind them on essentially every log line. It is saturated. Adding concurrency, workers, page supply or
+  host RAM anywhere in the pipeline does nothing, and this is now provable rather than inferred. The only
+  remaining gains come from sending the model fewer or smaller crops (below), not from feeding it faster.
 
-- **The GPU idles 30–60% of the time on a full queue, and we cannot explain it.** The model reports every
-  sequence slot occupied and nothing queued behind them, while the card shows no kernel resident for much of
-  the run — at high clocks and low power, which is an idle GPU, not a saturated or throttled one. It is not
-  page supply (doubling it did no extra work), not the crop semaphore (crops queue 6–18× deeper than they
-  run), not the socket pool, not the inference server's frontend (more of them changed nothing), and not
-  power or heat. This is the single largest known gap between the pipeline's throughput and the hardware's.
+- **Every crop is upscaled to a minimum pixel count, and small ones pay for it.** A crop is smart-resized
+  into a fixed pixel window before it is sent. The floor exists so a one-line crop arrives legible — but it
+  means a 27×22 page number is upscaled roughly 190× and still bills a full ~183 image tokens. Since the
+  workload is prefill-bound, that floor is the single largest remaining cost, and lowering it is a direct cut
+  across *every* crop. It has not been changed, because it is the reference pipeline's value and it trades
+  directly against legibility: it needs a quality comparison, not an argument.
+
+- **Page furniture is re-recognized on born-digital pages.** Headers, footers and page numbers are cropped
+  and sent to the recognition model even when the page has a text layer that already holds them exactly.
+  They are paratext — never leaves — so this is both wasted prefill and a needless re-recognition of
+  characters we already had. Taking them from the text layer, as every other prose region on a digital page
+  already is, is the fix. It is worth roughly 6% of crops on the current corpus: the arithmetic is dominated
+  by one 809-page *scanned* book that alone accounts for 80% of every crop in a run.
+
+- **Recognition requests are dropped intermittently, and the cause is not established.** About one crop in
+  sixteen thousand fails with the server closing the connection without a response; the server logs nothing
+  and continues serving a full batch through the failure. It reproduced once in a run and not at all in the
+  next, at identical settings. No fix has been shipped for it, because no cause has been proved — several
+  plausible ones (keep-alive expiry, socket-pool exhaustion, event-loop starvation) were each tested and
+  each disproved. The server's access log is now enabled so the next occurrence distinguishes "the request
+  reached the application and was dropped" from "it died beneath it," which are different bugs.
 
 - **Documents are admitted strictly FIFO, so a large one blocks the queue behind it.** Render jobs enter one
   ordered stream in the order documents are paginated, and a stream cannot be skipped — so an 800-page book
-  monopolizes every page slot until it drains. Measured: a one-page PDF waited **587 seconds** to be looked
-  at. It costs little wall time (total work is unchanged by order) but it starves the tail, where the only
-  work left comes from documents too small to fill the model, and it makes small files finish last.
-  Fair-share admission across documents is the fix; it has not been built.
+  monopolizes every page slot until it drains. Measured on a 426-second run: a 13-page PDF waited **403
+  seconds** to be looked at, then took 6 seconds to read. It costs little wall time (total work is unchanged
+  by order) but it starves the tail, where the only work left comes from documents too small to fill the
+  model, and it makes small files finish last. Fair-share admission across documents is the fix; it has not
+  been built.
 
 - **A memory bound that becomes the throughput constraint is invisible from the outside.** The failure
   looks identical to a slow GPU: the model idles, the queue drains, and every knob looks innocent. It is
@@ -432,6 +479,6 @@ design intends.
   line is either a wait or a work, never both. Tuning these by inference rather than measurement reliably
   picks the wrong one.
 
-- **Run-to-run variance is ±5%.** Identical configurations have measured 810s and 843s. Any single-run
-  comparison inside that band is noise, and treating it as a result is how most of a day gets spent tuning
-  constants that never mattered.
+- **Run-to-run variance is a few percent.** Identical configurations have measured 426.4s and 426.8s on the
+  current build, and drifted several percent on the previous one. Any single-run comparison inside that band
+  is noise, and treating it as a result is how most of a day gets spent tuning constants that never mattered.

@@ -5,7 +5,7 @@ import { NowProcessing } from "@/components/now-processing";
 import { TierBadge } from "@/components/tier-badge";
 import { Card } from "@/components/ui/card";
 import { exportUrl, getLibrary, getProgress, listDocuments, updateLibrary } from "@/lib/api";
-import { hasActive, interpret, isSettled } from "@/lib/doc-state";
+import { hasActive, interpret } from "@/lib/doc-state";
 import { tierMeta } from "@/lib/tiers";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
@@ -35,9 +35,9 @@ export function LibraryDetailPage() {
   });
 
   const states = useMemo(() => interpret(docsQ.data ?? [], progressQ.data ?? []), [docsQ.data, progressQ.data]);
-  const processing = hasActive(states, false);
+  const processing = hasActive(states);
   const ingested = states.length > 0 && !processing;
-  const ready = searchable && states.length > 0 && states.every(isSettled);
+  const ready = searchable && states.length > 0 && libQ.data?.status === "ready";
 
   return (
     <div>

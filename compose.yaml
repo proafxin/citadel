@@ -22,6 +22,19 @@ services:
       - "${CITADEL_PADDLEOCR_PORT:-8099}"
       - --gpu-memory-utilization
       - "0.30"
+      # the KV cache is SIZED here rather than left to the memory profiler, which measured whatever happened to be free
+      # at boot and so varied with how far the other models had got loading: one boot took 1.98GiB, another 4.08GiB.
+      # 12500 x 16 = 200,000 tokens. measured peak over a 2,175-page run (14,446 crops on the densest book) was 15.8% of
+      # 475,040 tokens = ~75k, with Waiting: 0 on every log line — we never queued a request even once. 200k is 2.7x that
+      # peak, and it still holds 24 full-length sequences, where a crop's real prompt is ~200 tokens.
+      - --block-size
+      - "16"
+      - --num-gpu-blocks-override
+      - "12500"
+      # every crop image is unique, and the image tokens begin within the first block or two — so the cache can only ever
+      # hit on the few chat-template tokens ahead of the image. measured: 30% at warmup decaying to a steady 0.0%. it
+      # buys nothing and costs a hash of every prompt plus the blocks held to store them.
+      - --no-enable-prefix-caching
       # must EQUAL the crop semaphore: below it the GPU cannot fill its sequence slots, above it the excess merely
       # queues INSIDE the model, where every waiting request pins a decoded image. vLLM also pre-allocates HOST memory
       # for multimodal staging in proportion to this, worse than linearly.
@@ -86,17 +99,49 @@ services:
       - fp8
       - --kv-cache-dtype
       - fp8
+      # 0.30 was sized when the OCR model owned the card. it left 1.79GiB of KV = 94,854 tokens, and vLLM's own boot
+      # line said what that means: "Maximum concurrency for 32,768 tokens per request: 2.89x". the filter packs each
+      # call up to BUDGET (~30k tokens) and runs 32 of them at once — so ~3 ran and 29 queued, every query, invisibly.
+      # the ceiling is not the free card: the detector process (~1.4GB, its own cuda context) and the app's BGE-M3
+      # embedder (~1.2GB, growing by a batch while it runs) live on the SAME card. what is left after those is what the
+      # embedder sizes its batches against — it takes min(0.7 x free, 2GB) — so this trades qwen's KV against embedding
+      # batch size. neither starves the other; the embedder just runs smaller batches.
       - --gpu-memory-utilization
-      - "0.30"
+      - "0.55"
       - --max-num-seqs
       - "32"
+      # 64k of evidence + 8k of answer. this is a CAP, not an allocation: the batched filter stage still packs to its own
+      # (much smaller) budget, so raising it does not cost concurrency — only the single synthesis call at the end of a
+      # query ever fills it, and one request of that size is 1.5GB of the 6GB cache. the model is native 256k
+      # (max_position_embeddings=262144), so nothing here is rope-extended.
       - --max-model-len
-      - "32768"
+      - "73728"
       - --enforce-eager
       - --enable-prefix-caching
       - --language-model-only
+      # any OpenAI-compatible client that is an agent (an editor extension, a commit-message generator) sends
+      # tool_choice="auto" on every call. without these vLLM rejects the request outright — 400, before a single token,
+      # "auto tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set". citadel's own calls never
+      # use tools, so this costs us nothing and it is what makes the server usable by anything other than us.
+      # qwen3_xml, not hermes: this model's chat template emits <tool_call><function=name><parameter=x> — XML, not JSON.
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_xml
+      # the stock chat template leaves thinking ON unless the caller passes enable_thinking=false, and only OUR calls do
+      # (citadel/llm.py) — so any other client burns its whole token budget reasoning and returns content=None,
+      # finish_reason=length. measured: 800 tokens, not one of them an answer. vLLM has no flag for the template's
+      # default, so this template is the stock one with that single branch inverted: thinking is off unless a caller
+      # explicitly asks for it. our own enable_thinking=false still lands in the same place it always did.
+      - --chat-template
+      - /etc/citadel/qwen-no-think.jinja
+      # NOT set: --reasoning-parser. it is incompatible with the template above and silently eats the answer. the qwen3
+      # parser assumes the model STARTS inside a think block and treats everything up to </think> as reasoning — but the
+      # template already closes that block in the PROMPT, so the generated text never contains the tag the parser looks
+      # for, and the whole reply lands in `reasoning` with content=null. thinking is off; there is no trace to separate.
+      # info, not warning: at warning the server logs NOTHING per request, so a client getting a 400 or a 404 has
+      # nowhere to look and the failure is indistinguishable from the request never arriving
       - --uvicorn-log-level
-      - warning
+      - info
     environment:
       HF_TOKEN: ${HF_TOKEN:-}
     ports:
@@ -108,6 +153,7 @@ services:
       # HF model cache on a HOST dir (bind mount) so `docker compose down -v` never wipes the ~8GB download.
       - ${HOME}/.cache/citadel-qwen:/root/.cache/huggingface
       - qwen-vllm-cache:/root/.cache/vllm
+      - ./scripts/qwen-no-think.jinja:/etc/citadel/qwen-no-think.jinja:ro
     deploy:
       resources:
         reservations:

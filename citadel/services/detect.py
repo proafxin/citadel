@@ -12,6 +12,74 @@ from pydantic import BaseModel
 # imported and this process shares the card with the recognition model, the SLM and the embedder.
 DETECT_MODEL = "PP-DocLayoutV3"
 
+# the detector's settings, from the reference pipeline (paddlex configs/pipelines/PaddleOCR-VL.yaml). they are NOT
+# optional: constructed bare, the predictor falls back to the model's `draw_threshold` — a flat 0.5 on every class, with
+# no nms and no box merging. that is a VISUALISATION default, not a recognition one, and it silently drops every text,
+# formula and title region the model scores between 0.4 and 0.5 — content the reference pipeline keeps. lost content is
+# the one failure nothing downstream can recover from, so the floor for a class is the reference's, never a round number
+DETECT_THRESHOLD = {
+    0: 0.5,  # abstract
+    1: 0.5,  # algorithm
+    2: 0.5,  # aside_text
+    3: 0.5,  # chart
+    4: 0.5,  # content
+    5: 0.4,  # display_formula
+    6: 0.4,  # doc_title
+    7: 0.5,  # figure_title
+    8: 0.5,  # footer
+    9: 0.5,  # footer
+    10: 0.5,  # footnote
+    11: 0.5,  # formula_number
+    12: 0.5,  # header
+    13: 0.5,  # header
+    14: 0.5,  # image
+    15: 0.4,  # inline_formula
+    16: 0.5,  # number
+    17: 0.4,  # paragraph_title
+    18: 0.5,  # reference
+    19: 0.5,  # reference_content
+    20: 0.45,  # seal
+    21: 0.5,  # table
+    22: 0.4,  # text
+    23: 0.4,  # text
+    24: 0.5,  # vision_footnote
+}
+
+# a detector emits several overlapping candidates for the same region. without nms they ALL survive: every duplicate is
+# a crop we pay the model for and a second copy of the same text in the tree
+DETECT_NMS = True
+DETECT_UNCLIP_RATIO = [1.0, 1.0]
+
+# how two boxes covering the same region are reconciled. `large` keeps the enclosing box for the things that nest inside
+# prose — a displayed formula, a title — so the region is read WHOLE, not clipped in half; `union` merges the pair
+DETECT_MERGE_MODE = {
+    0: "union",
+    1: "union",
+    2: "union",
+    3: "large",  # chart
+    4: "union",
+    5: "large",  # display_formula
+    6: "large",  # doc_title
+    7: "union",
+    8: "union",
+    9: "union",
+    10: "union",
+    11: "union",
+    12: "union",
+    13: "union",
+    14: "union",
+    15: "large",  # inline_formula
+    16: "union",
+    17: "large",  # paragraph_title
+    18: "union",
+    19: "union",
+    20: "union",
+    21: "union",
+    22: "union",
+    23: "union",
+    24: "union",
+}
+
 
 class DetBlock(BaseModel):
     label: str
@@ -25,7 +93,13 @@ def _thread_detector(_thread_id: int) -> LayoutDetection:
     # one detector per calling thread. the predictor is not documented as re-entrant, and a shared instance across
     # threads could race and garble the boxes — the same reason the scanned-page OCR engines were per-thread. keying on
     # thread id gives each worker its own; the pool is fixed and small, so this is a bounded few
-    return LayoutDetection(model_name=DETECT_MODEL)
+    return LayoutDetection(
+        model_name=DETECT_MODEL,
+        threshold=DETECT_THRESHOLD,
+        layout_nms=DETECT_NMS,
+        layout_unclip_ratio=DETECT_UNCLIP_RATIO,
+        layout_merge_bboxes_mode=DETECT_MERGE_MODE,
+    )
 
 
 def _detector() -> LayoutDetection:

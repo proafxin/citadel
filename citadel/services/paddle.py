@@ -1,6 +1,7 @@
 import html
 import io
 import itertools
+import logging
 import math
 import re
 from base64 import b64encode
@@ -11,6 +12,8 @@ from PIL import Image
 
 from citadel.services.detect import DetBlock
 from config import PADDLEOCR_MODEL, get_settings
+
+logger = logging.getLogger(__name__)
 
 CROP_CONCURRENCY = 128  # the ONE bottleneck: a crop is the unit of VLM work, and this semaphore caps what is
 # outstanding at the model at all (Running + Waiting). it lives HERE, at the model boundary, because it must equal the
@@ -195,7 +198,15 @@ async def recognize(payload: bytes, prompt: str) -> str:
     }
     response = await get_vlm_client().post("/v1/chat/completions", json=body)
     response.raise_for_status()
-    content: str = response.json()["choices"][0]["message"]["content"]
+    choice = response.json()["choices"][0]
+    content: str = choice["message"]["content"]
+    if choice["finish_reason"] == "length":
+        # a region that exhausts the whole window did not get read — it looped. no crop needs 4096 tokens: the densest
+        # table's grid is ~800, and what actually hits the cap is a matrix or a figure the model has no text to read on,
+        # so it repeats a fragment until it runs out. the output is not partial, it is garbage, and keeping it would put
+        # thousands of tokens of repetition into the index.
+        logger.warning("runaway generation prompt=%r chars=%d — dropped", prompt, len(content))
+        return ""
     return content.strip()
 
 

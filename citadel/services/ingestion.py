@@ -11,7 +11,7 @@ import tempfile
 import time
 from collections import deque
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -100,9 +100,10 @@ RENDER_TIMEOUT = 120  # page renders in <1s; if a job strands (dead/hung pool wo
 PDF_POOL_MAX_TASKS = 100  # recycle a pdfium worker every N pages: a long-lived one grows to hundreds of MB and never
 # gives it back. respawn is a fork off the (lean) forkserver, so the cost is milliseconds amortised over 100 pages,
 # against a stage that is already the cheapest in the pipeline
-DETECT_WORKERS = 2  # detector threads, each with its own model (the predictor is not re-entrant). one covers ~22
-# pages/s against a demand of a few, so two is headroom, not need — but the detector must never become the bound it
-# exists to remove. batching it is pointless: 44ms/page at batch 1, 42ms at batch 16, because the cost is CPU-side
+DETECT_WORKERS = 1  # ONE detector process. more is not just unnecessary, it is WORSE: two contend for the card and
+# measured SLOWER than one (22.5 pages/s at one, 19.5 at two, 11.7 at two under load), while each carries its own
+# cuda context and model — the second cost ~1.7GB of VRAM to make the detector slower. demand is ~4 pages/s.
+# batching is pointless too (44ms/page at batch 1, 42ms at batch 16): the cost is CPU-side, not GPU
 CROP_BUFFER = 12288  # crops cut and waiting on the semaphore. if it cannot cover the pages in flight they simply queue
 # HERE instead, and budget_wait — not the model — becomes what limits us. a crop is PNG bytes by the time it is charged
 # (~40KB, not the ~400KB of raw pixels), so the headroom is cheap. the semaphore still caps what is in flight AT the
@@ -218,18 +219,19 @@ def get_pdfium_gate() -> asyncio.Semaphore:
 
 
 @lru_cache
-def get_detect_pool() -> ThreadPoolExecutor:
-    # layout is a DETECTOR: one RT-DETR forward pass per page, boxes and reading order out. it runs at ~22 pages/s
-    # against a demand of a few pages a second, so it is not — and must never become — the bottleneck.
+def get_detect_pool() -> ProcessPoolExecutor:
+    # layout is a DETECTOR: one RT-DETR forward pass per page, boxes and reading order out.
     #
-    # THREADS, not processes, and the reason is CUDA. a cuda context cannot survive fork(), so a forked child is born
-    # broken; and python keeps ONE forkserver per process with a GLOBAL preload list, so the pdfium, tabular and detect
-    # pools would all share a single forkserver whose preload is whatever the last caller happened to set. spawn avoids
-    # the inherited context but gives every child a fresh interpreter that must re-import this module — torch, paddle
-    # and all — and it died there, silently, inside the pool.
-    # a thread sidesteps the whole question: one process, one cuda context, initialised once. paddle releases the GIL
-    # for the forward pass, and the work is a fraction of a second, so threads give us the concurrency we actually need.
-    return ThreadPoolExecutor(max_workers=DETECT_WORKERS, thread_name_prefix="detect")
+    # PROCESSES, not threads, and not a fork. its cost is CPU-side python — batching it changes nothing (44ms/page at
+    # batch 1, 42ms at batch 16) — so in-process threads do not scale it: measured 22.5 pages/s on one process against
+    # 20.9 on two threads, LESS than one, because they fight over the GIL. worse, they fight the event loop that drives
+    # every crop request in flight, which is what stalls it (layout_wait ran to 5-10s a page) and what starves the GPU.
+    # fork is out: a cuda context cannot survive it, and python's ONE forkserver has a GLOBAL preload list that the
+    # pdfium, tabular and detect pools would all be fighting over. so: spawn, one fresh interpreter per worker, each
+    # initialising cuda for itself.
+    # stdlib, not pebble: pebble SWALLOWS a child that dies at startup and reports only "the pool is not active", which
+    # is why the first attempt at this was undebuggable. ProcessPoolExecutor propagates the child's exception.
+    return ProcessPoolExecutor(max_workers=DETECT_WORKERS, mp_context=multiprocessing.get_context("spawn"))
 
 
 @lru_cache
@@ -298,7 +300,7 @@ async def shutdown() -> None:
         pool.stop()
         pool.join()
     if get_detect_pool.cache_info().currsize:
-        get_detect_pool().shutdown(wait=False)
+        get_detect_pool().shutdown(wait=False, cancel_futures=True)
     await close_vlm_clients()
     _reap_profile_dirs()
     if get_redis.cache_info().currsize:
@@ -875,8 +877,8 @@ def _qr_payload(crop: Image.Image) -> str | None:
     return text if points is not None else None
 
 
-def _qr_scan(img: Image.Image, blocks: list[Block]) -> list[Block]:
-    to_read: list[Block] = []
+def _qr_scan(img: Image.Image, blocks: list[Block]) -> int:
+    decoded = 0
     for block in blocks:
         if block.type not in PICTURE_LABELS or (block.text or "").strip():
             continue
@@ -885,22 +887,24 @@ def _qr_scan(img: Image.Image, blocks: list[Block]) -> list[Block]:
             payload = _qr_payload(crop)
         finally:
             crop.close()
-        if payload is None:
-            to_read.append(block)  # not a QR → read the seal/stamp/figure text off the crop
-        elif payload:
-            block.text = payload  # decoded QR → store the real encoded data instead of a hallucinated description
-
-    return to_read
+        if payload:
+            block.text = payload  # decoded QR → the real encoded data, which no OCR of the glyph could recover
+            decoded += 1
+    return decoded
 
 
 async def read_pictures(image: bytes, blocks: list[Block]) -> int:
-    # the detector localizes pictures but never sends them to the model — a photo has no text. but a seal, a stamp or a
-    # logo does, and a QR code carries data. scan for a QR first (deterministic, no model), and read whatever is left
+    # a picture region is DECODED, never read. the detector already tells us what a region is, and it has a class for
+    # every picture that carries text — `seal` and `chart` are their own labels, read on the normal path with their own
+    # task prompts. what is left under `image` is a photograph or a figure: there is no text on it to recognize.
+    # asking the model to read one anyway is what the reference pipeline calls use_ocr_for_image_block, and it defaults
+    # it to FALSE. we had it on — inherited from MinerU, whose layout vocabulary could not tell a seal from a figure —
+    # and it is where the runaway generations came from: given nothing to read, the model repeats a fragment until it
+    # exhausts its token budget, and thousands of tokens of that landed in the index.
+    # a QR is different: it is data, not text, and cv2 decodes it exactly with no model at all.
     async with get_decode_gate():
         with Image.open(io.BytesIO(image)) as img:
-            to_read = _qr_scan(img, blocks)
-    await _reread(image, to_read)
-    return len(to_read)
+            return _qr_scan(img, blocks)
 
 
 async def recover_fillin_blocks(image: bytes, blocks: list[Block]) -> int:
