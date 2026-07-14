@@ -9,7 +9,6 @@ from typing import Any
 from citadel.db import get_engine
 from citadel.services.ingestion import (
     CROP_BOUND,
-    CROP_CONCURRENCY,
     DECODE_CONCURRENCY,
     GROUP,
     MAX_ATTEMPTS,
@@ -51,12 +50,15 @@ PAGES_BUFFER = DECODE_CONCURRENCY  # rendered pages sitting UNCLAIMED in `pages`
 # waits on render to catch up — a stall the GPU pays for. it does NOT bound pages in flight (ocr claims as fast as the
 # crop budget allows), so it is purely a render-ahead buffer and purely a RAM bound (~2MB an image), deep enough that
 # ocr never waits on pdfium and shallow enough that an 800-page PDF cannot rasterize itself into redis.
-PAGES_IN_FLIGHT = CROP_CONCURRENCY  # pages CLAIMED at once — each pins its ~2MB encoded image in redis AND here (~4MB
-# apiece). raising it does NOT feed the model: measured, doubling this to 2C tripled the queue on our own semaphore
-# (crop_wait 260k -> 772k seconds on the scanned book) while the model did the same amount of work (predict unchanged at
-# ~42k) and wall time got WORSE (799s -> 844s). the crops were never short of supply — a page sitting in crop_wait is a
-# page whose crops are already cut and DEMANDING slots, so the semaphore is saturated long before the page cap binds.
-# every page above C is therefore a pinned image lengthening a queue that is already full.
+PAGES_IN_FLIGHT = 128  # pages CLAIMED at once — each pins its ~2MB encoded image in redis AND here (~4MB apiece).
+# NOT tied to CROP_CONCURRENCY, though it used to be: they bound different things and the coupling made one unraisable
+# without paying for the other. this is a RAM bound; the crop semaphore is a MODEL-saturation bound. going 128 -> 160
+# with the semaphore cost 3GB of host memory and fed the model nothing.
+# raising it does NOT feed the model: measured, doubling it tripled the queue on our own semaphore (crop_wait 260k ->
+# 772k seconds on the scanned book) while the model did the SAME amount of work (predict unchanged at ~42k) and wall
+# time got WORSE (799s -> 844s). the crops were never short of supply — a page sitting in crop_wait is a page whose
+# crops are already cut and DEMANDING slots, so the semaphore is saturated long before the page cap binds. every page
+# above this is a pinned image lengthening a queue that is already full.
 # it must exist at all: a page has to be claimed before it can lay out, and the crop budget cannot see it until it
 # does, so without a cap admission never blocks and claimed pages grow without end (measured: ~1700 claimed, ~3.4GB).
 

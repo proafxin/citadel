@@ -51,7 +51,7 @@ fi
 set -m
 
 pids=()
-uv run fastapi dev citadel/app.py & pids+=("$!")
+uv run fastapi run citadel/app.py & pids+=("$!")
 (cd ui && bun run dev) & pids+=("$!")
 uv run python citadel/worker.py & pids+=("$!")
 

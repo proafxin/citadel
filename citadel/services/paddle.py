@@ -15,7 +15,7 @@ from config import PADDLEOCR_MODEL, get_settings
 
 logger = logging.getLogger(__name__)
 
-CROP_CONCURRENCY = 160  # the ONE bottleneck: a crop is the unit of VLM work, and this semaphore caps what is
+CROP_CONCURRENCY = 192  # the ONE bottleneck: a crop is the unit of VLM work, and this semaphore caps what is
 # outstanding at the model at all (Running + Waiting). it lives HERE, at the model boundary.
 #
 # DELIBERATELY ABOVE the server's --max-num-seqs (128), which is the opposite of what it used to be. set EQUAL to it,
@@ -186,9 +186,19 @@ def png_bytes(crop: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
-async def _ask(payload: bytes, prompt: str) -> tuple[str, str]:
-    # one crop, one request. the payload is already PNG bytes: the raw pixels died at cut time, so what waits out the
-    # queue here is the compressed form, not a bitmap
+def encode_crop(crop: Image.Image) -> str:
+    # the crop arrives at the model as a base64 data URL, and this builds it AT CUT TIME — in the worker thread that is
+    # already holding the bitmap — rather than inside the request.
+    # it used to be encoded inside _ask, which meant a crop held its semaphore permit while base64-ing 40KB on the EVENT
+    # LOOP. the permit is supposed to bound what is in flight AT THE MODEL; every microsecond it also covers our own
+    # encoding is a permit the model cannot use. measured: 160 permits held, but only ~124 requests ever at the model —
+    # 23% of every permit's life was spent on our side of the wire.
+    return "data:image/png;base64," + b64encode(png_bytes(crop)).decode()
+
+
+async def _ask(payload: str, prompt: str) -> tuple[str, str]:
+    # one crop, one request. the payload is already the encoded data URL — the raw pixels died at cut time and so did
+    # the base64, so what waits out the queue here is a string we can hand straight to the serializer
     body = {
         "model": PADDLEOCR_MODEL,
         "max_tokens": VLM_MAX_TOKENS,
@@ -197,7 +207,7 @@ async def _ask(payload: bytes, prompt: str) -> tuple[str, str]:
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64encode(payload).decode()}},
+                    {"type": "image_url", "image_url": {"url": payload}},
                     {"type": "text", "text": prompt},
                 ],
             }
@@ -236,7 +246,7 @@ def _ran_away(content: str, finish: str, prompt: str) -> bool:
     return prompt != PROMPT_TABLE and is_looping(content)
 
 
-async def recognize(payload: bytes, prompt: str) -> str:
+async def recognize(payload: str, prompt: str) -> str:
     content, finish = await _ask(payload, prompt)
     if not _ran_away(content, finish, prompt):
         return content.strip()
