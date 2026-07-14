@@ -16,22 +16,26 @@ from config import PADDLEOCR_MODEL, get_settings
 logger = logging.getLogger(__name__)
 
 CROP_CONCURRENCY = 128  # the ONE bottleneck: a crop is the unit of VLM work, and this semaphore caps what is
-# outstanding at the model at all (Running + Waiting). it lives HERE, at the model boundary, and it EQUALS the server's
-# --max-num-seqs.
+# outstanding at the model at all (Running + Waiting). it lives HERE, at the model boundary, and it IS the GPU's batch.
 #
-# it is not a coincidence that the best value is exactly the server's slot count, and it is not because the model is
-# "kept fed" — it is because MORE IN FLIGHT IS STRICTLY SLOWER. measured, end to end, same corpus:
-#     128 permits -> ~124 outstanding -> 489.1s   <- best
-#     160 permits -> ~152 outstanding -> 492.9s
-#     192 permits -> ~186 outstanding -> 520.2s   (+6.4%)
-# monotone. raising it does exactly what it says: `Waiting` goes from 0 to 60, every sequence slot stays occupied, and
-# GPU utilisation... does not move. it sits at 90-95% with a queue 60 deep, the same as with no queue at all. so the
-# utilisation gap was NEVER starvation, and `Waiting: 0` with `Running` at 120/128 was not idle capacity — it was the
-# EQUILIBRIUM the card can sustain.
-# the card is power-capped (1837 of 3090 MHz), so its compute budget is fixed. a deeper batch cannot buy throughput, but
-# it does cost: attention over more sequences, more memory-bandwidth contention, and chunked-prefill chunks diluting
-# every decode step. per-crop latency rose 64% (2.54s -> 4.17s on the scanned book) while throughput FELL 25%.
+# 128 is the MEASURED optimum, probed in both directions on the same corpus. the curve is U-shaped, not monotone:
+#      64 -> 495.1s
+#     128 -> 480.3s   <- the knee (and exactly the server's --max-num-seqs)
+#     160 -> 492.9s
+#     192 -> 520.2s
+#
+# GOING UP does not feed the model — it starves it of nothing, because it was never starved. `Waiting` goes 0 -> 60 and
+# every sequence slot stays occupied, and GPU utilisation DOES NOT MOVE (90-95% either way). what does move is per-crop
+# latency (+64%) and throughput (-25%). the card is power-capped at 1837 of 3090 MHz, so its compute budget is fixed: a
+# deeper batch cannot buy throughput, it can only cost — attention over more sequences, memory-bandwidth contention,
+# chunked-prefill chunks diluting every decode step.
+#
+# GOING DOWN halves the latency and buys nothing, because throughput is concurrency/latency and both halve:
+#     128 / 2.489s = 51.4 crops/s      64 / 1.311s = 48.8 crops/s
+# so throughput is FLAT from 64 to 128 and degrades above it. 128 extracts the most work from a fixed power budget.
+#
 # utilisation is a TIME metric and on a power-limited card it is not actionable. do not tune against it.
+
 VLM_CLIENTS = 16
 VLM_CONN_HEADROOM = 4  # sockets per client as a MULTIPLE of that client's mean share of the crop semaphore. derived,
 # never a literal: a socket count is not a concurrency bound and must never become one. httpx blocks a request that
