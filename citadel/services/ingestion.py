@@ -64,7 +64,14 @@ from citadel.services.paddle import (
     recognize,
     resize_for_vlm,
 )
-from citadel.services.pdf import MAX_IMAGE_SIDE, count_pdf_pages, downscale, extract_layer_by_bbox, render_pdf_page
+from citadel.services.pdf import (
+    MAX_IMAGE_SIDE,
+    count_pdf_pages,
+    downscale,
+    extract_layer_by_bbox,
+    render_pdf_page,
+    uncovered_layer_runs,
+)
 from citadel.services.presentation import parse_pptx
 from citadel.services.tabular import extract_json_tables, structure_csv_tables
 from citadel.tabular.infer import release_header_pool
@@ -921,6 +928,35 @@ async def recover_fillin_blocks(image: bytes, blocks: list[Block]) -> int:
 CROP_LOG_THRESHOLD = 6  # log a page only when its re-read crops exceed this — surfaces burners, no spam over thousands
 
 
+async def _rescue_uncovered(doc_id: str, path: Path, page_idx: int, blocks: list[Block]) -> tuple[list[Block], int]:
+    # the detector misses text — on a form it boxes the STRUCTURE and not the filled-in VALUES, and we measured what
+    # that costs: 20% of borang_13's characters and 14% of defence's, never boxed and so never read. lowering the score
+    # threshold recovers some of it and starts reading OTHER regions twice, which is a worse trade.
+    # on a born-digital page there is nothing to trade. the text layer says exactly which characters no box covers, so
+    # they are added as their own regions: no model call, no duplication, and the characters are the document's own.
+    # coverage on a page with a text layer becomes 1.0 by construction rather than by tuning.
+    runs, wait, cpu = await _run_pdfium(
+        uncovered_layer_runs,
+        str(path),
+        page_idx,
+        [list(block.bbox or []) for block in blocks],
+        job_timeout=RENDER_TIMEOUT,
+    )
+    await _add_stage_seconds(doc_id, "layer_wait_s", wait)
+    await _add_stage_seconds(doc_id, "layer_s", cpu)
+    if not runs:
+        return blocks, 0
+    # slot each rescued run into the EXISTING order by where it sits on the page — never re-sort the whole page. the
+    # detector's pointer network decided that order and it is the one thing here that understands columns; a positional
+    # sort would silently replace it with top-to-bottom and shred any two-column page.
+    merged = list(blocks)
+    for run in runs:
+        block = Block(type="text", page_idx=0, bbox=list(run.bbox), text=run.text)
+        at = next((i for i, other in enumerate(merged) if (other.bbox or [0, 0, 0, 0])[1] > run.bbox[1]), len(merged))
+        merged.insert(at, block)
+    return merged, len(runs)
+
+
 async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     doc_id = fields["doc_id"]
     page_idx = int(fields["page_idx"])
@@ -932,6 +968,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
         block.page_idx = page_idx
 
     fill_crops = 0
+    rescued = 0
     if digital:
         # born-digital page: the detector found the regions, and the prose comes from the page's OWN characters at each
         # box — not re-recognized, so it cannot be misread
@@ -950,10 +987,15 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
             for block, text in zip(layer_blocks, layer, strict=True):
                 if text:
                     block.text = text
+        if path.exists():
+            blocks, rescued = await _rescue_uncovered(doc_id, path, page_idx, blocks)
         fill_crops = await recover_fillin_blocks(image, blocks)
 
     img_crops = await read_pictures(image, blocks)
     await _add_stage_seconds(doc_id, "ocr_s", time.time() - ocr_t)
+    if rescued:
+        # rare and worth seeing every time: text the detector never boxed, taken from the page's own characters
+        logger.info("rescued doc=%s page=%d runs=%d — text no region covered", doc_id, page_idx, rescued)
     if img_crops + fill_crops >= CROP_LOG_THRESHOLD:
         logger.info(
             "ocr-heavy doc=%s page=%d digital=%d blocks=%d img_crops=%d fill_crops=%d",
