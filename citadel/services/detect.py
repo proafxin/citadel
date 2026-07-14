@@ -17,14 +17,21 @@ DETECT_MODEL = "PP-DocLayoutV3"
 # no nms and no box merging. that is a VISUALISATION default, not a recognition one, and it silently drops every text,
 # formula and title region the model scores between 0.4 and 0.5 — content the reference pipeline keeps. lost content is
 # the one failure nothing downstream can recover from, so the floor for a class is the reference's, never a round number
+# the TEXT-bearing classes sit at 0.3, below the reference's 0.4. measured: on a form the detector DOES box the
+# filled-in values — the address, the company name, the case number — and scores them 0.05-0.4, so the reference cutoff
+# throws them away. a threshold sweep over the six worst-covered files took borang_13 from 0.796 of its text-layer
+# characters to 0.889 and Borang 4 from 0.840 to 0.916, with NO file exceeding 1.0.
+# 0.3 and not lower, deliberately: at 0.2 coverage keeps climbing but files start passing 1.0, which is not more text —
+# it is the SAME text read twice by two overlapping boxes, and a duplicate is both a crop we pay for and a second copy
+# in the tree. 0.3 is the last point that recovers content without inventing any.
 DETECT_THRESHOLD = {
     0: 0.5,  # abstract
     1: 0.5,  # algorithm
     2: 0.5,  # aside_text
     3: 0.5,  # chart
     4: 0.5,  # content
-    5: 0.4,  # display_formula
-    6: 0.4,  # doc_title
+    5: 0.3,  # display_formula
+    6: 0.3,  # doc_title
     7: 0.5,  # figure_title
     8: 0.5,  # footer
     9: 0.5,  # footer
@@ -33,15 +40,15 @@ DETECT_THRESHOLD = {
     12: 0.5,  # header
     13: 0.5,  # header
     14: 0.5,  # image
-    15: 0.4,  # inline_formula
+    15: 0.3,  # inline_formula
     16: 0.5,  # number
-    17: 0.4,  # paragraph_title
+    17: 0.3,  # paragraph_title
     18: 0.5,  # reference
     19: 0.5,  # reference_content
     20: 0.45,  # seal
     21: 0.5,  # table
-    22: 0.4,  # text
-    23: 0.4,  # text
+    22: 0.3,  # text
+    23: 0.3,  # text
     24: 0.5,  # vision_footnote
 }
 

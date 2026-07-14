@@ -179,7 +179,7 @@ def png_bytes(crop: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
-async def recognize(payload: bytes, prompt: str) -> str:
+async def _ask(payload: bytes, prompt: str) -> tuple[str, str]:
     # one crop, one request. the payload is already PNG bytes: the raw pixels died at cut time, so what waits out the
     # queue here is the compressed form, not a bitmap
     body = {
@@ -199,18 +199,57 @@ async def recognize(payload: bytes, prompt: str) -> str:
     response = await get_vlm_client().post("/v1/chat/completions", json=body)
     response.raise_for_status()
     choice = response.json()["choices"][0]
-    content: str = choice["message"]["content"]
-    if choice["finish_reason"] == "length":
-        # a region that exhausts the whole window did not get read — it looped. no crop needs 4096 tokens: the densest
-        # table's grid is ~800, and what actually hits the cap is a matrix or a figure the model has no text to read on,
-        # so it repeats a fragment until it runs out. the output is not partial, it is garbage, and keeping it would put
-        # thousands of tokens of repetition into the index.
-        logger.warning("runaway generation prompt=%r chars=%d — dropped", prompt, len(content))
+    return str(choice["message"]["content"]), str(choice["finish_reason"])
+
+
+async def recognize(payload: bytes, prompt: str) -> str:
+    content, finish = await _ask(payload, prompt)
+    if finish != "length":
+        return content.strip()
+    # the region was NOT read — it looped. no crop needs the whole 4096-token window: the densest table's grid is ~800,
+    # and what actually exhausts it is a big matrix under the formula prompt, where the model tries to rebuild the grid
+    # as \begin{array}{cccc...} and gets stuck emitting `&.&.&.` until it runs out of budget.
+    # the prompt is the cause, and reading is the cure: measured over every runaway in the corpus, the plain OCR prompt
+    # recovered SIX OF SIX — clean output every time, 117 to 1539 real characters where the formula prompt returned
+    # 12,000 characters of nothing. a repetition penalty fixed only four of six and made one strictly worse, and it
+    # would have changed decoding for all eighteen thousand crops to repair eleven.
+    if prompt == PROMPT_OCR:
+        logger.warning("runaway generation on the plain read prompt, chars=%d — dropped", len(content))
         return ""
-    return content.strip()
+    retry, retry_finish = await _ask(payload, PROMPT_OCR)
+    if retry_finish == "length":
+        logger.warning("runaway generation prompt=%r, and the plain read looped too — dropped", prompt)
+        return ""
+    logger.info(
+        "runaway generation prompt=%r chars=%d — recovered by plain read, chars=%d", prompt, len(content), len(retry)
+    )
+    return retry.strip()
+
+
+# a LaTeX-OCR model emits upright text one glyph at a time, so a word comes back with a space between EVERY letter:
+# \mathrm{S E L E C T}, \operatorname*{s t r e a m}, \mathrm{c o n f i d e n c e}, {s t a t e}({n o w}).
+# it renders identically and means the same thing, so it is not wrong — but the word `confidence` then does not EXIST
+# in the text, only `c o n f i d e n c e` does, and no lexical search and no embedding can find it. rejoining them is
+# the same class of normalisation the prose path already does (unicode, hyphen-splits, whitespace), and it is what
+# makes a formula findable by its own variable names.
+#
+# a RUN of single letters, wherever it sits — not a whole group of them. requiring the entire group to be single letters
+# missed every German abbreviation in the number-theory books, because the run ends in punctuation: \mathrm{b z w.} is
+# "b", "z", "w." — that last part is two characters, so the whole group was skipped. it also missed \mathrm{Aus d e r},
+# where one word arrived already joined and the rest stayed spaced.
+#
+# safe anywhere in the expression because LaTeX math mode IGNORES whitespace — {s t a t e} and {state} render the same.
+# the run must be LETTERS, so an operator or a digit ends it: `a + b` and `1 - z` come through untouched. `~` is a LaTeX
+# space and not a run separator, so \mathrm{F R O M~r e s t a u r a n t s} becomes \mathrm{FROM~restaurants}: two words.
+_LETTER_RUN = re.compile(r"(?<![A-Za-z])([A-Za-z](?: [A-Za-z]){1,}[.,;:!?-]?)(?![A-Za-z])")
+
+
+def normalize_latex(text: str) -> str:
+    return _LETTER_RUN.sub(lambda match: match.group(1).replace(" ", ""), text)
 
 
 def block_text(label: str, raw: str) -> str:
     # tables arrive as OTSL and every consumer downstream reads HTML; everything else is already its final form —
-    # prose as prose, mathematics as LaTeX
-    return otsl_to_html(raw) if label == "table" else raw
+    # prose as prose, mathematics as LaTeX. the de-spacing runs on ALL of it, not just formula regions: the plain read
+    # prompt returns inline mathematics as LaTeX too, so a prose block carries the same artifact
+    return otsl_to_html(raw) if label == "table" else normalize_latex(raw)

@@ -325,26 +325,50 @@ def build_table_search_text(
     return "\n".join(part for part in parts if part)
 
 
+EQUATION_CONTEXT_BACK = 3  # blocks to look back for the sentence that introduces an equation
+
+
+def _introducing_prose(specs: list[NodeSpec], index: int) -> str:
+    # an equation is unsearchable on its own. LaTeX has no natural-language surface: nobody asks a question in
+    # \sum_{n=1}^{\infty}, they ask for "the sum of the reciprocals of the squares" — and those words are sitting in the
+    # prose that INTRODUCES the equation, one or two blocks above it ("Theorem 3.1 states that..."). that sentence is
+    # already in the tree; it was simply never part of the equation's own search text. same page only: a sentence from
+    # the previous page is not introducing anything.
+    page = specs[index].page_no
+    for spec in reversed(specs[max(index - EQUATION_CONTEXT_BACK, 0) : index]):
+        if spec.page_no != page:
+            break
+        if spec.kind == "paragraph" and (spec.text or "").strip():
+            return spec.text or ""
+    return ""
+
+
+def _heading_path(by_id: dict[str, NodeSpec], spec: NodeSpec) -> list[str]:
+    headings: list[str] = []
+    parent = spec.parent_content_id
+    while parent is not None:
+        ancestor = by_id[parent]
+        if ancestor.kind == "heading" and ancestor.text:
+            headings.append(ancestor.text)
+        parent = ancestor.parent_content_id
+    headings.reverse()
+    return headings
+
+
 def build_search_text(specs: list[NodeSpec], library_name: str, filename: str) -> dict[str, str]:
     # paratext is DELIBERATELY absent: a running header repeated into every node's search text makes every embedding on
     # the page share an identical block of tokens, which destroys discrimination. it lives in document metadata instead.
     by_id = {spec.content_id: spec for spec in specs}
     result: dict[str, str] = {}
-    for spec in specs:
+    for index, spec in enumerate(specs):
         if spec.kind in {"heading", "table"}:
             continue
-        headings: list[str] = []
-        parent = spec.parent_content_id
-        while parent is not None:
-            ancestor = by_id[parent]
-            if ancestor.kind == "heading" and ancestor.text:
-                headings.append(ancestor.text)
-            parent = ancestor.parent_content_id
-        headings.reverse()
+        context = _introducing_prose(specs, index) if spec.kind == "equation" else ""
         parts = [
             _clean_name(library_name),
             _clean_name(filename.rsplit(".", 1)[0] if "." in filename else filename),
-            *(_clean_text(text) for text in headings),
+            *(_clean_text(text) for text in _heading_path(by_id, spec)),
+            _clean_text(context),
             _clean_text(_leaf_text(spec)),
         ]
         result[spec.content_id] = "\n".join(part for part in parts if part)
