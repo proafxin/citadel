@@ -202,13 +202,39 @@ async def _ask(payload: bytes, prompt: str) -> tuple[str, str]:
     return str(choice["message"]["content"]), str(choice["finish_reason"])
 
 
+# a loop does not have to exhaust the token window to be a loop. one did not: 7,167 characters on a page of the maths
+# book, of which 5,280 were the SAME 60-character fragment repeated eighty-eight times — and it stopped on its own, so
+# finish_reason came back "stop" and every guard we had let it through into the index.
+# so detect the repetition itself. a looping generation reuses a tiny vocabulary of fragments, and that is measurable
+# without knowing what it repeated: shingle the text and count how many shingles are DISTINCT. real prose is nearly all
+# distinct; a loop is nearly none.
+LOOP_MIN_CHARS = 1500  # below this there is nothing to loop — the mean block is ~300 chars
+LOOP_SHINGLE = 32
+LOOP_STRIDE = 16
+LOOP_DISTINCT_RATIO = 0.35  # measured: real text lands at 0.9+, the loop above at 0.10
+
+
+def is_looping(text: str) -> bool:
+    if len(text) < LOOP_MIN_CHARS:
+        return False
+    shingles = [text[i : i + LOOP_SHINGLE] for i in range(0, len(text) - LOOP_SHINGLE, LOOP_STRIDE)]
+    return bool(shingles) and len(set(shingles)) / len(shingles) < LOOP_DISTINCT_RATIO
+
+
+def _ran_away(content: str, finish: str, prompt: str) -> bool:
+    # a table is legitimately repetitive — its grid is <fcel>...<fcel>...<nl> over and over — so the shingle test would
+    # accuse an honest one. tables are checked by the grid parser instead; here only the token cap applies to them
+    if finish == "length":
+        return True
+    return prompt != PROMPT_TABLE and is_looping(content)
+
+
 async def recognize(payload: bytes, prompt: str) -> str:
     content, finish = await _ask(payload, prompt)
-    if finish != "length":
+    if not _ran_away(content, finish, prompt):
         return content.strip()
-    # the region was NOT read — it looped. no crop needs the whole 4096-token window: the densest table's grid is ~800,
-    # and what actually exhausts it is a big matrix under the formula prompt, where the model tries to rebuild the grid
-    # as \begin{array}{cccc...} and gets stuck emitting `&.&.&.` until it runs out of budget.
+    # the region was NOT read — it looped. what exhausts the window is a big matrix under the formula prompt, where the
+    # model tries to rebuild the grid as \begin{array}{cccc...} and gets stuck emitting `&.&.&.` until it runs out.
     # the prompt is the cause, and reading is the cure: measured over every runaway in the corpus, the plain OCR prompt
     # recovered SIX OF SIX — clean output every time, 117 to 1539 real characters where the formula prompt returned
     # 12,000 characters of nothing. a repetition penalty fixed only four of six and made one strictly worse, and it
@@ -217,7 +243,7 @@ async def recognize(payload: bytes, prompt: str) -> str:
         logger.warning("runaway generation on the plain read prompt, chars=%d — dropped", len(content))
         return ""
     retry, retry_finish = await _ask(payload, PROMPT_OCR)
-    if retry_finish == "length":
+    if _ran_away(retry, retry_finish, PROMPT_OCR):
         logger.warning("runaway generation prompt=%r, and the plain read looped too — dropped", prompt)
         return ""
     logger.info(
