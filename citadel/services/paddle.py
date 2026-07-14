@@ -15,10 +15,17 @@ from config import PADDLEOCR_MODEL, get_settings
 
 logger = logging.getLogger(__name__)
 
-CROP_CONCURRENCY = 128  # the ONE bottleneck: a crop is the unit of VLM work, and this semaphore caps what is
-# outstanding at the model at all (Running + Waiting). it lives HERE, at the model boundary, because it must equal the
-# server's --max-num-seqs: below that the GPU cannot fill its sequence slots, above it the excess merely queues INSIDE
-# the model, where every waiting request pins a decoded image
+CROP_CONCURRENCY = 160  # the ONE bottleneck: a crop is the unit of VLM work, and this semaphore caps what is
+# outstanding at the model at all (Running + Waiting). it lives HERE, at the model boundary.
+#
+# DELIBERATELY ABOVE the server's --max-num-seqs (128), which is the opposite of what it used to be. set EQUAL to it,
+# the model can never hold a queue: the server reported `Waiting: 0` on essentially every line and `Running` hovering at
+# 101-127 — never pinned at 128. so every time a request finished, its sequence slot sat EMPTY until our event loop
+# parsed the response, released this semaphore, base64'd the next crop and posted it. that round trip is dead GPU time,
+# eighteen thousand times a run, and it is what the missing 8-10% of utilisation is.
+# the excess queues INSIDE the model, which is exactly the point: the scheduler refills a freed slot from its own queue
+# instead of waiting on us. the old comment justified the equality by saying a queued request "pins a decoded image" —
+# that was true of MinerU, whose payload was a bitmap. ours is a PNG (~40KB), so 32 queued crops cost ~1.3MB.
 VLM_CLIENTS = 16
 VLM_CONN_HEADROOM = 4  # sockets per client as a MULTIPLE of that client's mean share of the crop semaphore. derived,
 # never a literal: a socket count is not a concurrency bound and must never become one. httpx blocks a request that
