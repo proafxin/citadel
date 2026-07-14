@@ -20,17 +20,22 @@ services:
       - 0.0.0.0
       - --port
       - "${CITADEL_PADDLEOCR_PORT:-8099}"
+      # NOT quantized: the weights stay bf16. at 0.9B they are only 1.8GB, and fp8 measured a saving of just 380MiB —
+      # the cache and the cuda graphs dominate what this server holds, not the weights. 380MiB is under 4% of the card
+      # and we are not short of it. this is the model we switched to FOR fidelity, and a quantization error in a table
+      # corrupts a cell, which is the one thing the whole design refuses to let a model do.
       - --gpu-memory-utilization
       - "0.30"
       # the KV cache is SIZED here rather than left to the memory profiler, which measured whatever happened to be free
       # at boot and so varied with how far the other models had got loading: one boot took 1.98GiB, another 4.08GiB.
-      # 12500 x 16 = 200,000 tokens. measured peak over a 2,175-page run (14,446 crops on the densest book) was 15.8% of
-      # 475,040 tokens = ~75k, with Waiting: 0 on every log line — we never queued a request even once. 200k is 2.7x that
-      # peak, and it still holds 24 full-length sequences, where a crop's real prompt is ~200 tokens.
+      # 8000 x 16 = 128,000 tokens. measured peak over a 2,175-page run (14,446 crops on the densest book) was ~77k, with
+      # Waiting: 0 on every log line — we never queued a request even once. 128k is 1.7x that peak and still holds a
+      # crop's real prompt (~200 tokens) many hundreds of times over. it was 200k; the 0.6GB that buys back is worth more
+      # to the DETECTOR process, which shares this card and OOMs before it can load if the two servers take everything.
       - --block-size
       - "16"
       - --num-gpu-blocks-override
-      - "12500"
+      - "8000"
       # every crop image is unique, and the image tokens begin within the first block or two — so the cache can only ever
       # hit on the few chat-template tokens ahead of the image. measured: 30% at warmup decaying to a steady 0.0%. it
       # buys nothing and costs a hash of every prompt plus the blocks held to store them.
@@ -110,13 +115,14 @@ services:
       # 0.30 was sized when the OCR model owned the card. it left 1.79GiB of KV = 94,854 tokens, and vLLM's own boot
       # line said what that means: "Maximum concurrency for 32,768 tokens per request: 2.89x". the filter packs each
       # call up to BUDGET (~30k tokens) and runs 32 of them at once — so ~3 ran and 29 queued, every query, invisibly.
-      # this is a fraction of the WHOLE card, and it is what the 9B's weights come out of first — at 0.55 they left only
-      # 2.14GiB of cache (125,373 tokens), which is less than the 3 x 64k = 196,608 the sequence slots below promise, so
-      # the third request would be preempted rather than run. the ceiling is not the free card either: the detector
-      # process (~1.4GB, its own cuda context) and the app's BGE-M3 embedder (~1.2GB, growing by a batch while it runs)
-      # live on the SAME card, and the embedder sizes its batches against whatever is left — min(0.7 x free, 2GB).
+      # size the cache for the requests this pipeline actually MAKES, not for vLLM's worst case. its "Maximum concurrency
+      # for 65,536 tokens per request" line assumes every slot holds a full-length sequence at once, and ours never can:
+      # the filter runs 3 at a time at ~30k each (~92k tokens), and synthesis is ONE call that runs alone, after the
+      # filtering is done. peak demand is ~92k tokens, not 3 x 64k. sizing for the worst case cost 1.2GB of cache that is
+      # never touched — and that 1.2GB is what the DETECTOR needs: it is a separate process with its own cuda context on
+      # the same card, and it does not exist at the moment vLLM profiles, so nothing here reserves room for it.
       - --gpu-memory-utilization
-      - "0.62"
+      - "0.55"
       # a sequence slot is only worth having if the cache can hold that sequence at FULL length: 3 x 64k = 196,608 tokens,
       # which the cache holds outright, so every admitted request runs and none is preempted mid-flight to make room for
       # another. 3 rather than 4 is what the 9B's extra weights cost us, and it costs almost nothing: the 64k window only
