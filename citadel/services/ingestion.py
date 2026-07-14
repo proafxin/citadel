@@ -58,8 +58,8 @@ from citadel.services.paddle import (
     PROMPT_OCR,
     block_text,
     close_vlm_clients,
-    encode_crop,
     is_readable,
+    png_bytes,
     prompt_for,
     recognize,
     resize_for_vlm,
@@ -757,16 +757,15 @@ def _cut_one(img: Image.Image, bbox: list[float]) -> Image.Image:
     return img.crop((box[0], box[1], max(box[2], box[0] + 1), max(box[3], box[1] + 1)))
 
 
-def _cut_crops(img: Image.Image, blocks: list[DetBlock], indices: list[int]) -> list[str]:
-    # cut, fit the model's pixel window, and encode ALL THE WAY to the wire format — PNG and then base64 — while the
-    # bitmap is alive and we are off the event loop in a worker thread. the raw pixels die here, and so does the
-    # encoding: what waits out the queue is the exact string the request will carry, so a crop holding a semaphore
-    # permit is a crop the model is actually working on, not one we are still preparing
-    payloads: list[str] = []
+def _cut_crops(img: Image.Image, blocks: list[DetBlock], indices: list[int]) -> list[bytes]:
+    # cut, fit the model's pixel window, and encode — all while the bitmap is alive, so the raw pixels die here and only
+    # the compressed form (~8x smaller) waits out the queue. PNG and NOT base64: base64 is 33% larger and every crop
+    # alive would carry that, which is host RAM spent to save an encode that was never on the critical path
+    payloads: list[bytes] = []
     for i in indices:
         crop = _cut_one(img, blocks[i].bbox)
         sized = resize_for_vlm(crop)
-        payloads.append(encode_crop(sized))
+        payloads.append(png_bytes(sized))
         if sized is not crop:
             sized.close()
         crop.close()
@@ -774,7 +773,7 @@ def _cut_crops(img: Image.Image, blocks: list[DetBlock], indices: list[int]) -> 
 
 
 async def _read_crop(
-    payload: str, prompt: str, semaphore: asyncio.Semaphore, budget: _CropBudget, spans: _Spans
+    payload: bytes, prompt: str, semaphore: asyncio.Semaphore, budget: _CropBudget, spans: _Spans
 ) -> str:
     # one crop, one slot: the semaphore bounds what is in flight at the model, the budget bounds what is alive in RAM,
     # and both are handed back the instant THIS crop returns — not when its slowest sibling does. the semaphore is

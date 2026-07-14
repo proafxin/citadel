@@ -15,17 +15,23 @@ from config import PADDLEOCR_MODEL, get_settings
 
 logger = logging.getLogger(__name__)
 
-CROP_CONCURRENCY = 192  # the ONE bottleneck: a crop is the unit of VLM work, and this semaphore caps what is
-# outstanding at the model at all (Running + Waiting). it lives HERE, at the model boundary.
+CROP_CONCURRENCY = 128  # the ONE bottleneck: a crop is the unit of VLM work, and this semaphore caps what is
+# outstanding at the model at all (Running + Waiting). it lives HERE, at the model boundary, and it EQUALS the server's
+# --max-num-seqs.
 #
-# DELIBERATELY ABOVE the server's --max-num-seqs (128), which is the opposite of what it used to be. set EQUAL to it,
-# the model can never hold a queue: the server reported `Waiting: 0` on essentially every line and `Running` hovering at
-# 101-127 — never pinned at 128. so every time a request finished, its sequence slot sat EMPTY until our event loop
-# parsed the response, released this semaphore, base64'd the next crop and posted it. that round trip is dead GPU time,
-# eighteen thousand times a run, and it is what the missing 8-10% of utilisation is.
-# the excess queues INSIDE the model, which is exactly the point: the scheduler refills a freed slot from its own queue
-# instead of waiting on us. the old comment justified the equality by saying a queued request "pins a decoded image" —
-# that was true of MinerU, whose payload was a bitmap. ours is a PNG (~40KB), so 32 queued crops cost ~1.3MB.
+# it is not a coincidence that the best value is exactly the server's slot count, and it is not because the model is
+# "kept fed" — it is because MORE IN FLIGHT IS STRICTLY SLOWER. measured, end to end, same corpus:
+#     128 permits -> ~124 outstanding -> 489.1s   <- best
+#     160 permits -> ~152 outstanding -> 492.9s
+#     192 permits -> ~186 outstanding -> 520.2s   (+6.4%)
+# monotone. raising it does exactly what it says: `Waiting` goes from 0 to 60, every sequence slot stays occupied, and
+# GPU utilisation... does not move. it sits at 90-95% with a queue 60 deep, the same as with no queue at all. so the
+# utilisation gap was NEVER starvation, and `Waiting: 0` with `Running` at 120/128 was not idle capacity — it was the
+# EQUILIBRIUM the card can sustain.
+# the card is power-capped (1837 of 3090 MHz), so its compute budget is fixed. a deeper batch cannot buy throughput, but
+# it does cost: attention over more sequences, more memory-bandwidth contention, and chunked-prefill chunks diluting
+# every decode step. per-crop latency rose 64% (2.54s -> 4.17s on the scanned book) while throughput FELL 25%.
+# utilisation is a TIME metric and on a power-limited card it is not actionable. do not tune against it.
 VLM_CLIENTS = 16
 VLM_CONN_HEADROOM = 4  # sockets per client as a MULTIPLE of that client's mean share of the crop semaphore. derived,
 # never a literal: a socket count is not a concurrency bound and must never become one. httpx blocks a request that
@@ -186,19 +192,12 @@ def png_bytes(crop: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
-def encode_crop(crop: Image.Image) -> str:
-    # the crop arrives at the model as a base64 data URL, and this builds it AT CUT TIME — in the worker thread that is
-    # already holding the bitmap — rather than inside the request.
-    # it used to be encoded inside _ask, which meant a crop held its semaphore permit while base64-ing 40KB on the EVENT
-    # LOOP. the permit is supposed to bound what is in flight AT THE MODEL; every microsecond it also covers our own
-    # encoding is a permit the model cannot use. measured: 160 permits held, but only ~124 requests ever at the model —
-    # 23% of every permit's life was spent on our side of the wire.
-    return "data:image/png;base64," + b64encode(png_bytes(crop)).decode()
-
-
-async def _ask(payload: str, prompt: str) -> tuple[str, str]:
-    # one crop, one request. the payload is already the encoded data URL — the raw pixels died at cut time and so did
-    # the base64, so what waits out the queue here is a string we can hand straight to the serializer
+async def _ask(payload: bytes, prompt: str) -> tuple[str, str]:
+    # one crop, one request. the payload is PNG BYTES, and the base64 is built here rather than at cut time.
+    # it was briefly built at cut time, to keep the encode off the semaphore permit — the idea being that a permit
+    # should bound what is in flight AT THE MODEL, not what we are still preparing. that was in service of a starvation
+    # theory the data killed: the model was never starved, a deeper queue measured SLOWER, and the encode was never on
+    # the critical path. what it DID do was make every crop alive carry a 53KB string instead of 40KB of bytes.
     body = {
         "model": PADDLEOCR_MODEL,
         "max_tokens": VLM_MAX_TOKENS,
@@ -207,7 +206,7 @@ async def _ask(payload: str, prompt: str) -> tuple[str, str]:
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": payload}},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64encode(payload).decode()}},
                     {"type": "text", "text": prompt},
                 ],
             }
@@ -246,7 +245,7 @@ def _ran_away(content: str, finish: str, prompt: str) -> bool:
     return prompt != PROMPT_TABLE and is_looping(content)
 
 
-async def recognize(payload: str, prompt: str) -> str:
+async def recognize(payload: bytes, prompt: str) -> str:
     content, finish = await _ask(payload, prompt)
     if not _ran_away(content, finish, prompt):
         return content.strip()

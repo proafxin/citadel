@@ -50,7 +50,11 @@ PAGES_BUFFER = DECODE_CONCURRENCY  # rendered pages sitting UNCLAIMED in `pages`
 # waits on render to catch up — a stall the GPU pays for. it does NOT bound pages in flight (ocr claims as fast as the
 # crop budget allows), so it is purely a render-ahead buffer and purely a RAM bound (~2MB an image), deep enough that
 # ocr never waits on pdfium and shallow enough that an 800-page PDF cannot rasterize itself into redis.
-PAGES_IN_FLIGHT = 128  # pages CLAIMED at once — each pins its ~2MB encoded image in redis AND here (~4MB apiece).
+PAGES_IN_FLIGHT = 96  # pages CLAIMED at once — each pins its ~2MB encoded image in redis AND here (~4MB apiece).
+# EXPERIMENT: this does not change what the GPU sees — the crop semaphore decides the batch, and this only decides how
+# many crops are CUT and left pending on it. at 128 pages that is ~2,300 coroutines awaiting a permit, all live on the
+# event loop (833k context switches/sec). fewer pages is less scheduler churn and less RAM; whether any of that reaches
+# the GPU is the question, and the honest prior is no — the model is not starved.
 # NOT tied to CROP_CONCURRENCY, though it used to be: they bound different things and the coupling made one unraisable
 # without paying for the other. this is a RAM bound; the crop semaphore is a MODEL-saturation bound. going 128 -> 160
 # with the semaphore cost 3GB of host memory and fed the model nothing.
