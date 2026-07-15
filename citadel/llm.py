@@ -103,6 +103,45 @@ async def describe_table(
     return str(data.get("description", ""))
 
 
+_STRUCTURE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "header_rows": {"type": "array", "items": {"type": "integer"}},
+                    "col_start": {"type": "integer"},
+                    "col_end": {"type": "integer"},
+                    "title": {"type": "string"},
+                    "notes": {"type": "array", "items": {"type": "string"}},
+                    "description": {"type": "string"},
+                },
+                "required": ["header_rows", "col_start", "col_end", "title", "notes", "description"],
+            },
+        }
+    },
+    "required": ["tables"],
+}
+
+
+async def structure_sheet(rows: str, column_hint: str, height: int, width: int) -> list[dict]:
+    # one call per sheet: the model is shown only the interesting rows and a body sample (rows, index-tagged) and it
+    # returns the table(s) — header rows, column span, title, notes, a description — reasoning over structure it can
+    # SEE, never over data it cannot. it decides the semantic calls (what is a header, where a table splits); the
+    # mechanical data spans are derived by the caller from the header positions it returns
+    prompt = (
+        f"{load_prompt('table_structure')}\n"
+        f"the sheet has {height} rows (0..{height - 1}) and {width} columns (0..{width - 1}).\n"
+        f"column value kinds: {column_hint}\n"
+        f"rows:\n{rows}"
+    )
+    data = await call_slm(prompt, _STRUCTURE_SCHEMA)
+    tables = data.get("tables", [])
+    return tables if isinstance(tables, list) else []
+
+
 async def _chat_stream(prompt: str) -> AsyncIterator[str]:
     payload = {
         "model": QWEN_MODEL,
