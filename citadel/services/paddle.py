@@ -36,6 +36,16 @@ CROP_CONCURRENCY = 128  # the ONE bottleneck: a crop is the unit of VLM work, an
 #
 # utilisation is a TIME metric and on a power-limited card it is not actionable. do not tune against it.
 
+VLM_KEEPALIVE_EXPIRY = 2.0  # seconds an idle pooled connection may live before WE discard it. it MUST be below the
+# server's uvicorn timeout_keep_alive (5s): the two defaults are BOTH 5s, and that tie is the disconnect. when a
+# connection has been idle ~5s both sides close it at the same instant — the server closes it cleanly (no error, no log)
+# and our pool hands the same socket to the next crop, whose write lands on a half-closed connection and reads back
+# nothing (httpx RemoteProtocolError, "Server disconnected without sending a response"). measured: every one of 239,207
+# server requests returned 200, so the server never failed a request — the failure is purely this reuse race, and it
+# only bit in the FIFO lulls of the 809-page book where a pooled socket could sit idle past 5s. expiring OUR side at 2s
+# means any connection we reuse has been idle under 2s, so the server (holding to 5s) has not touched it. the window is
+# gone, not retried. this is client-side and deterministic — it does NOT depend on the server's timeout, only on being
+# safely below it
 VLM_CLIENTS = 16
 VLM_CONN_HEADROOM = 4  # sockets per client as a MULTIPLE of that client's mean share of the crop semaphore. derived,
 # never a literal: a socket count is not a concurrency bound and must never become one. httpx blocks a request that
@@ -171,7 +181,11 @@ def _vlm_pool() -> list[httpx.AsyncClient]:
         httpx.AsyncClient(
             base_url=settings.paddleocr_base_url,
             timeout=VLM_TIMEOUT,
-            limits=httpx.Limits(max_connections=VLM_CONN_PER_CLIENT, max_keepalive_connections=VLM_CONN_PER_CLIENT),
+            limits=httpx.Limits(
+                max_connections=VLM_CONN_PER_CLIENT,
+                max_keepalive_connections=VLM_CONN_PER_CLIENT,
+                keepalive_expiry=VLM_KEEPALIVE_EXPIRY,
+            ),
         )
         for _ in range(VLM_CLIENTS)
     ]
