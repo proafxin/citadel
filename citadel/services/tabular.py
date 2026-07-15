@@ -122,24 +122,28 @@ def _grid_table(grid: list[list[str]], n_header: int, caption: str | None = None
     ]
     body = grid[n_header:]
     columns: list[Column] = []
-    rows: list[list[CellValue]] = [[None] * width for _ in body]
+    data_rows: list[list[CellValue]] = [[None] * width for _ in body]
     for col in range(width):
         values = [row[col] for row in body]
         dtype = _dtype(values)
         columns.append(Column(header=headers[col] or f"col{col}", dtype=dtype))
         for index, value in enumerate(values):
-            rows[index][col] = _cast(value, dtype)
+            data_rows[index][col] = _cast(value, dtype)
+    # header band kept verbatim as the first rows, not consumed into names only
+    header_cells = [[_cast(grid[row][col], ColumnDType.STRING) for col in range(width)] for row in range(n_header)]
+    header_indices = list(range(len(header_cells)))
     return MaterializedTable(
         sheet_no=0,
         columns=columns,
-        rows=rows,
-        sample_rows=rows[:SAMPLE_TABLE_ROWS],
-        n_rows=len(rows),
+        rows=[*header_cells, *data_rows],
+        sample_rows=data_rows[:SAMPLE_TABLE_ROWS],
+        n_rows=len(data_rows),
         title=None,
         caption=caption,
         notes=[],
         description="",
-        anchors=None,
+        anchors={"header_rows": header_indices},
+        header_rows=header_indices,
     )
 
 
@@ -209,18 +213,26 @@ def apply_grid_structure(grid: list[list[str]], structure: TableStructure) -> Ma
     dtypes = [_dtype([raw[index] for raw in collected]) for index in range(count)]
     headers = [_grid_header(grid, header_rows, structure.col_start + index) for index in range(count)]
     columns = [Column(header=headers[index] or f"col{index}", dtype=dtypes[index]) for index in range(count)]
-    rows = [[_cast(raw[index], dtypes[index]) for index in range(count)] for raw in collected]
+    # the header rows are kept as the first rows of the stored grid — verbatim, never dropped. a row the detector
+    # wrongly promoted to header survives as a queryable row; header_rows records what is header, deletion never does
+    header_cells = [
+        [_cast(_grid_cell(grid, row, structure.col_start + i), ColumnDType.STRING) for i in range(count)]
+        for row in sorted(header_rows)
+    ]
+    data_rows = [[_cast(raw[index], dtypes[index]) for index in range(count)] for raw in collected]
+    header_indices = list(range(len(header_cells)))
     return MaterializedTable(
         sheet_no=0,
         columns=columns,
-        rows=rows,
-        sample_rows=rows[:SAMPLE_TABLE_ROWS],
-        n_rows=len(rows),
+        rows=[*header_cells, *data_rows],
+        sample_rows=data_rows[:SAMPLE_TABLE_ROWS],
+        n_rows=len(data_rows),
         title=structure.title,
         caption=structure.caption,
         notes=structure.notes or [],
         description=structure.description or "",
-        anchors=None,
+        anchors={"header_rows": header_indices},
+        header_rows=header_indices,
     )
 
 

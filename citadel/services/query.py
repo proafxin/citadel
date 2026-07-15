@@ -117,7 +117,12 @@ def _references_only_views(sql: str, n_tables: int) -> bool:
 
 def _view_select(table: TableCand) -> Select[Any]:
     columns = [_typed_column(index, column.get("dtype", "string")) for index, column in enumerate(table.columns)]
-    return select(*columns).where(TableRow.table_id == table.table_id)
+    stmt = select(*columns).where(TableRow.table_id == table.table_id)
+    # header rows are stored in the grid for losslessness but are NOT data — exclude them from the typed view so a query
+    # over the table sees only its rows, exactly as before headers were kept
+    if table.header_rows:
+        stmt = stmt.where(TableRow.row_idx.notin_(table.header_rows))
+    return stmt
 
 
 def _view_cte(index: int, table: TableCand) -> str:

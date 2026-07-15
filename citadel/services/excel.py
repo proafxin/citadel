@@ -1,5 +1,5 @@
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from io import BytesIO
 
@@ -65,8 +65,11 @@ class Region:
 class MaterializedTable:
     sheet_no: int
     columns: list[Column]
-    rows: list[list[CellValue]]
-    sample_rows: list[list[CellValue]]
+    rows: list[list[CellValue]]  # the FULL stored grid: header rows first (verbatim), then data rows. header rows are
+    # kept, not deleted — a row the detector wrongly called a header (measured: Coca-Cola's NET OPERATING REVENUES, its
+    # top P&L line) survives as a queryable row instead of vanishing into a column name. what is a header is recorded in
+    # header_rows, not enforced by removal, so a wrong call is a mislabel over intact data, never a lost row
+    sample_rows: list[list[CellValue]]  # DATA rows only — the sample and n_rows are the data view, header rows excluded
     n_rows: int
     title: str | None
     caption: str | None
@@ -74,6 +77,8 @@ class MaterializedTable:
     description: str
     anchors: dict
     formulas: list[str] | None = None
+    header_rows: list[int] = field(default_factory=list)  # indices into `rows` that are header, not data. the query
+    # projection skips exactly these, so the typed view is unchanged while the grid stays whole and reconstructable
 
 
 @dataclass
@@ -250,6 +255,16 @@ def _infer_dtype(values: list[RawCellValue]) -> ColumnDType:
     return ColumnDType.STRING
 
 
+def _verbatim(value: RawCellValue) -> CellValue:
+    # a header cell, kept exactly as written: datetimes to iso, everything else to its own text. never dtype-cast, so a
+    # header that happens to be numeric ("2009") stays the label it is
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
 def _cast(value: RawCellValue, dtype: ColumnDType) -> CellValue:
     if value is None:
         return None
@@ -294,7 +309,14 @@ def _header_at(values: dict[tuple[int, int], RawCellValue], header_rows: list[in
 def apply_structure(region: Region, structure: TableStructure, sheet_no: int) -> MaterializedTable:
     values = _value_map(region.cells)
     count = structure.col_end - structure.col_start + 1
-    header_rows = [region.min_row + offset for offset in (structure.header_rows or [])]
+    header_abs = [region.min_row + offset for offset in (structure.header_rows or [])]
+    # the header rows are read VERBATIM and kept as the first rows of the stored grid — never cast to the column dtype
+    # (a header cell is a name, not a value) and never dropped. what makes them "header" is header_rows below, not
+    # their absence
+    header_cells: list[list[CellValue]] = [
+        [_verbatim(values.get((abs_row, region.min_col + structure.col_start + index))) for index in range(count)]
+        for abs_row in header_abs
+    ]
     raw_rows: list[list[RawCellValue]] = []
     for offset in range(structure.data_start, structure.data_end + 1):
         abs_row = region.min_row + offset
@@ -303,21 +325,24 @@ def apply_structure(region: Region, structure: TableStructure, sheet_no: int) ->
             continue
         raw_rows.append(raw)
     dtypes = [_infer_dtype([raw[index] for raw in raw_rows]) for index in range(count)]
-    headers = [_header_at(values, header_rows, region.min_col + structure.col_start + index) for index in range(count)]
+    headers = [_header_at(values, header_abs, region.min_col + structure.col_start + index) for index in range(count)]
     columns = [Column(header=headers[index] or f"col{index}", dtype=dtypes[index]) for index in range(count)]
-    rows = [[_cast(raw[index], dtypes[index]) for index in range(count)] for raw in raw_rows]
+    data_rows = [[_cast(raw[index], dtypes[index]) for index in range(count)] for raw in raw_rows]
+    all_rows = [*header_cells, *data_rows]
+    header_indices = list(range(len(header_cells)))
     return MaterializedTable(
         sheet_no=sheet_no,
         columns=columns,
-        rows=rows,
-        sample_rows=_sample(rows),
-        n_rows=len(rows),
+        rows=all_rows,
+        sample_rows=_sample(data_rows),
+        n_rows=len(data_rows),
         title=structure.title,
         caption=structure.caption,
         notes=[*(structure.notes or []), *region_comments(region)],
         description=structure.description or "",
-        anchors=_anchor_range(region, structure),
+        anchors={**_anchor_range(region, structure), "header_rows": header_indices},
         formulas=region_formulas(region) or None,
+        header_rows=header_indices,
     )
 
 

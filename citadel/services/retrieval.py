@@ -116,6 +116,7 @@ class TableCand:
     description: str
     metadata: dict
     sample_rows: list[list]
+    header_rows: list[int]  # row_idx values in table_rows that are header, not data — the query projection skips them
 
 
 @dataclass
@@ -386,6 +387,7 @@ async def load_tables(content_ids: list[str]) -> list[TableCand]:
                     table.description,
                     table.table_metadata,
                     table.sample_rows,
+                    (table.anchors or {}).get("header_rows", []),
                 )
             )
     return out
