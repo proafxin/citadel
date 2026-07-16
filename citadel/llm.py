@@ -12,9 +12,25 @@ from citadel.prompts import load_prompt
 from citadel.schemas.table import Column
 from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL, get_settings
 
-SLM_TIMEOUT = 180
-SLM_CONCURRENCY = 3  # concurrent SLM calls; MUST equal qwen --max-num-seqs. above it the excess only queues inside the
-# model, where a waiting request pins its whole prompt in the KV cache and buys nothing
+# one constant used to answer three different questions: how long to reach the server, how long to wait for its bytes,
+# and how long to wait for a free slot. they want different numbers, and sharing one is what dropped the tail of a
+# burst. connect fails fast — vLLM is a local service, so silence means it is down, not busy. read is a LIVENESS
+# BACKSTOP rather than a deadline: the slot gate means a request is only sent once the model can start it, and
+# max_tokens bounds the work, so read fires only when the server is genuinely wedged. it must cover a WHOLE generation,
+# because the structured path does not stream — vLLM buffers the completion and sends it in one chunk at the end, so
+# read spans prefill plus every decoded token. on the streaming path each token resets it and it only ever covers
+# time-to-first-token. the queue wait has no deadline at all; see slm_slot.
+SLM_CONNECT_TIMEOUT = 5.0
+SLM_WRITE_TIMEOUT = 30.0
+SLM_READ_TIMEOUT = 600.0  # UNMEASURED: sized against a pessimistic decode rate for STRUCT_MAX_TOKENS, not a benchmark.
+# generous on purpose — too tight re-creates the drop this split fixes, too loose costs only slower wedge detection
+SLM_TIMEOUTS = httpx.Timeout(
+    connect=SLM_CONNECT_TIMEOUT, read=SLM_READ_TIMEOUT, write=SLM_WRITE_TIMEOUT, pool=SLM_CONNECT_TIMEOUT
+)
+SLM_CONCURRENCY = 3  # concurrent SLM calls; MUST equal qwen --max-num-seqs. NOT a KV bound: vLLM's scheduler breaks out
+# before allocating blocks, so a request in its waiting queue holds only its token ids and pins no cache. the reason to
+# gate is the TIMEOUT — on the wire a queued request and a slow one are identical (no bytes either way), so a queued
+# request's read timer runs while it waits. sending only what the model can start keeps read measuring WORK.
 STRUCT_MAX_TOKENS = 4096  # structured calls emit short JSON (indices, a concise merge summary, SQL)
 SYNTH_MAX_TOKENS = 8192  # the streamed answer; the evidence budget reserves this much of the context window for it
 
@@ -63,17 +79,21 @@ async def slm_slot() -> AsyncIterator[None]:
     # ONE pool of slots for every SLM request in the system, held in redis because the callers are in different
     # PROCESSES: the worker structures sheets while the app answers queries, and an asyncio.Semaphore bounds only the
     # process it lives in. two per-process semaphores of SLM_CONCURRENCY meant twice SLM_CONCURRENCY could reach a
-    # server sized for exactly that, and the excess queues INSIDE the model, pinning its prompt in the KV cache.
+    # server sized for exactly that, so the excess sat in vLLM's queue with its read timer already ticking — see
+    # SLM_CONCURRENCY for why that, and not the KV cache, is what this gate is for.
     # the SLM is a bottleneck resource, so its concurrency is decided once, globally, by what the GPU can afford.
     #
     # BLPOP blocks on the connection (not the loop) and hands slots out first-come-first-served, so neither process can
     # starve the other. the slot is returned in `finally`, so a raising call frees it; only a hard kill loses one, and
     # the run flushes redis on start.
+    #
+    # the wait is UNBOUNDED (timeout=0 blocks forever; the pool sets socket_timeout=None so it is not cut off). waiting
+    # for a slot is not a failure — it is the queue working. giving the wait a deadline meant a burst's tail raised
+    # instead of taking its turn, which is the one thing a queue exists to prevent. the caller is gated here BEFORE its
+    # client is built, so a waiter holds no socket and nothing on the wire is ticking while it waits.
     redis = get_redis()
     await _slm_fill()(keys=[SLM_SLOTS, SLM_SLOTS_READY], args=[str(SLM_CONCURRENCY)])
-    if await redis.blpop(SLM_SLOTS, timeout=SLM_TIMEOUT) is None:
-        msg = f"no SLM slot free after {SLM_TIMEOUT}s"
-        raise TimeoutError(msg)
+    await redis.blpop(SLM_SLOTS, timeout=0)
     try:
         yield
     finally:
@@ -94,7 +114,7 @@ async def _chat(prompt: str, schema: dict) -> str:
         "response_format": {"type": "json_schema", "json_schema": {"name": "output", "schema": schema}},
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    async with slm_slot(), httpx.AsyncClient(timeout=SLM_TIMEOUT) as client:
+    async with slm_slot(), httpx.AsyncClient(timeout=SLM_TIMEOUTS) as client:
         response = await client.post(_chat_url(), json=payload)
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
@@ -191,7 +211,7 @@ async def _chat_stream(prompt: str) -> AsyncIterator[str]:
     }
     async with (
         slm_slot(),
-        httpx.AsyncClient(timeout=SLM_TIMEOUT) as client,
+        httpx.AsyncClient(timeout=SLM_TIMEOUTS) as client,
         client.stream("POST", _chat_url(), json=payload) as response,
     ):
         response.raise_for_status()
