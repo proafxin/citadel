@@ -11,7 +11,7 @@ from bs4.element import Tag
 from citadel.schemas.content import Block
 from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
 from citadel.services.excel import SAMPLE_TABLE_ROWS, MaterializedTable
-from citadel.tabular.infer import merge_spurious_splits, predict_pooled, structure_from_mask
+from citadel.tabular.structure import structure_grid
 
 _INT = re.compile(r"-?\d+")
 _FLOAT = re.compile(r"-?\d+\.\d+")
@@ -241,8 +241,7 @@ async def structure_html_tables(html: str) -> list[MaterializedTable]:
     grid = _grid(table) if isinstance(table, Tag) else []
     if not grid:
         return []
-    mask = await predict_pooled(grid)
-    structures = merge_spurious_splits(grid, structure_from_mask(grid, mask))
+    structures = await structure_grid(grid)
     # a structure that yields no data rows is not a table — drop it rather than storing an empty relation
     tables = [t for t in (apply_grid_structure(grid, spec) for spec in structures) if t.n_rows]
     if tables:
@@ -255,8 +254,7 @@ async def structure_csv_tables(data: bytes, separator: str) -> list[Materialized
     grid = await asyncio.to_thread(read_csv_grid, data, separator)
     if not grid:
         return []
-    mask = await predict_pooled(grid)
-    tables = [apply_grid_structure(grid, spec) for spec in structure_from_mask(grid, mask)]
+    tables = [apply_grid_structure(grid, spec) for spec in await structure_grid(grid)]
     return tables or [_grid_table(grid, 1)]
 
 

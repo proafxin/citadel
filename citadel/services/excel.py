@@ -9,7 +9,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
 from citadel.services.grid import classify_grid, grid_text
-from citadel.tabular.infer import merge_spurious_splits, predict_pooled, structure_from_mask
+from citadel.tabular.structure import structure_grid
 
 type RawCellValue = str | int | float | bool | datetime | None
 
@@ -357,7 +357,7 @@ def _render_cell(value: RawCellValue) -> str:
 def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
     # the region as a dense string grid for the header model: merged cells are filled (top-left value spans the whole
     # merge) and every typed value rendered to text, so a merged / multi-row header reads like a normal grid. offsets
-    # are region-relative (row 0 = region.min_row) to line up with structure_from_mask and apply_structure
+    # are region-relative (row 0 = region.min_row) to line up with structure_grid and apply_structure
     values = {(cell.row, cell.col): cell_value(cell) for cell in region.cells}
     for merge in sheet.merges:
         if merge.max_row < region.min_row or merge.min_row > region.max_row:
@@ -389,8 +389,7 @@ async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, Sheet
             text = " ".join([grid_text(grid), *region_comments(region)]).strip()
             items.append((ordinal, SheetText(sheet_no=sheet.sheet_no, text=text)))
             continue
-        mask = await predict_pooled(grid)
-        for structure in merge_spurious_splits(grid, structure_from_mask(grid, mask)):
+        for structure in await structure_grid(grid):
             ordinal += 1
             items.append((ordinal, apply_structure(region, structure, sheet.sheet_no)))
     return items

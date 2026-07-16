@@ -6,7 +6,9 @@ A sheet may contain one table or several stacked one below another, sometimes wi
 
 For each table report:
 
-- **header_rows** — the row number(s) whose cells NAME the columns. A header labels the columns; it is not data. A row of values — numbers or dates under those labels — is data, even when it is an important line such as a total, a subtotal, or the top figure of the table. Return an empty list if the table has no header row.
+- **header_rows** — the row number(s) whose cells NAME the columns, across the table's width. A header labels the columns; it is not data. A row of values — numbers or dates under those labels — is data, even when it is an important line such as a total, a subtotal, or the top figure of the table. Return an empty list if the table has no header row.
+
+  A row holding a single piece of text with the rest of its cells empty — a title above the table, a banner, or a section label part-way down such as "Assets" — is **not** a header row. It names the table or a group of rows, not the columns. Never list such a row in header_rows: put a title in `title` and any other such text in `notes`.
 - **col_start**, **col_end** — the first and last column index the table occupies (0-based, inclusive). Most tables span all columns shown; give a narrower span only when two tables clearly sit side by side.
 - **title** — a short name, taken from a title or section label near the table if there is one, else a brief descriptive phrase.
 - **notes** — any nearby text that is neither a column header nor data: a banner, a source line, a section label, a footnote. A list of strings; empty if none.

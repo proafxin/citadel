@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+from citadel.bus import get_redis
 from citadel.db import get_engine
 from citadel.services.ingestion import (
     CROP_BOUND,
@@ -25,7 +26,6 @@ from citadel.services.ingestion import (
     fail_document,
     fail_page,
     get_crop_budget,
-    get_redis,
     handle_merge,
     handle_normalize,
     handle_ocr,
@@ -38,13 +38,17 @@ from citadel.services.ingestion import (
     requeue_message,
     shutdown,
 )
-from citadel.tabular.infer import HEADER_WORKERS
 from config import CPU_EIGHTH, configure_logging, get_settings
 
 logger = logging.getLogger(__name__)
 
 NORMALIZE_CONCURRENCY = CPU_EIGHTH
 MERGE_CONCURRENCY = CPU_EIGHTH  # light assembly
+TABULAR_CONCURRENCY = 1  # sheets processed at once — a STAGE bound, and this stage's own: each in-flight sheet pins a
+# parsed workbook, so this is what caps that memory. it is NOT an SLM bound; the SLM has its own single global pool that
+# every request shares, whatever stage issues it, and the two answer different questions.
+# it inherited its value from the XGBoost pool that used to bound this stage. that pool is gone, so 1 is now simply what
+# has always run — not a measured optimum.
 PAGES_BUFFER = DECODE_CONCURRENCY  # rendered pages sitting UNCLAIMED in `pages`, waiting for ocr to pick them up.
 # sized to fill the decode gate in one claim: shallower and ocr takes what is there, leaves decode slots idle, and
 # waits on render to catch up — a stall the GPU pays for. it does NOT bound pages in flight (ocr claims as fast as the
@@ -394,9 +398,9 @@ async def merge() -> None:
     await _drive(STREAM_MERGE, cap, lambda mid, raw: _spawn(_merge_job(cap, mid, raw)))
 
 
-# ---- tabular: read `tables`, model header-detection + describe, write tables. bounded by the header pool -----
+# ---- tabular: read `tables`, model structure + describe, write tables ----------------------------------------
 async def tabular() -> None:
-    cap = _Capacity(HEADER_WORKERS)
+    cap = _Capacity(TABULAR_CONCURRENCY)
     await _drive(STREAM_TABLES, cap, lambda mid, raw: _spawn(_tabular_job(cap, mid, raw)))
 
 

@@ -10,6 +10,7 @@ import torch
 from sqlalchemy import case, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
@@ -17,7 +18,6 @@ from citadel.models.embedding import Embedding
 from citadel.models.library import Library
 from citadel.models.status import DocumentStatus
 from citadel.models.table import Table
-from citadel.services.ingestion import get_redis
 from config import get_embedder
 
 logger = logging.getLogger(__name__)

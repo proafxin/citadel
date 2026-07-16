@@ -1,11 +1,13 @@
-import asyncio
 import functools
 import json
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import httpx
+from redis.commands.core import AsyncScript
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
+from citadel.bus import get_redis
 from citadel.prompts import load_prompt
 from citadel.schemas.table import Column
 from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL, get_settings
@@ -37,9 +39,45 @@ def _chat_url() -> str:
     return f"{get_settings().qwen_base_url}/chat/completions"
 
 
+SLM_SLOTS = "slm:slots"  # the pool itself: one list entry per free slot
+SLM_SLOTS_READY = "slm:slots:ready"  # separate marker — an EMPTY list does not exist in redis, so the list's own
+# existence cannot say whether the pool was filled or is merely all-borrowed
+
+# fill the pool exactly once, whoever gets here first. SET NX is the guard and lua makes check-and-fill atomic, so two
+# processes starting together cannot both fill it
+_SLM_FILL_LUA = """
+if redis.call('SET', KEYS[2], '1', 'NX') then
+    for _ = 1, tonumber(ARGV[1]) do redis.call('RPUSH', KEYS[1], '1') end
+end
+return 1
+"""
+
+
 @functools.lru_cache
-def _slm_semaphore() -> asyncio.Semaphore:
-    return asyncio.Semaphore(SLM_CONCURRENCY)
+def _slm_fill() -> AsyncScript:
+    return get_redis().register_script(_SLM_FILL_LUA)
+
+
+@asynccontextmanager
+async def slm_slot() -> AsyncIterator[None]:
+    # ONE pool of slots for every SLM request in the system, held in redis because the callers are in different
+    # PROCESSES: the worker structures sheets while the app answers queries, and an asyncio.Semaphore bounds only the
+    # process it lives in. two per-process semaphores of SLM_CONCURRENCY meant twice SLM_CONCURRENCY could reach a
+    # server sized for exactly that, and the excess queues INSIDE the model, pinning its prompt in the KV cache.
+    # the SLM is a bottleneck resource, so its concurrency is decided once, globally, by what the GPU can afford.
+    #
+    # BLPOP blocks on the connection (not the loop) and hands slots out first-come-first-served, so neither process can
+    # starve the other. the slot is returned in `finally`, so a raising call frees it; only a hard kill loses one, and
+    # the run flushes redis on start.
+    redis = get_redis()
+    await _slm_fill()(keys=[SLM_SLOTS, SLM_SLOTS_READY], args=[str(SLM_CONCURRENCY)])
+    if await redis.blpop(SLM_SLOTS, timeout=SLM_TIMEOUT) is None:
+        msg = f"no SLM slot free after {SLM_TIMEOUT}s"
+        raise TimeoutError(msg)
+    try:
+        yield
+    finally:
+        await redis.lpush(SLM_SLOTS, "1")
 
 
 def _extract_json(text: str) -> str:
@@ -56,7 +94,7 @@ async def _chat(prompt: str, schema: dict) -> str:
         "response_format": {"type": "json_schema", "json_schema": {"name": "output", "schema": schema}},
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    async with _slm_semaphore(), httpx.AsyncClient(timeout=SLM_TIMEOUT) as client:
+    async with slm_slot(), httpx.AsyncClient(timeout=SLM_TIMEOUT) as client:
         response = await client.post(_chat_url(), json=payload)
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
@@ -152,7 +190,7 @@ async def _chat_stream(prompt: str) -> AsyncIterator[str]:
         "chat_template_kwargs": {"enable_thinking": False},
     }
     async with (
-        _slm_semaphore(),
+        slm_slot(),
         httpx.AsyncClient(timeout=SLM_TIMEOUT) as client,
         client.stream("POST", _chat_url(), json=payload) as response,
     ):

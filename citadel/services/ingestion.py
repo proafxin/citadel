@@ -19,19 +19,15 @@ from typing import TypeVar
 
 import cv2
 import numpy as np
-import redis.asyncio as aioredis
 from cachetools import LRUCache
 from fastapi import HTTPException, UploadFile
 from pebble import ProcessPool
 from PIL import Image
-from redis.backoff import ExponentialBackoff
 from redis.commands.core import AsyncScript
-from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import ResponseError
-from redis.exceptions import TimeoutError as RedisTimeoutError
-from redis.retry import Retry
 from sqlalchemy import select
 
+from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
 from citadel.models.document import Document
 from citadel.models.status import DocumentStatus
@@ -74,9 +70,8 @@ from citadel.services.pdf import (
 )
 from citadel.services.presentation import parse_pptx
 from citadel.services.tabular import extract_json_tables, structure_csv_tables
-from citadel.tabular.infer import release_header_pool
 from citadel.utils import normalize_file
-from config import CPU_EIGHTH, get_settings
+from config import CPU_EIGHTH
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +88,6 @@ MAX_ATTEMPTS = 3
 DOC_TTL = 86_400  # safety expiry on doc/blocks/sheets keys: set at submit, refreshed on every recorded unit, so a doc
 # that somehow never reaches merge (and so never hits cleanup) still self-evicts instead of accumulating in Redis
 # forever. far longer than any single doc's processing, so it never evicts live state; cleanup shortens it on finish.
-REDIS_MAX_CONNECTIONS = 64  # bounded blocking pool: callers queue for a connection, never open unbounded sockets
 RENDER_DPI = 150  # validated equal to 200 and ~26% faster
 PAGINATE_CONCURRENCY = CPU_EIGHTH
 RENDER_CONCURRENCY = CPU_EIGHTH
@@ -122,27 +116,6 @@ DECODE_CONCURRENCY = 16  # pages that may hold a decoded ~10MB bitmap at once �
 # OUTSIDE the gate. at a few pages a second, a 0.2s hold needs a handful of slots; 288 was sized for the old shape,
 # where a page squatted here for the whole 66s layout wait. decode_wait is 0.0s on every document, so this gate is not
 # contended and the ~2.2GB it was reserving is better spent on pages in flight, which is what feeds the model
-
-
-@lru_cache
-def get_redis() -> aioredis.Redis:
-    # bounded blocking pool: a burst queues for a free connection instead of opening unbounded sockets (which starve
-    # getaddrinfo on the shared executor → connect timeouts). socket_timeout=None so blocking XREADGROUP isn't cut off;
-    # keepalive + health check drop dead connections; retry reconnects a blip instead of crashing the pump.
-    pool = aioredis.BlockingConnectionPool.from_url(
-        get_settings().redis_url,
-        max_connections=REDIS_MAX_CONNECTIONS,
-        timeout=None,
-        socket_timeout=None,
-        socket_connect_timeout=5,
-        socket_keepalive=True,
-        health_check_interval=30,
-    )
-    return aioredis.Redis(
-        connection_pool=pool,
-        retry=Retry(ExponentialBackoff(cap=1.0, base=0.1), 3),
-        retry_on_error=[RedisConnectionError, RedisTimeoutError],
-    )
 
 
 @lru_cache
@@ -295,7 +268,6 @@ def release_idle() -> None:
         pool.stop()
         pool.join()
     get_pdfium_pool.cache_clear()
-    release_header_pool()
     gc.collect()
     ctypes.CDLL("libc.so.6").malloc_trim(0)  # glibc keeps freed pages; without this the process footprint never drops
 
@@ -647,6 +619,11 @@ async def handle_tabular(fields: dict[str, str]) -> None:
     sheet_no = int(fields["sheet_no"])
     redis = get_redis()
     await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
+    # a sheet is a unit of work exactly as a page is, and it marks itself started for the same reason: `started_count`
+    # minus `done_count` is what progress reports as ACTIVE. only the page path used to bump it, so a spreadsheet
+    # reported nothing in flight and sat at "queued" until the whole document flipped to ingested — it never showed as
+    # processing, however long its sheets took
+    await redis.hincrby(f"doc:{doc_id}", "started_count", 1)
     path = blob_path(doc_id)
     if not path.exists():
         if not await _doc_terminal(doc_id):  # source gone while the doc is still in flight → fail, don't hang
