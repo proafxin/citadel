@@ -252,33 +252,48 @@ async def _resolve_tables(blocks: list[Block]) -> tuple[dict[int, int], list[Mat
     return counts, queue
 
 
-async def structure_tables(blocks: list[Block]) -> tuple[dict[int, int], list[MaterializedTable]]:
-    # the decoupled structure stage's entry point: stitch multi-page tables, then structure every table via the SLM.
-    # runs OUTSIDE merge, so no GPU/SLM work sits on the merge barrier — merge only reads back what this produced
+@dataclass
+class _Prepared:
+    stitched: list[Block]
+    paratext: list[str]
+    drops: dict[str, int]
+
+
+async def structure_tables(blocks: list[Block]) -> tuple[_Prepared, dict[int, int], list[MaterializedTable]]:
+    # the decoupled structure stage's entry point: prepare (dedup / paratext split / reclassify / stitch) ONCE, then
+    # structure every table via the SLM. the prepared blocks travel to merge alongside the structures, so merge builds
+    # the tree without a second _prepare_blocks — the stitch runs exactly once per document, here
     prepared = _prepare_blocks(blocks)
-    return await _resolve_tables(prepared.stitched)
+    counts, queue = await _resolve_tables(prepared.stitched)
+    return prepared, counts, queue
 
 
 _TABLES_ADAPTER = TypeAdapter(list[MaterializedTable])
 
 
-def dump_structures(table_counts: dict[int, int], table_queue: list[MaterializedTable]) -> str:
-    # what the structure stage hands to merge through redis: the per-block table counts and the flat, ordered table
-    # list. keys are stringified because json objects have string keys; merge restores them to ints
+def dump_structures(prepared: _Prepared, table_counts: dict[int, int], table_queue: list[MaterializedTable]) -> str:
+    # everything the structure stage hands to merge through redis: the prepared blocks (so merge never re-stitches), the
+    # per-block table counts, and the flat ordered table list. count keys are stringified — json objects key on strings
     return json.dumps(
         {
+            "stitched": [block.model_dump() for block in prepared.stitched],
+            "paratext": prepared.paratext,
+            "drops": prepared.drops,
             "counts": {str(index): count for index, count in table_counts.items()},
             "tables": _TABLES_ADAPTER.dump_python(table_queue, mode="json"),
         }
     )
 
 
-def load_structures(raw: str | bytes | None) -> tuple[dict[int, int], list[MaterializedTable]]:
-    if raw is None:  # a doc with no table blocks (or one routed straight to merge) stored nothing
-        return {}, []
+def load_structures(raw: str | bytes | None) -> tuple[_Prepared, dict[int, int], list[MaterializedTable]]:
+    if raw is None:  # a doc with no blocks routed straight to merge (empty pdf); nothing was prepared or structured
+        return _Prepared([], [], {}), {}, []
     data = json.loads(raw)
+    prepared = _Prepared(
+        stitched=[Block(**block) for block in data["stitched"]], paratext=data["paratext"], drops=data["drops"]
+    )
     counts = {int(index): count for index, count in data["counts"].items()}
-    return counts, _TABLES_ADAPTER.validate_python(data["tables"])
+    return prepared, counts, _TABLES_ADAPTER.validate_python(data["tables"])
 
 
 def _token_count(text: str | None) -> int:
@@ -372,13 +387,6 @@ async def _insert_tables_bulk(session: AsyncSession, doc_id: int, pairs: list[tu
 DROP_REASONS = frozenset({"paratext", "empty_image", "empty_block"})
 
 
-@dataclass
-class _Prepared:
-    stitched: list[Block]
-    paratext: list[str]
-    drops: dict[str, int]
-
-
 def _drop_counts(blocks: list[Block], content: list[Block], reclassified: list[Block]) -> dict[str, int]:
     # DERIVED, not re-predicated: split_paratext now RESCUES a mis-typed paratext block into content, so re-testing
     # the type here would count a kept block as dropped. whatever it removed is either an empty image or paratext.
@@ -425,11 +433,12 @@ async def save_document_tree(
     doc_id: int,
     blocks: list[Block],
     status: DocumentStatus,
+    prepared: _Prepared,
     table_counts: dict[int, int],
     table_queue: list[MaterializedTable],
 ) -> None:
-    # the structures are precomputed by the structure stage and passed in — merge does no SLM. it re-stitches (a pure,
-    # deterministic pass over the same blocks) so the block indices line up with the table_counts it was handed
+    # the prepared blocks AND the table structures are both precomputed by the structure stage and passed in — merge
+    # does no SLM and no second stitch. `blocks` (raw) is kept only for persist_document_blocks and the blocks_in count
     async with get_sessionmaker()() as session:
         document = await session.get(Document, doc_id)
         if document is None:
@@ -437,7 +446,6 @@ async def save_document_tree(
         library = await session.get_one(Library, document.library_id)
         library_id, filename, library_name = document.library_id, document.filename, library.name
     await asyncio.to_thread(persist_document_blocks, doc_id, blocks)
-    prepared = _prepare_blocks(blocks)
     specs = list(build_tree(prepared.stitched, library_id, doc_id, table_counts))
     search_text = build_search_text(specs, library_name, filename)
     tables = iter(table_queue)

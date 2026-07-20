@@ -128,7 +128,7 @@ services:
       # another. 3 rather than 4 is what the 9B's extra weights cost us, and it costs almost nothing: the 64k window only
       # matters to SYNTHESIS, which is a single call, and the filter's batches are ~30k, so it never reaches this bound.
       - --max-num-seqs
-      - "3"
+      - "8"
       # 64k total, prompt AND completion together — that is how vLLM counts it. the model is native 256k
       # (max_position_embeddings=262144), so nothing here is rope-extended or degraded.
       - --max-model-len

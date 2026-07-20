@@ -49,7 +49,7 @@ NORMALIZE_CONCURRENCY = CPU_EIGHTH
 MERGE_CONCURRENCY = CPU_EIGHTH  # light assembly
 STRUCTURE_CONCURRENCY = CPU_EIGHTH  # documents structuring tables at once. each awaits the SLM queue (its own global
 # bound), so this only caps how many docs hold their blocks in memory here, not how many SLM calls run
-TABULAR_CONCURRENCY = 1  # sheets processed at once — a STAGE bound, and this stage's own: each in-flight sheet pins a
+TABULAR_CONCURRENCY = 3  # sheets processed at once — a STAGE bound, and this stage's own: each in-flight sheet pins a
 # parsed workbook, so this is what caps that memory. it is NOT an SLM bound; the SLM has its own single global pool that
 # every request shares, whatever stage issues it, and the two answer different questions.
 # it inherited its value from the XGBoost pool that used to bound this stage. that pool is gone, so 1 is now simply what
@@ -422,15 +422,32 @@ async def merge() -> None:
     await _drive(STREAM_MERGE, cap, lambda mid, raw: _spawn(_merge_job(cap, mid, raw)))
 
 
+_OCR_PIPELINE = (STREAM_INGEST, STREAM_NORMALIZED, STREAM_RENDER, STREAM_PAGES)
+
+
+async def _ocr_drained() -> int:
+    # PHASE GATE. the SLM stages (structure, tabular) are HELD until the entire ocr-producing pipeline is empty, so the
+    # GPU runs paddle ALONE while pages are being read and qwen ALONE while tables are being structured — the two vision
+    # models never contend for the card at once, which is what made ocr slower and paddle drop connections. an unacked
+    # entry still counts in xlen, so every one of these streams being empty means no ocr work is queued OR in flight.
+    # ocr never depends on structure/tabular, so holding them cannot deadlock. embedding is already post-ingestion, so
+    # it too gets the GPU alone. returns unbounded room once ocr is done, 0 (claim nothing, sleep) while it runs
+    redis = get_redis()
+    for stream in _OCR_PIPELINE:
+        if await redis.xlen(stream):
+            return 0
+    return CROP_BOUND
+
+
 # ---- tabular: read `tables`, model structure + describe, write tables ----------------------------------------
 async def tabular() -> None:
     cap = _Capacity(TABULAR_CONCURRENCY)
-    await _drive(STREAM_TABLES, cap, lambda mid, raw: _spawn(_tabular_job(cap, mid, raw)))
+    await _drive(STREAM_TABLES, cap, lambda mid, raw: _spawn(_tabular_job(cap, mid, raw)), _ocr_drained)
 
 
 async def structure() -> None:
     cap = _Capacity(STRUCTURE_CONCURRENCY)
-    await _drive(STREAM_STRUCTURE, cap, lambda mid, raw: _spawn(_structure_job(cap, mid, raw)))
+    await _drive(STREAM_STRUCTURE, cap, lambda mid, raw: _spawn(_structure_job(cap, mid, raw)), _ocr_drained)
 
 
 async def _main() -> None:

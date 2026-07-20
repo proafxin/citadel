@@ -1068,8 +1068,8 @@ async def handle_structure(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
     blocks = await _read_doc_blocks(doc_id)
-    table_counts, table_queue = await structure_tables(blocks)
-    await redis.set(f"structures:{doc_id}", dump_structures(table_counts, table_queue), ex=DOC_TTL)
+    prepared, table_counts, table_queue = await structure_tables(blocks)
+    await redis.set(f"structures:{doc_id}", dump_structures(prepared, table_counts, table_queue), ex=DOC_TTL)
     await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
 
 
@@ -1087,8 +1087,8 @@ async def handle_merge(fields: dict[str, str]) -> None:
     blocks = await _read_doc_blocks(doc_id)
     source = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
     state = DocumentStatus.PARTIAL if any(b.type == "error" for b in blocks) else DocumentStatus.INGESTED
-    table_counts, table_queue = load_structures(await redis.get(f"structures:{doc_id}"))
-    await save_document_tree(int(doc_id), blocks, state, table_counts, table_queue)
+    prepared, table_counts, table_queue = load_structures(await redis.get(f"structures:{doc_id}"))
+    await save_document_tree(int(doc_id), blocks, state, prepared, table_counts, table_queue)
     await persist_document_tree(int(doc_id))
     await redis.hset(f"doc:{doc_id}", mapping={"state": state, "t_done": time.time()})
     doc = await redis.hgetall(f"doc:{doc_id}")

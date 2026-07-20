@@ -26,7 +26,9 @@ from config import configure_logging, get_settings
 logger = logging.getLogger(__name__)
 
 CONSUMER = "slm"
-PROVIDER_CONCURRENCY = 3
+PROVIDER_CONCURRENCY = 8  # MUST equal qwen --max-num-seqs. table-structure calls are small (a few k
+# tokens), so the KV pool holds far more than 3 of them at once; 3 was sized for full-64k synthesis and needlessly
+# throttled the high-volume structuring calls
 MAX_ATTEMPTS = 3
 BLOCK_MS = 5000
 NO_TIMEOUT = httpx.Timeout(None)
