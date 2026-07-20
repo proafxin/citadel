@@ -37,12 +37,15 @@ from citadel.services.detect import DetBlock, detect_layout
 from citadel.services.document import (
     begin_library_ingest,
     create_documents,
+    dump_structures,
     finalize_tabular,
+    load_structures,
     mark_document,
     mark_processing,
     persist_document_tree,
     save_document_tree,
     save_sheet_tables,
+    structure_tables,
 )
 from citadel.services.excel import SheetExtraction, extract_sheet_content, load_all_sheets, sheet_names
 from citadel.services.html import parse_html
@@ -80,6 +83,7 @@ STREAM_INGEST = "ingest"
 STREAM_NORMALIZED = "normalized"
 STREAM_RENDER = "render"  # per-page render jobs: one message per PDF page, drained by the bounded render consumer
 STREAM_PAGES = "pages"
+STREAM_STRUCTURE = "structure"  # between OCR and merge: structure every table block via the SLM, off the merge barrier
 STREAM_MERGE = "merge"
 STREAM_TABLES = "tables"
 
@@ -581,8 +585,10 @@ async def requeue_message(stream: str, msg_id: str, fields: dict[bytes, bytes]) 
 
 
 async def record_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
+    # the last page fires STRUCTURE (not merge): a doc with OCR blocks may hold tables, and those are structured in the
+    # structure stage before merge ever runs. tabular sheets go straight to merge — they are already structured upstream
     await _record_unit()(
-        keys=[f"blocks:{doc_id}", f"doc:{doc_id}", STREAM_MERGE],
+        keys=[f"blocks:{doc_id}", f"doc:{doc_id}", STREAM_STRUCTURE],
         args=[str(page_idx), json.dumps([b.model_dump() for b in blocks]), doc_id, str(DOC_TTL)],
     )
 
@@ -1047,6 +1053,26 @@ def _stage_line(doc: dict[bytes, bytes]) -> str:
     return " ".join(walls)
 
 
+async def _read_doc_blocks(doc_id: str) -> list[Block]:
+    per_page = await get_redis().hgetall(f"blocks:{doc_id}")
+    blocks: list[Block] = []
+    for page_idx in sorted(int(k) for k in per_page):
+        blocks.extend(Block(**raw) for raw in json.loads(per_page[str(page_idx).encode()]))
+    return blocks
+
+
+async def handle_structure(fields: dict[str, str]) -> None:
+    # the decoupled table-structure stage: structure every table block via the SLM (concurrently), hand the result to
+    # merge through redis, then fire merge. this is the ONLY place table structuring happens for OCR-block documents —
+    # merge itself does none. re-running it (a redelivery) is a safe, idempotent no-op: it re-stores and re-fires merge
+    doc_id = fields["doc_id"]
+    redis = get_redis()
+    blocks = await _read_doc_blocks(doc_id)
+    table_counts, table_queue = await structure_tables(blocks)
+    await redis.set(f"structures:{doc_id}", dump_structures(table_counts, table_queue), ex=DOC_TTL)
+    await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
+
+
 async def handle_merge(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
@@ -1058,13 +1084,11 @@ async def handle_merge(fields: dict[str, str]) -> None:
         doc = await redis.hgetall(f"doc:{doc_id}")
         logger.info("merge doc_id=%s state=ingested tabular %s", doc_id, _stage_line(doc))
         return
-    per_page = await redis.hgetall(f"blocks:{doc_id}")
-    blocks: list[Block] = []
-    for page_idx in sorted(int(k) for k in per_page):
-        blocks.extend(Block(**raw) for raw in json.loads(per_page[str(page_idx).encode()]))
+    blocks = await _read_doc_blocks(doc_id)
     source = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
     state = DocumentStatus.PARTIAL if any(b.type == "error" for b in blocks) else DocumentStatus.INGESTED
-    await save_document_tree(int(doc_id), blocks, state)
+    table_counts, table_queue = load_structures(await redis.get(f"structures:{doc_id}"))
+    await save_document_tree(int(doc_id), blocks, state, table_counts, table_queue)
     await persist_document_tree(int(doc_id))
     await redis.hset(f"doc:{doc_id}", mapping={"state": state, "t_done": time.time()})
     doc = await redis.hgetall(f"doc:{doc_id}")
@@ -1077,7 +1101,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
 async def cleanup(doc_id: str) -> None:
     redis = get_redis()
     _SHEETS_CACHE.pop(doc_id, None)  # doc finished → drop its parsed workbook
-    await redis.delete(f"blocks:{doc_id}", f"sheets:{doc_id}")
+    await redis.delete(f"blocks:{doc_id}", f"sheets:{doc_id}", f"structures:{doc_id}")
     blob_path(doc_id).unlink(missing_ok=True)  # the doc's source file is freed the moment it finishes
     await redis.expire(f"doc:{doc_id}", 3600)  # keep final status briefly, then auto-evict — no accumulation
 

@@ -9,6 +9,7 @@ from itertools import starmap
 import zstandard
 from fastapi import HTTPException
 from fastapi.responses import Response
+from pydantic import TypeAdapter
 from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -239,14 +240,45 @@ def _reclassify_regions(blocks: list[Block]) -> list[Block]:
 
 
 async def _resolve_tables(blocks: list[Block]) -> tuple[dict[int, int], list[MaterializedTable]]:
+    # every table block is an independent grid, so they structure CONCURRENTLY — fanned out across the SLM queue rather
+    # than one blocking round-trip after another. order is preserved, so the flat queue still lines up with build_tree
+    indices = [idx for idx, block in enumerate(blocks) if block.type == "table"]
+    resolved = await asyncio.gather(*(structure_html_tables(blocks[idx].text or "") for idx in indices))
     counts: dict[int, int] = {}
     queue: list[MaterializedTable] = []
-    for idx, block in enumerate(blocks):
-        if block.type == "table":
-            tables = await structure_html_tables(block.text or "")
-            counts[idx] = len(tables)
-            queue.extend(tables)
+    for idx, tables in zip(indices, resolved, strict=True):
+        counts[idx] = len(tables)
+        queue.extend(tables)
     return counts, queue
+
+
+async def structure_tables(blocks: list[Block]) -> tuple[dict[int, int], list[MaterializedTable]]:
+    # the decoupled structure stage's entry point: stitch multi-page tables, then structure every table via the SLM.
+    # runs OUTSIDE merge, so no GPU/SLM work sits on the merge barrier — merge only reads back what this produced
+    prepared = _prepare_blocks(blocks)
+    return await _resolve_tables(prepared.stitched)
+
+
+_TABLES_ADAPTER = TypeAdapter(list[MaterializedTable])
+
+
+def dump_structures(table_counts: dict[int, int], table_queue: list[MaterializedTable]) -> str:
+    # what the structure stage hands to merge through redis: the per-block table counts and the flat, ordered table
+    # list. keys are stringified because json objects have string keys; merge restores them to ints
+    return json.dumps(
+        {
+            "counts": {str(index): count for index, count in table_counts.items()},
+            "tables": _TABLES_ADAPTER.dump_python(table_queue, mode="json"),
+        }
+    )
+
+
+def load_structures(raw: str | bytes | None) -> tuple[dict[int, int], list[MaterializedTable]]:
+    if raw is None:  # a doc with no table blocks (or one routed straight to merge) stored nothing
+        return {}, []
+    data = json.loads(raw)
+    counts = {int(index): count for index, count in data["counts"].items()}
+    return counts, _TABLES_ADAPTER.validate_python(data["tables"])
 
 
 def _token_count(text: str | None) -> int:
@@ -389,7 +421,15 @@ def _prepare_blocks(blocks: list[Block]) -> _Prepared:
     return _Prepared(stitch_tables(reclassified), paratext, drops)
 
 
-async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentStatus) -> None:
+async def save_document_tree(
+    doc_id: int,
+    blocks: list[Block],
+    status: DocumentStatus,
+    table_counts: dict[int, int],
+    table_queue: list[MaterializedTable],
+) -> None:
+    # the structures are precomputed by the structure stage and passed in — merge does no SLM. it re-stitches (a pure,
+    # deterministic pass over the same blocks) so the block indices line up with the table_counts it was handed
     async with get_sessionmaker()() as session:
         document = await session.get(Document, doc_id)
         if document is None:
@@ -398,7 +438,6 @@ async def save_document_tree(doc_id: int, blocks: list[Block], status: DocumentS
         library_id, filename, library_name = document.library_id, document.filename, library.name
     await asyncio.to_thread(persist_document_blocks, doc_id, blocks)
     prepared = _prepare_blocks(blocks)
-    table_counts, table_queue = await _resolve_tables(prepared.stitched)
     specs = list(build_tree(prepared.stitched, library_id, doc_id, table_counts))
     search_text = build_search_text(specs, library_name, filename)
     tables = iter(table_queue)

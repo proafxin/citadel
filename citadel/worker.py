@@ -20,6 +20,7 @@ from citadel.services.ingestion import (
     STREAM_NORMALIZED,
     STREAM_PAGES,
     STREAM_RENDER,
+    STREAM_STRUCTURE,
     STREAM_TABLES,
     cleanup,
     ensure_group,
@@ -31,6 +32,7 @@ from citadel.services.ingestion import (
     handle_ocr,
     handle_paginate,
     handle_render,
+    handle_structure,
     handle_tabular,
     make_profile_pool,
     reap_orphan_blobs,
@@ -45,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 NORMALIZE_CONCURRENCY = CPU_EIGHTH
 MERGE_CONCURRENCY = CPU_EIGHTH  # light assembly
+STRUCTURE_CONCURRENCY = CPU_EIGHTH  # documents structuring tables at once. each awaits the SLM queue (its own global
+# bound), so this only caps how many docs hold their blocks in memory here, not how many SLM calls run
 TABULAR_CONCURRENCY = 1  # sheets processed at once — a STAGE bound, and this stage's own: each in-flight sheet pins a
 # parsed workbook, so this is what caps that memory. it is NOT an SLM bound; the SLM has its own single global pool that
 # every request shares, whatever stage issues it, and the two answer different questions.
@@ -288,6 +292,7 @@ DRAINED_STREAMS = (
     STREAM_NORMALIZED,
     STREAM_RENDER,
     STREAM_PAGES,
+    STREAM_STRUCTURE,
     STREAM_MERGE,
     STREAM_TABLES,
 )
@@ -322,6 +327,24 @@ async def _merge_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> No
         await _settle(stream, msg_id)
         await cleanup(fields["doc_id"])  # only after the merge message is acked → safe to delete blocks
         await _release_if_drained()
+    finally:
+        cap.release()
+
+
+async def _structure_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+    stream = STREAM_STRUCTURE
+    try:
+        fields = await _decode_or_settle(stream, msg_id, raw)
+        if fields is None:
+            return
+        work = asyncio.create_task(handle_structure(fields))
+        await asyncio.wait({work})
+        error = work.exception()
+        if error is None:
+            await _settle(stream, msg_id)  # merge was fired inside the handler; acking here just retires the job
+            return
+        logger.error("structure failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(error))
+        await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "structure"))
     finally:
         cap.release()
 
@@ -405,13 +428,18 @@ async def tabular() -> None:
     await _drive(STREAM_TABLES, cap, lambda mid, raw: _spawn(_tabular_job(cap, mid, raw)))
 
 
+async def structure() -> None:
+    cap = _Capacity(STRUCTURE_CONCURRENCY)
+    await _drive(STREAM_STRUCTURE, cap, lambda mid, raw: _spawn(_structure_job(cap, mid, raw)))
+
+
 async def _main() -> None:
     await reap_orphan_blobs()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    stages = (normalize, paginate, render, ocr, merge, tabular)
+    stages = (normalize, paginate, render, ocr, structure, merge, tabular)
     consumers = [asyncio.create_task(stage()) for stage in stages]
     consumers.append(asyncio.create_task(read_replies()))
     stop_task = asyncio.create_task(stop.wait())
