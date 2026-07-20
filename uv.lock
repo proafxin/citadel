@@ -407,7 +407,7 @@ wheels = [
 
 [[package]]
 name = "citadel"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -421,6 +421,7 @@ dependencies = [
     { name = "lxml" },
     { name = "markdown-it-py" },
     { name = "mdit-py-plugins" },
+    { name = "nvidia-nccl-cu13" },
     { name = "opencv-python" },
     { name = "openpyxl" },
     { name = "paddleocr" },
@@ -464,6 +465,7 @@ requires-dist = [
     { name = "lxml", specifier = ">=6.1.1" },
     { name = "markdown-it-py", specifier = ">=4.2.0" },
     { name = "mdit-py-plugins", specifier = ">=0.6.1" },
+    { name = "nvidia-nccl-cu13", specifier = ">=2.30.7" },
     { name = "opencv-python", specifier = ">=5.0.0.93" },
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "paddleocr", specifier = ">=3.7.0" },
