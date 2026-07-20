@@ -48,12 +48,11 @@ async def _emit(reply_to: str, job_id: str, kind: str, value: str) -> None:
     await redis.xtrim(reply_to, maxlen=REPLY_MAXLEN, approximate=True)
 
 
-async def _call_provider(payload: dict, reply_to: str, job_id: str) -> None:
-    url = f"{get_settings().qwen_base_url}/chat/completions"
-    async with (
-        httpx.AsyncClient(timeout=NO_TIMEOUT) as client,
-        client.stream("POST", url, json={**payload, "stream": True}) as response,
-    ):
+async def _stream_call(client: httpx.AsyncClient, url: str, payload: dict, reply_to: str, job_id: str) -> None:
+    async with client.stream("POST", url, json=payload) as response:
+        if response.is_error:
+            body = await response.aread()
+            logger.error("provider %d job=%s body=%s", response.status_code, job_id, body.decode()[:2000])
         response.raise_for_status()
         async for line in response.aiter_lines():
             if not line.startswith("data: "):
@@ -64,6 +63,23 @@ async def _call_provider(payload: dict, reply_to: str, job_id: str) -> None:
             delta = json.loads(data)["choices"][0]["delta"].get("content")
             if delta:
                 await _emit(reply_to, job_id, CHUNK, delta)
+
+
+async def _blocking_call(client: httpx.AsyncClient, url: str, payload: dict, reply_to: str, job_id: str) -> None:
+    response = await client.post(url, json=payload)
+    if response.is_error:
+        logger.error("provider %d job=%s body=%s", response.status_code, job_id, response.text[:2000])
+    response.raise_for_status()
+    await _emit(reply_to, job_id, CHUNK, response.json()["choices"][0]["message"]["content"])
+
+
+async def _call_provider(payload: dict, reply_to: str, job_id: str) -> None:
+    url = f"{get_settings().qwen_base_url}/chat/completions"
+    async with httpx.AsyncClient(timeout=NO_TIMEOUT) as client:
+        if payload.get("stream"):
+            await _stream_call(client, url, payload, reply_to, job_id)
+        else:
+            await _blocking_call(client, url, payload, reply_to, job_id)
 
 
 async def _settle(stream: str, msg_id: str) -> None:
@@ -107,6 +123,14 @@ async def _run_job(semaphore: asyncio.Semaphore, stream: str, msg_id: str, raw: 
     async with semaphore:
         try:
             await _call_provider(json.loads(raw[b"payload"].decode()), reply_to, job_id)
+        except httpx.HTTPStatusError as error:
+            logger.exception("slm job failed job=%s attempt=%d", job_id, attempt)
+            if error.response.is_client_error:
+                await _emit(reply_to, job_id, FAILED, f"provider rejected the request: {error.response.status_code}")
+                await _settle(stream, msg_id)
+            else:
+                await _fail(stream, msg_id, raw, attempt)
+            return
         except (httpx.HTTPError, json.JSONDecodeError, KeyError):
             logger.exception("slm job failed job=%s attempt=%d", job_id, attempt)
             await _fail(stream, msg_id, raw, attempt)
