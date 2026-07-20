@@ -4,27 +4,30 @@ import json
 import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from itertools import starmap
 
 import zstandard
 from fastapi import HTTPException
 from fastapi.responses import Response
 from pydantic import TypeAdapter
-from sqlalchemy import func, insert, select, text, update
+from sqlalchemy import func, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
-from citadel.llm import describe_table
 from citadel.models.content import Code, ContentNode, Equation, ListBlock, Paragraph
 from citadel.models.document import Document
 from citadel.models.library import Library
 from citadel.models.status import DocumentStatus, LibraryStatus
 from citadel.models.table import Table, TableRow
 from citadel.schemas.content import Block
-from citadel.schemas.table import Column
 from citadel.services.excel import MaterializedTable, SheetItem, SheetText
 from citadel.services.grid import classify_grid
-from citadel.services.tabular import grid_from_html, html_to_text, stitch_tables, structure_html_tables
+from citadel.services.tabular import (
+    ensure_described,
+    grid_from_html,
+    html_to_text,
+    stitch_tables,
+    structure_html_tables,
+)
 from citadel.services.tree import (
     EMPTY_IMAGE_TYPES,
     NodeSpec,
@@ -154,55 +157,6 @@ async def mark_library_ready(library_id: int) -> None:
         library.ready_at = datetime.now(UTC)
 
 
-async def _describe_one(
-    content_id: str,
-    columns: list[dict],
-    sample_rows: list[list],
-    metadata: dict,
-    filename: str,
-    search_text: str | None,
-) -> tuple[str, str, str]:
-    description = await describe_table(
-        [Column(**column) for column in columns],
-        sample_rows,
-        metadata.get("sheet") or filename,
-        metadata.get("formulas"),
-    )
-    combined = "\n".join(part for part in [search_text or "", description.strip()] if part)
-    return content_id, description, combined
-
-
-async def describe_library_tables(library_id: int) -> int:
-    async with get_sessionmaker()() as session:
-        rows = list(
-            await session.execute(
-                select(
-                    Table.content_id,
-                    Table.columns,
-                    Table.sample_rows,
-                    Table.table_metadata,
-                    Document.filename,
-                    ContentNode.search_text,
-                )
-                .join(Document, Table.document_id == Document.id)
-                .join(ContentNode, ContentNode.content_id == Table.content_id)
-                .where(Document.library_id == library_id, Table.description == "")
-            )
-        )
-    if not rows:
-        return 0
-    described = await asyncio.gather(*starmap(_describe_one, rows))
-    async with get_sessionmaker()() as session, session.begin():
-        for content_id, description, combined in described:
-            await session.execute(update(Table).where(Table.content_id == content_id).values(description=description))
-            await session.execute(
-                update(ContentNode)
-                .where(ContentNode.content_id == content_id)
-                .values(search_text=combined, token_count=_token_count(combined))
-            )
-    return len(described)
-
-
 def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:
     match spec.kind:
         case "code":
@@ -239,9 +193,10 @@ def _reclassify_regions(blocks: list[Block]) -> list[Block]:
     return kept
 
 
-async def _resolve_tables(blocks: list[Block]) -> tuple[dict[int, int], list[MaterializedTable]]:
+async def _resolve_tables(blocks: list[Block], context: str) -> tuple[dict[int, int], list[MaterializedTable]]:
     # every table block is an independent grid, so they structure CONCURRENTLY — fanned out across the SLM queue rather
-    # than one blocking round-trip after another. order is preserved, so the flat queue still lines up with build_tree
+    # than one blocking round-trip after another. order is preserved, so the flat queue still lines up with build_tree.
+    # a fallback-extracted table carries no description, so ensure_described fills it before it leaves the stage
     indices = [idx for idx, block in enumerate(blocks) if block.type == "table"]
     resolved = await asyncio.gather(*(structure_html_tables(blocks[idx].text or "") for idx in indices))
     counts: dict[int, int] = {}
@@ -249,6 +204,7 @@ async def _resolve_tables(blocks: list[Block]) -> tuple[dict[int, int], list[Mat
     for idx, tables in zip(indices, resolved, strict=True):
         counts[idx] = len(tables)
         queue.extend(tables)
+    await ensure_described(queue, context)
     return counts, queue
 
 
@@ -259,12 +215,14 @@ class _Prepared:
     drops: dict[str, int]
 
 
-async def structure_tables(blocks: list[Block]) -> tuple[_Prepared, dict[int, int], list[MaterializedTable]]:
+async def structure_tables(
+    blocks: list[Block], context: str
+) -> tuple[_Prepared, dict[int, int], list[MaterializedTable]]:
     # the decoupled structure stage's entry point: prepare (dedup / paratext split / reclassify / stitch) ONCE, then
     # structure every table via the SLM. the prepared blocks travel to merge alongside the structures, so merge builds
     # the tree without a second _prepare_blocks — the stitch runs exactly once per document, here
     prepared = _prepare_blocks(blocks)
-    counts, queue = await _resolve_tables(prepared.stitched)
+    counts, queue = await _resolve_tables(prepared.stitched, context)
     return prepared, counts, queue
 
 

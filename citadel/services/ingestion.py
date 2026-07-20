@@ -47,7 +47,13 @@ from citadel.services.document import (
     save_sheet_tables,
     structure_tables,
 )
-from citadel.services.excel import SheetExtraction, extract_sheet_content, load_all_sheets, sheet_names
+from citadel.services.excel import (
+    MaterializedTable,
+    SheetExtraction,
+    extract_sheet_content,
+    load_all_sheets,
+    sheet_names,
+)
 from citadel.services.html import parse_html
 from citadel.services.library import library_exists
 from citadel.services.paddle import (
@@ -72,7 +78,7 @@ from citadel.services.pdf import (
     uncovered_layer_runs,
 )
 from citadel.services.presentation import parse_pptx
-from citadel.services.tabular import extract_json_tables, structure_csv_tables
+from citadel.services.tabular import ensure_described, extract_json_tables, structure_csv_tables
 from citadel.utils import normalize_file
 from config import CPU_EIGHTH
 
@@ -649,6 +655,7 @@ async def handle_tabular(fields: dict[str, str]) -> None:
             separator = "\t" if kind == "tsv" else ","
             items = list(enumerate(await structure_csv_tables(data, separator), start=1))
         sheet_name = filename
+    await ensure_described([item for _, item in items if isinstance(item, MaterializedTable)], sheet_name)
     await save_sheet_tables(int(doc_id), sheet_no, sheet_name, items)
     await record_sheet(doc_id, sheet_no)
 
@@ -1068,7 +1075,8 @@ async def handle_structure(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
     blocks = await _read_doc_blocks(doc_id)
-    prepared, table_counts, table_queue = await structure_tables(blocks)
+    filename = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
+    prepared, table_counts, table_queue = await structure_tables(blocks, filename)
     await redis.set(f"structures:{doc_id}", dump_structures(prepared, table_counts, table_queue), ex=DOC_TTL)
     await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
 

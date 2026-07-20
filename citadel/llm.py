@@ -82,6 +82,8 @@ _DESCRIPTION_SCHEMA = {
 async def describe_table(
     columns: list[Column], sample_rows: list[list], context: str, formulas: list[str] | None = None
 ) -> str:
+    # description-only: for tables whose structure we ALREADY have (a json entity, a clean <table>), so we skip
+    # structure inference and ask only for the summary. same table stage, same phase — just the half of the work needed
     header = " | ".join(column.header or f"col{index}" for index, column in enumerate(columns))
     rows = "\n".join(" | ".join("" if value is None else str(value) for value in row) for row in sample_rows)
     prompt = f"{load_prompt('table_description')}\nsource: {context}\ncolumns: {header}\nsample rows:\n{rows}"

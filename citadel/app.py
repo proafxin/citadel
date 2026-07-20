@@ -13,7 +13,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from citadel.db import get_engine
 from citadel.router import router
 from citadel.services.document import (
-    describe_library_tables,
     mark_described,
     mark_embed_started,
     mark_finalize_started,
@@ -36,24 +35,14 @@ async def _finalize(library_id: int, tag: str) -> None:
     logger.info("finalizing library=%d", library_id)
     try:
         await mark_finalize_started(library_id)
-        t = time.time()
-        described = await describe_library_tables(library_id)
-        describe_s = time.time() - t
-        await mark_described(library_id)
+        await mark_described(library_id)  # descriptions are produced inline during structure now; this is an instant
+        # status transition kept so the finalize phases (and the UI reading them) are unchanged
         await mark_embed_started(library_id)
         t = time.time()
         embedded = await embed_library(library_id)
         embed_s = time.time() - t
         await mark_library_ready(library_id)
-        logger.info(
-            "%s library=%d tables=%d describe=%.1fs nodes=%d embed=%.1fs",
-            tag,
-            library_id,
-            described,
-            describe_s,
-            embedded,
-            embed_s,
-        )
+        logger.info("%s library=%d nodes=%d embed=%.1fs", tag, library_id, embedded, embed_s)
     finally:
         _finalizing.discard(library_id)
 

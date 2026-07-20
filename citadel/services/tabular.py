@@ -8,10 +8,27 @@ import polars as pl
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
+from citadel.llm import describe_table
 from citadel.schemas.content import Block
 from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
 from citadel.services.excel import SAMPLE_TABLE_ROWS, MaterializedTable
 from citadel.tabular.structure import structure_grid
+
+
+async def ensure_described(tables: list[MaterializedTable], context: str) -> None:
+    # the uniform description step. structure_sheet already describes any table it structured; a table that reaches here
+    # WITHOUT a description had its structure directly (a json entity, a clean <table>), so it skipped structure_sheet.
+    # those get a description-only SLM call — the same table phase, just the half of the work they need. every table
+    # leaves the stage described, whatever its source
+    missing = [table for table in tables if not table.description]
+    if not missing:
+        return
+    described = await asyncio.gather(
+        *(describe_table(table.columns, table.sample_rows, context, table.formulas) for table in missing)
+    )
+    for table, description in zip(missing, described, strict=True):
+        table.description = description
+
 
 _INT = re.compile(r"-?\d+")
 _FLOAT = re.compile(r"-?\d+\.\d+")
