@@ -54,6 +54,7 @@ pids=()
 uv run fastapi run citadel/app.py & pids+=("$!")
 (cd ui && bun run dev) & pids+=("$!")
 uv run python citadel/worker.py & pids+=("$!")
+uv run python citadel/slm.py & pids+=("$!")
 
 cleanup() {
     trap - INT TERM EXIT

@@ -35,10 +35,10 @@ STATEMENT_TIMEOUT_MS = 3000
 
 # the two stages want opposite things from the window, so they no longer share a budget.
 #
-# FILTER runs BATCHED and CONCURRENT — SLM_CONCURRENCY of them at once — and every request in flight pins its whole
-# prompt in the KV cache. a bigger batch buys nothing here: the same candidates get read either way, so the total
-# prefill is identical whether they arrive in ten calls or thirty. all a bigger batch does is trade concurrency for
-# fewer round trips. so this stage stays small on purpose, and its ceiling is what keeps the cache from thrashing.
+# FILTER_BUDGET caps how many candidates go into ONE filter call. the same candidates are read whichever way they split,
+# so total prefill is identical — batch size only trades round-trips against a longer single prompt. it is NOT a KV
+# concern: a request waiting for its turn allocates no cache (vLLM's scheduler reserves blocks only when it admits a
+# request to the running set, so a queued one holds just its token ids), so there is no thrash to size against.
 FILTER_CTX = 32768
 FILTER_BUDGET = FILTER_CTX - STRUCT_MAX_TOKENS - 2048
 
@@ -360,12 +360,11 @@ async def answer(question: str, library_id: int) -> AsyncIterator[str]:
     hits = await retrieve(queries, library_id)
     passages = await load_passages(hits.text)
     candidates = await load_tables(hits.tables)
-    kept_passages = [
-        replace(passages[index], score=score)
-        for index, score in await _filter(question, [passage.text for passage in passages])
-    ]
-    table_scores = await _filter(question, [_table_rep(table) for table in candidates])
-    kept_tables = [candidates[index] for index, _ in table_scores]
+    async with asyncio.TaskGroup() as group:
+        passage_filter = group.create_task(_filter(question, [passage.text for passage in passages]))
+        table_filter = group.create_task(_filter(question, [_table_rep(table) for table in candidates]))
+    kept_passages = [replace(passages[index], score=score) for index, score in passage_filter.result()]
+    kept_tables = [candidates[index] for index, _ in table_filter.result()]
     results = await _aggregate(question, kept_tables)
     logger.info(
         "query %r variants=%d text_hits=%d table_hits=%d kept_passages=%d kept_tables=%d results=%d",

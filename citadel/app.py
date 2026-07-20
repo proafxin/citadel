@@ -21,6 +21,7 @@ from citadel.services.document import (
 )
 from citadel.services.ingestion import shutdown as shutdown_resources
 from citadel.services.retrieval import embed_library, pending_libraries
+from citadel.services.slm import read_replies
 from config import configure_logging, get_embedder, get_settings
 
 logger = logging.getLogger(__name__)
@@ -114,7 +115,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     await asyncio.to_thread(get_embedder)
     queue: asyncio.Queue[int] = asyncio.Queue()
-    tasks = [asyncio.create_task(finalize_libraries(queue)), asyncio.create_task(_listen(queue))]
+    tasks = [
+        asyncio.create_task(finalize_libraries(queue)),
+        asyncio.create_task(_listen(queue)),
+        asyncio.create_task(read_replies()),
+    ]
     for task in tasks:
         task.add_done_callback(_fatal_on_worker_death)
     yield
