@@ -130,16 +130,21 @@ def resize_for_vlm(crop: Image.Image) -> Image.Image:
 _OTSL_TOKEN = re.compile(r"<(fcel|ecel|lcel|ucel|xcel|nl|ched|rhed|srow)>")
 
 
-def otsl_to_grid(otsl: str) -> list[list[str]]:
-    grid: list[list[str]] = []
+def otsl_rows(otsl: str) -> list[tuple[list[str], bool]]:
+    # each row with the model's own verdict on whether it is a COLUMN HEADER. <ched> is that verdict and it is the
+    # header signal we no longer have to infer: it travels out as <th> so nothing downstream has to guess. <rhed> marks
+    # a row-label cell and <srow> a section row — neither makes the row a column header, so neither sets the flag
+    rows: list[tuple[list[str], bool]] = []
     row: list[str] = []
+    header = False
     parts = _OTSL_TOKEN.split(otsl)
-    for token, content in itertools.zip_longest(parts[1::2], parts[2::2], fillvalue=""):
+    for marker, content in itertools.zip_longest(parts[1::2], parts[2::2], fillvalue=""):
         text = str(content).strip()
-        match token:
+        match marker:
             case "nl":
-                grid.append(row)
+                rows.append((row, header))
                 row = []
+                header = False
             case "fcel":
                 row.append(text)
             case "ecel":
@@ -147,26 +152,35 @@ def otsl_to_grid(otsl: str) -> list[list[str]]:
             case "lcel":  # spans expanded, never left blank: a flattened span repeats its value in every cell it covers
                 row.append(row[-1] if row else "")
             case "ucel" | "xcel":
-                above = grid[-1] if grid else []
+                above = rows[-1][0] if rows else []
                 row.append(above[len(row)] if len(row) < len(above) else "")
-            case _:  # ched/rhed/srow mark header rows; the header detector decides that itself, from the grid
+            case _:
+                header = header or marker == "ched"
                 if text:
                     row.append(text)
     if row:
-        grid.append(row)
-    return [r for r in grid if any(cell for cell in r)]
+        rows.append((row, header))
+    return [(cells, flag) for cells, flag in rows if any(cell for cell in cells)]
+
+
+def otsl_to_grid(otsl: str) -> list[list[str]]:
+    return [cells for cells, _ in otsl_rows(otsl)]
+
+
+def _row_html(cells: list[str], width: int, tag: str) -> str:
+    body = "".join(f"<{tag}>{html.escape(cells[i]) if i < len(cells) else ''}</{tag}>" for i in range(width))
+    return f"<tr>{body}</tr>"
 
 
 def otsl_to_html(otsl: str) -> str:
-    grid = otsl_to_grid(otsl)
-    if not grid:
+    # rows stay in source order and a header row is emitted as <th> IN PLACE — never hoisted into a <thead>, which
+    # would reorder a table whose header sits mid-grid. the leading run of all-<th> rows is what the header count reads
+    rows = otsl_rows(otsl)
+    if not rows:
         return ""
-    width = max(len(r) for r in grid)
-    rows = "".join(
-        "<tr>" + "".join(f"<td>{html.escape(r[i]) if i < len(r) else ''}</td>" for i in range(width)) + "</tr>"
-        for r in grid
-    )
-    return f"<table>{rows}</table>"
+    width = max(len(cells) for cells, _ in rows)
+    body = "".join(_row_html(cells, width, "th" if flag else "td") for cells, flag in rows)
+    return f"<table>{body}</table>"
 
 
 # ---- the recognition model, served by vLLM ------------------------------------------------------------

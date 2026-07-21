@@ -201,7 +201,7 @@ def table_block_indices(blocks: list[Block]) -> list[int]:
 async def structure_table_block(block: Block, context: str) -> list[MaterializedTable]:
     # ONE table block = ONE job. the stage claims it off the stream like any other unit, so table structuring is bounded
     # by the stream's capacity and the slm queue, not by a fan-out hidden inside a single claimed job
-    tables = await structure_html_tables(block.text or "")
+    tables = structure_html_tables(block.text or "")
     await ensure_described(tables, context)
     return tables
 

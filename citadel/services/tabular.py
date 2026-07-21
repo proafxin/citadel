@@ -8,16 +8,16 @@ from bs4.element import Tag
 
 from citadel.llm import describe_table
 from citadel.schemas.content import Block
-from citadel.schemas.table import CellValue
+from citadel.schemas.table import CellValue, TableStructure
 from citadel.tabular.materialize import MaterializedTable, materialize
-from citadel.tabular.structure import SKIP_TABLE_SLM, structure_grid
+from citadel.tabular.structure import SKIP_TABLE_SLM
 
 
 async def ensure_described(tables: list[MaterializedTable], context: str) -> None:
-    # the uniform description step. structure_sheet already describes any table it structured; a table that reaches here
-    # WITHOUT a description had its structure directly (a json entity, a clean <table>), so it skipped structure_sheet.
-    # those get a description-only SLM call — the same table phase, just the half of the work they need. every table
-    # leaves the stage described, whatever its source
+    # the uniform description step, and for everything except a spreadsheet region it is the ONLY thing a model is asked
+    # for: a csv, a json entity and an html/pdf <table> all carry their own schema, so their structure is derived, not
+    # inferred. a spreadsheet region arrives already described by the call that structured it. every table leaves the
+    # stage described, whatever its source
     if SKIP_TABLE_SLM:  # measurement run: no description calls either
         return
     missing = [table for table in tables if not table.description]
@@ -31,12 +31,17 @@ async def ensure_described(tables: list[MaterializedTable], context: str) -> Non
 
 
 def read_csv_grid(data: bytes, separator: str) -> list[list[str]]:
-    # the verbatim cell grid with NO header assumption (has_header=False) — the model decides which rows are headers.
-    # every column Utf8 (infer_schema_length=0) so cells stay exact; ragged lines are padded, blanks become ""
+    # polars does the parsing — quoting, embedded newlines, ragged lines — and with has_header=True it also SKIPS any
+    # leading blank lines and names the columns from the first non-empty row. has_header=False cannot: it takes the
+    # column count from the literal first line, so one leading blank line collapses the file to a single column and
+    # truncate_ragged_lines then discards the rest of every row. the names come back as the grid's row 0, so the header
+    # is data like any other cell. every column stays Utf8 (infer_schema_length=0) so values are exact — dtypes are
+    # derived downstream by lossless round-trip, never by polars inference, and "007" stays the string "007"
     frame = pl.read_csv(
-        BytesIO(data), separator=separator, has_header=False, infer_schema_length=0, truncate_ragged_lines=True
+        BytesIO(data), separator=separator, has_header=True, infer_schema_length=0, truncate_ragged_lines=True
     )
-    return [["" if value is None else str(value) for value in row] for row in frame.iter_rows()]
+    rows = [["" if value is None else str(value) for value in row] for row in frame.iter_rows()]
+    return [list(frame.columns), *rows]
 
 
 def _table_rows(table: Tag) -> list[Tag]:
@@ -101,21 +106,40 @@ def grid_from_html(html: str) -> list[list[str]]:
     return _grid(table) if isinstance(table, Tag) else []
 
 
-async def structure_html_tables(html: str) -> list[MaterializedTable]:
+def single_table_structure(grid: list[list[str]], header_rows: int) -> TableStructure:
+    # the whole grid IS the table: one schema, its header on top. no model decides this — it is the definition of the
+    # format. only a raw spreadsheet cell grid, where tables can start anywhere and there may be several, is ambiguous
+    # enough to need the model
+    return TableStructure(
+        col_start=0,
+        col_end=max(len(row) for row in grid) - 1,
+        header_rows=list(range(header_rows)),
+        data_start=header_rows,
+        data_end=len(grid) - 1,
+    )
+
+
+def structure_html_tables(html: str) -> list[MaterializedTable]:
+    # a <table> is ONE table with its header already marked — by <thead>/<th> when the source is docx/html/pptx, and by
+    # paddle's own <ched> verdict when it came out of a pdf. nothing here is inferred, so no model is asked
     table = BeautifulSoup(html, "lxml").find("table")
-    grid = _grid(table) if isinstance(table, Tag) else []
+    if not isinstance(table, Tag):
+        return []
+    grid = _grid(table)
     if not grid:
         return []
-    structures = await structure_grid(grid)
+    structured = materialize(grid, single_table_structure(grid, _header_count(table)))
     # a structure that yields no data rows is not a table — drop it rather than storing an empty relation
-    return [t for t in (materialize(grid, spec) for spec in structures) if t.n_rows]
+    return [structured] if structured.n_rows else []
 
 
 async def structure_csv_tables(data: bytes, separator: str) -> list[MaterializedTable]:
+    # a csv/tsv carries ONE schema by construction: polars parses it (quoting, embedded newlines, ragged lines) and the
+    # first row names the columns. no structure call — the description is the only thing the model is asked for
     grid = await asyncio.to_thread(read_csv_grid, data, separator)
     if not grid:
         return []
-    return [materialize(grid, spec) for spec in await structure_grid(grid)]
+    return [materialize(grid, single_table_structure(grid, 1))]
 
 
 def _next(counters: dict[str, int], entity: str) -> int:
@@ -173,15 +197,16 @@ def _entity_grid(rows: list[dict]) -> list[list[str]]:
     return [keys, *body]
 
 
-async def extract_json_tables(data: bytes, root: str) -> list[tuple[int, MaterializedTable]]:
+def extract_json_tables(data: bytes, root: str) -> list[tuple[int, MaterializedTable]]:
+    # normalized into relations first (nested objects flattened, nested lists become child entities with a foreign key),
+    # so every entity is one table whose keys ARE its schema — deterministic, no structure call
     entities = normalize_json(json.loads(data), root)
     out: list[tuple[int, MaterializedTable]] = []
     for name, rows in entities.items():
         grid = _entity_grid(rows)
-        for structure in await structure_grid(grid):
-            table = materialize(grid, structure, extra_notes=[name])
-            if table.n_rows:
-                out.append((len(out) + 1, table))
+        table = materialize(grid, single_table_structure(grid, 1), extra_notes=[name])
+        if table.n_rows:
+            out.append((len(out) + 1, table))
     return out
 
 
