@@ -5,6 +5,7 @@ import logging
 import math
 import re
 from base64 import b64encode
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 import httpx
@@ -112,14 +113,72 @@ def is_readable(block: DetBlock) -> bool:
     return block.label not in PICTURE_LABELS and block.label != "inline_formula"
 
 
+# MEASUREMENT. prefill cost is proportional to the pixels we SEND, so the question the floor poses is: what share of
+# sent pixels exists only because of the floor? that share is the ceiling on what lowering it could return. bucketed
+# against the floor so the answer also says WHERE a new floor would sit — a bucket at 1/2 stops being upscaled the
+# moment the floor halves. counters only; no per-crop logging, which would be 21k lines a run
+_SIZE_BUCKETS = (0.125, 0.25, 0.5, 1.0)
+
+
+@dataclass
+class _CropSizes:
+    count: int = 0
+    floor_bound: int = 0
+    source_pixels: int = 0
+    sent_pixels: int = 0
+    floor_added: int = 0  # pixels the FLOOR invented, counted only on crops it upscaled. never netted against the
+    # ceiling's downscaling of huge crops, which is a different knob and would silently cancel this one out
+    buckets: list[int] = field(default_factory=lambda: [0] * (len(_SIZE_BUCKETS) + 1))
+
+
+@lru_cache
+def get_crop_sizes() -> _CropSizes:
+    return _CropSizes()
+
+
+def _record_crop_size(source: int, sent: int) -> None:
+    sizes = get_crop_sizes()
+    sizes.count += 1
+    sizes.source_pixels += source
+    sizes.sent_pixels += sent
+    if source < MIN_PIXELS:
+        sizes.floor_bound += 1
+        sizes.floor_added += sent - source
+    ratio = source / MIN_PIXELS
+    index = next((i for i, edge in enumerate(_SIZE_BUCKETS) if ratio < edge), len(_SIZE_BUCKETS))
+    sizes.buckets[index] += 1
+
+
+def log_crop_sizes() -> None:
+    sizes = get_crop_sizes()
+    if not sizes.count:
+        return
+    edges = ["<1/8", "1/8-1/4", "1/4-1/2", "1/2-1", ">=1"]
+    spread = " ".join(f"{name}={value}" for name, value in zip(edges, sizes.buckets, strict=True))
+    logger.info(
+        "crop sizes n=%d floor_bound=%.1f%% sent_px=%.1fM source_px=%.1fM floor_padding=%.1f%% of sent | %s",
+        sizes.count,
+        100 * sizes.floor_bound / sizes.count,
+        sizes.sent_pixels / 1e6,
+        sizes.source_pixels / 1e6,
+        100 * sizes.floor_added / sizes.sent_pixels if sizes.sent_pixels else 0.0,
+        spread,
+    )
+    get_crop_sizes.cache_clear()  # per-RUN figures: without this a second ingestion in the same worker reports the
+    # sum of both and every comparison silently reads the wrong denominator
+
+
 def resize_for_vlm(crop: Image.Image) -> Image.Image:
     pixels = crop.width * crop.height
     if pixels == 0 or MIN_PIXELS <= pixels <= MAX_PIXELS:
+        _record_crop_size(pixels, pixels)
         return crop
     scale = math.sqrt((MIN_PIXELS if pixels < MIN_PIXELS else MAX_PIXELS) / pixels)
-    return crop.resize(
+    resized = crop.resize(
         (max(1, round(crop.width * scale)), max(1, round(crop.height * scale))), Image.Resampling.LANCZOS
     )
+    _record_crop_size(pixels, resized.width * resized.height)
+    return resized
 
 
 # ---- OTSL → HTML -------------------------------------------------------------------------------------

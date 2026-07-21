@@ -41,6 +41,7 @@ from citadel.services.ingestion import (
     requeue_message,
     shutdown,
 )
+from citadel.services.paddle import log_crop_sizes
 from citadel.services.slm import read_replies
 from config import CPU_EIGHTH, configure_logging, get_settings
 
@@ -307,6 +308,7 @@ async def _release_if_drained() -> None:
         if await redis.xlen(stream):
             return
     await asyncio.to_thread(release_idle)
+    log_crop_sizes()
     logger.info("pipeline drained → released process pools")
 
 
