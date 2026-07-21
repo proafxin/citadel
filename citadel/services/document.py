@@ -194,20 +194,16 @@ def _reclassify_regions(blocks: list[Block]) -> list[Block]:
     return kept
 
 
-async def resolve_document_tables(blocks: list[Block], context: str) -> tuple[dict[int, int], list[MaterializedTable]]:
-    # the SLM half of the table path, run in the GATED table_structure stage AFTER ocr so qwen never shares the GPU with
-    # paddle. every table block is an independent grid, so they structure CONCURRENTLY — fanned out across the SLM queue
-    # rather than one blocking round-trip after another. order is preserved, so the flat queue lines up with build_tree.
-    # a fallback-extracted table carries no description, so ensure_described fills it before it leaves the stage
-    indices = [idx for idx, block in enumerate(blocks) if block.type == "table"]
-    resolved = await asyncio.gather(*(structure_html_tables(blocks[idx].text or "") for idx in indices))
-    counts: dict[int, int] = {}
-    queue: list[MaterializedTable] = []
-    for idx, tables in zip(indices, resolved, strict=True):
-        counts[idx] = len(tables)
-        queue.extend(tables)
-    await ensure_described(queue, context)
-    return counts, queue
+def table_block_indices(blocks: list[Block]) -> list[int]:
+    return [index for index, block in enumerate(blocks) if block.type == "table"]
+
+
+async def structure_table_block(block: Block, context: str) -> list[MaterializedTable]:
+    # ONE table block = ONE job. the stage claims it off the stream like any other unit, so table structuring is bounded
+    # by the stream's capacity and the slm queue, not by a fan-out hidden inside a single claimed job
+    tables = await structure_html_tables(block.text or "")
+    await ensure_described(tables, context)
+    return tables
 
 
 @dataclass
@@ -228,29 +224,40 @@ def prepare_document(blocks: list[Block]) -> _Prepared:
 _TABLES_ADAPTER = TypeAdapter(list[MaterializedTable])
 
 
-def dump_structures(prepared: _Prepared, table_counts: dict[int, int], table_queue: list[MaterializedTable]) -> str:
-    # everything the structure stage hands to merge through redis: the prepared blocks (so merge never re-stitches), the
-    # per-block table counts, and the flat ordered table list. count keys are stringified — json objects key on strings
+def dump_structures(prepared: _Prepared) -> str:
+    # the prepared blocks the structure stage hands to merge, so merge never re-stitches. the structured tables do NOT
+    # ride here — each table job writes its own result independently, keyed by block index
     return json.dumps(
         {
             "stitched": [block.model_dump() for block in prepared.stitched],
             "paratext": prepared.paratext,
             "drops": prepared.drops,
-            "counts": {str(index): count for index, count in table_counts.items()},
-            "tables": _TABLES_ADAPTER.dump_python(table_queue, mode="json"),
         }
     )
 
 
-def load_structures(raw: str | bytes | None) -> tuple[_Prepared, dict[int, int], list[MaterializedTable]]:
+def load_structures(raw: str | bytes | None) -> _Prepared:
     if raw is None:  # a doc with no blocks routed straight to merge (empty pdf); nothing was prepared or structured
-        return _Prepared([], [], {}), {}, []
+        return _Prepared([], [], {})
     data = json.loads(raw)
-    prepared = _Prepared(
+    return _Prepared(
         stitched=[Block(**block) for block in data["stitched"]], paratext=data["paratext"], drops=data["drops"]
     )
-    counts = {int(index): count for index, count in data["counts"].items()}
-    return prepared, counts, _TABLES_ADAPTER.validate_python(data["tables"])
+
+
+def dump_tables(tables: list[MaterializedTable]) -> str:
+    return json.dumps(_TABLES_ADAPTER.dump_python(tables, mode="json"))
+
+
+def collect_tables(results: dict[int, str | bytes]) -> tuple[dict[int, int], list[MaterializedTable]]:
+    # one job's output per block index; merge reassembles them in block order so the flat queue lines up with build_tree
+    counts: dict[int, int] = {}
+    queue: list[MaterializedTable] = []
+    for index in sorted(results):
+        tables = _TABLES_ADAPTER.validate_python(json.loads(results[index]))
+        counts[index] = len(tables)
+        queue.extend(tables)
+    return counts, queue
 
 
 def _token_count(text: str | None) -> int:

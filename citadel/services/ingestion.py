@@ -36,20 +36,22 @@ from citadel.schemas.document import DocProgress, DocumentRead, IngestResponse
 from citadel.services.detect import DetBlock, detect_layout
 from citadel.services.document import (
     begin_library_ingest,
+    collect_tables,
     create_documents,
     dump_structures,
+    dump_tables,
     finalize_tabular,
     load_structures,
     mark_document,
     mark_processing,
     persist_document_tree,
     prepare_document,
-    resolve_document_tables,
     save_document_tree,
     save_sheet_tables,
+    structure_table_block,
+    table_block_indices,
 )
 from citadel.services.excel import (
-    MaterializedTable,
     SheetExtraction,
     extract_sheet_content,
     load_all_sheets,
@@ -80,6 +82,7 @@ from citadel.services.pdf import (
 )
 from citadel.services.presentation import parse_pptx
 from citadel.services.tabular import ensure_described, extract_json_tables, structure_csv_tables
+from citadel.tabular.materialize import MaterializedTable
 from citadel.utils import normalize_file
 from config import CPU_EIGHTH
 
@@ -614,6 +617,31 @@ async def record_sheet(doc_id: str, sheet_no: int) -> None:
     )
 
 
+# a table job stores its own result and counts itself. the job that completes the last block fires merge — same
+# exactly-once shape as pages: HSETNX makes a redelivery a no-op, so no block is counted or structured twice
+_RECORD_TABLE_LUA = """
+if redis.call('HSETNX', KEYS[1], ARGV[1], ARGV[2]) == 0 then return 0 end
+redis.call('EXPIRE', KEYS[1], ARGV[4])
+if redis.call('HLEN', KEYS[1]) == tonumber(redis.call('HGET', KEYS[2], 'table_count')) then
+  redis.call('XADD', KEYS[3], '*', 'doc_id', ARGV[3])
+  return 1
+end
+return 0
+"""
+
+
+@lru_cache
+def _record_table() -> AsyncScript:
+    return get_redis().register_script(_RECORD_TABLE_LUA)
+
+
+async def record_table(doc_id: str, block_idx: int, tables: str) -> None:
+    await _record_table()(
+        keys=[f"tables:{doc_id}", f"doc:{doc_id}", STREAM_MERGE],
+        args=[str(block_idx), tables, doc_id, str(DOC_TTL)],
+    )
+
+
 SHEETS_CACHE_MAX = 4  # workbooks kept parsed at once; every sheet of a doc reuses one parse instead of re-loading it
 _SHEETS_CACHE: LRUCache[str, list[SheetExtraction]] = LRUCache(maxsize=SHEETS_CACHE_MAX)
 _SHEETS_LOCK = asyncio.Lock()
@@ -1073,35 +1101,37 @@ async def _read_doc_blocks(doc_id: str) -> list[Block]:
 
 
 async def handle_structure(fields: dict[str, str]) -> None:
-    # UNGATED: the moment a doc's ocr completes, prepare (cpu) and ROUTE. no table blocks → straight to merge, so the
-    # doc ingests DURING ocr (incremental readiness); has tables → store the prepared blocks and defer to the gated
-    # table_structure stage. only table-bearing docs are held for the post-ocr SLM phase; everything else flows through
+    # the moment a doc's ocr completes, prepare (cpu) and ROUTE. no table blocks → straight to merge, so the doc ingests
+    # during ocr; has tables → publish ONE JOB PER TABLE BLOCK onto the table stream. the count is recorded first, so a
+    # job that finishes before the rest are queued cannot see a complete set and fire merge early
     doc_id = fields["doc_id"]
     redis = get_redis()
     blocks = await _read_doc_blocks(doc_id)
     prepared = prepare_document(blocks)
-    await redis.set(f"structures:{doc_id}", dump_structures(prepared, {}, []), ex=DOC_TTL)
-    if any(block.type == "table" for block in prepared.stitched):
-        await redis.xadd(STREAM_TABLE_STRUCTURE, {"doc_id": doc_id, "unit": "document"})
-    else:
+    await redis.set(f"structures:{doc_id}", dump_structures(prepared), ex=DOC_TTL)
+    indices = table_block_indices(prepared.stitched)
+    if not indices:
         await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
+        return
+    await redis.hset(f"doc:{doc_id}", "table_count", len(indices))
+    for index in indices:
+        await redis.xadd(STREAM_TABLE_STRUCTURE, {"doc_id": doc_id, "unit": "table", "block_idx": index})
 
 
 async def handle_table_structure(fields: dict[str, str]) -> None:
-    # THE table structure extraction stage — the single place a table, from ANY source, is structured. it is its own
-    # phase, entered only once ocr has drained, so the SLM owns the GPU exactly as paddle did during ocr. two kinds of
-    # unit arrive and both leave with structured tables: a SHEET (spreadsheet / csv / json, which is table data end to
-    # end) and a DOCUMENT (pdf / html, whose table blocks the structure stage found). redelivery of either is a no-op
-    if fields.get("unit") == "sheet":
+    # THE table structure extraction stage — the single place a table, from ANY source, is structured. every unit is a
+    # JOB ON THE STREAM, claimed under the stage's capacity: a SHEET (spreadsheet / csv / json, table data end to end)
+    # or a TABLE BLOCK (one grid a pdf / html doc yielded). redelivery of either is a no-op
+    if fields["unit"] == "sheet":
         await handle_tabular(fields)
         return
     doc_id = fields["doc_id"]
+    block_idx = int(fields["block_idx"])
     redis = get_redis()
     filename = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
-    prepared, _, _ = load_structures(await redis.get(f"structures:{doc_id}"))
-    table_counts, table_queue = await resolve_document_tables(prepared.stitched, filename)
-    await redis.set(f"structures:{doc_id}", dump_structures(prepared, table_counts, table_queue), ex=DOC_TTL)
-    await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
+    prepared = load_structures(await redis.get(f"structures:{doc_id}"))
+    tables = await structure_table_block(prepared.stitched[block_idx], filename)
+    await record_table(doc_id, block_idx, dump_tables(tables))
 
 
 async def handle_merge(fields: dict[str, str]) -> None:
@@ -1118,7 +1148,9 @@ async def handle_merge(fields: dict[str, str]) -> None:
     blocks = await _read_doc_blocks(doc_id)
     source = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
     state = DocumentStatus.PARTIAL if any(b.type == "error" for b in blocks) else DocumentStatus.INGESTED
-    prepared, table_counts, table_queue = load_structures(await redis.get(f"structures:{doc_id}"))
+    prepared = load_structures(await redis.get(f"structures:{doc_id}"))
+    results = await redis.hgetall(f"tables:{doc_id}")
+    table_counts, table_queue = collect_tables({int(key): value for key, value in results.items()})
     await save_document_tree(int(doc_id), blocks, state, prepared, table_counts, table_queue)
     await persist_document_tree(int(doc_id))
     await redis.hset(f"doc:{doc_id}", mapping={"state": state, "t_done": time.time()})
@@ -1132,7 +1164,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
 async def cleanup(doc_id: str) -> None:
     redis = get_redis()
     _SHEETS_CACHE.pop(doc_id, None)  # doc finished → drop its parsed workbook
-    await redis.delete(f"blocks:{doc_id}", f"sheets:{doc_id}", f"structures:{doc_id}")
+    await redis.delete(f"blocks:{doc_id}", f"sheets:{doc_id}", f"structures:{doc_id}", f"tables:{doc_id}")
     blob_path(doc_id).unlink(missing_ok=True)  # the doc's source file is freed the moment it finishes
     await redis.expire(f"doc:{doc_id}", 3600)  # keep final status briefly, then auto-evict — no accumulation
 

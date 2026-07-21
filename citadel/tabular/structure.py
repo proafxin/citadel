@@ -1,17 +1,8 @@
 import operator
 
-from citadel.llm import STRUCTURE_INPUT_BUDGET, count_tokens_batch, structure_sheet
+from citadel.llm import structure_sheet
 from citadel.schemas.table import TableStructure
-from citadel.tabular.flag import (
-    BODY,
-    INTERESTING,
-    SAMPLE_BOTTOM,
-    SAMPLE_INTERVAL,
-    SAMPLE_TOP,
-    classify_rows,
-    column_kinds,
-    stratified_sample,
-)
+from citadel.tabular.flag import column_kinds, payload_rows
 
 _MAX_CELL = 40  # a shown cell is truncated here — the model needs the shape and the label, not a whole paragraph
 
@@ -23,29 +14,6 @@ def _row_line(index: int, row: list[str], width: int) -> str:
 
 def _payload_text(grid: list[list[str]], indices: list[int], width: int) -> str:
     return "\n".join(_row_line(index, grid[index], width) for index in indices)
-
-
-def _budgeted_rows(grid: list[list[str]], width: int) -> list[int]:
-    # the rows the model sees, capped by TOKENS not a fixed row count: interesting rows (the boundaries) go first and
-    # must survive, then the body sample fills whatever the window has left. a wide sheet whose full sample would blow
-    # max-model-len keeps its boundaries and drops sample rows until it fits, so the call can never 400 on length
-    labels = classify_rows(grid)
-    interesting = [index for index, label in enumerate(labels) if label == INTERESTING]
-    body = [index for index, label in enumerate(labels) if label == BODY]
-    seen = set(interesting)
-    sample = [
-        index for index in stratified_sample(body, SAMPLE_TOP, SAMPLE_BOTTOM, SAMPLE_INTERVAL) if index not in seen
-    ]
-    ordered = interesting + sample
-    costs = count_tokens_batch([_row_line(index, grid[index], width) for index in ordered])
-    kept: list[int] = []
-    used = 0
-    for index, cost in zip(ordered, costs, strict=True):
-        if kept and used + cost > STRUCTURE_INPUT_BUDGET:
-            break
-        kept.append(index)
-        used += cost
-    return sorted(kept)
 
 
 SPARSE_HEADER_MIN_WIDTH = 3  # below this a one-cell row may genuinely be the header of a narrow table
@@ -111,7 +79,7 @@ async def structure_grid(grid: list[list[str]]) -> list[TableStructure]:
     if SKIP_TABLE_SLM:
         return []
     width = max(len(row) for row in grid)
-    indices = _budgeted_rows(grid, width)
+    indices = payload_rows(grid)
     kinds = column_kinds(grid)
     hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))
     tables = await structure_sheet(_payload_text(grid, indices, width), hint, height, width)

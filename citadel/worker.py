@@ -420,38 +420,18 @@ async def merge() -> None:
     await _drive(STREAM_MERGE, cap, lambda mid, raw: _spawn(_merge_job(cap, mid, raw)))
 
 
-_OCR_PIPELINE = (STREAM_INGEST, STREAM_NORMALIZED, STREAM_RENDER, STREAM_PAGES)
-
-
-async def _ocr_drained() -> int:
-    # PHASE GATE. the SLM stages (structure, tabular) are HELD until the entire ocr-producing pipeline is empty, so the
-    # GPU runs paddle ALONE while pages are being read and qwen ALONE while tables are being structured — the two vision
-    # models never contend for the card at once, which is what made ocr slower and paddle drop connections. an unacked
-    # entry still counts in xlen, so every one of these streams being empty means no ocr work is queued OR in flight.
-    # ocr never depends on structure/tabular, so holding them cannot deadlock. embedding is already post-ingestion, so
-    # it too gets the GPU alone. returns unbounded room once ocr is done, 0 (claim nothing, sleep) while it runs
-    redis = get_redis()
-    for stream in _OCR_PIPELINE:
-        if await redis.xlen(stream):
-            return 0
-    return CROP_BOUND
-
-
-# ---- structure: UNGATED. prepare each doc the moment its ocr finishes and route it — no tables goes straight to
-# merge (so it ingests during ocr), tables defers to the table_structure phase below
+# ---- structure: prepare each doc the moment its ocr finishes and route it — no tables goes straight to merge, tables
+# go to the table_structure stage below
 async def structure() -> None:
     cap = _Capacity(STRUCTURE_CONCURRENCY)
     await _drive(STREAM_STRUCTURE, cap, lambda mid, raw: _spawn(_structure_job(cap, mid, raw)))
 
 
-# ---- table_structure: its own PHASE between ocr and merge, the way embedding is its own phase after ingestion. it
-# starts only once the ocr phase has drained, so qwen has the GPU to itself exactly as paddle did during ocr. only
-# table-bearing docs ever reach it; everything else has already merged
+# ---- table_structure: a plain stage between structure and merge. it runs as soon as a doc's tables arrive; only
+# table-bearing docs ever reach it
 async def table_structure() -> None:
     cap = _Capacity(TABLE_STRUCTURE_CONCURRENCY)
-    await _drive(
-        STREAM_TABLE_STRUCTURE, cap, lambda mid, raw: _spawn(_table_structure_job(cap, mid, raw)), _ocr_drained
-    )
+    await _drive(STREAM_TABLE_STRUCTURE, cap, lambda mid, raw: _spawn(_table_structure_job(cap, mid, raw)))
 
 
 async def _main() -> None:

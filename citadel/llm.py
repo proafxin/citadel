@@ -12,10 +12,6 @@ from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL
 STRUCT_MAX_TOKENS = 4096  # structured calls emit short JSON (indices, a concise merge summary, SQL)
 SYNTH_MAX_TOKENS = 8192  # the streamed answer; the evidence budget reserves this much of the context window for it
 SLM_MODEL_LEN = 65536  # qwen --max-model-len: prompt and completion share this one window
-# rows that fit once completion, the prompt template, column hint and json schema are reserved. a wide or long grid
-# trims its body sample down to this before it is sent, so no single grid can overrun the window (the failure that
-# 400'd every wide World-Bank-style sheet)
-STRUCTURE_INPUT_BUDGET = SLM_MODEL_LEN - STRUCT_MAX_TOKENS - 3072
 
 
 @functools.lru_cache

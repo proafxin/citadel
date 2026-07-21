@@ -69,32 +69,42 @@ def interesting_rows(grid: list[list[str]]) -> list[int]:
     return [index for index, label in enumerate(classify_rows(grid)) if label == INTERESTING]
 
 
-def stratified_sample(body: list[int], top: int, bottom: int, interval: int) -> list[int]:
-    # of the rows the flagger calls body, take the top, the bottom, and every Nth in between. the interval stratum is
-    # the recall backstop: if the flagger missed an internal header, an interval sample landing near it still lets the
-    # model notice a boundary the flagger did not flag
-    if not body:
-        return []
-    chosen = set(body[:top]) | set(body[-bottom:]) | set(body[::interval] if interval > 0 else [])
-    return sorted(chosen)
-
-
 SAMPLE_TOP = 4
 SAMPLE_BOTTOM = 2
 SAMPLE_INTERVAL = 25
-PAYLOAD_LIMIT = 120  # the model never sees more than this many rows of a sheet, whatever its height
+PAYLOAD_LIMIT = 20  # the model never sees more than this many rows of a sheet, whatever its height. the
+# sample exists to SHOW what the data looks like, not to carry it: the schema is in the column headers (every
+# one of which is sent, at any width) and a handful of rows is enough to type them and describe the table
+
+
+def _strided(rows: list[int], room: int) -> list[int]:
+    # every Mth row, with M widened when the sheet is tall enough that every 25th would exceed the room it is given.
+    # so the interval stratum spans the WHOLE middle at any height instead of covering a prefix and being cut off
+    if room <= 0 or not rows:
+        return []
+    stride = max(SAMPLE_INTERVAL, -(-len(rows) // room))
+    return rows[::stride][:room]
+
+
+def stratified_sample(rows: list[int], top: int, bottom: int, room: int) -> list[int]:
+    # top K, bottom K, and every Mth in between, bounded above by `room` at any table height. the interval stratum is
+    # the recall backstop: if an internal header sits mid-table, a sample landing near it still lets the model notice
+    # a boundary. the edges are taken first — the header is at the top and the totals are at the bottom
+    if not rows:
+        return []
+    edges = set(rows[:top]) | set(rows[len(rows) - bottom :])
+    middle = [index for index in rows[top : len(rows) - bottom] if index not in edges]
+    return sorted(edges | set(_strided(middle, room - len(edges))))
 
 
 def payload_rows(grid: list[list[str]]) -> list[int]:
-    # what the model actually sees: every interesting row (they are the boundaries), plus a stratified body sample,
-    # capped at PAYLOAD_LIMIT. interesting rows are kept first — a boundary must not be dropped to fit the cap; the
-    # body sample fills the rest. all index-tagged so the model reconstructs regions by position
-    labels = classify_rows(grid)
-    interesting = [index for index, label in enumerate(labels) if label == INTERESTING]
-    body = [index for index, label in enumerate(labels) if label == BODY]
-    sample = stratified_sample(body, SAMPLE_TOP, SAMPLE_BOTTOM, SAMPLE_INTERVAL)
-    kept = interesting[:PAYLOAD_LIMIT]
-    room = PAYLOAD_LIMIT - len(kept)
-    if room > 0:
-        kept = sorted(set(kept) | set(sample[:room]))
-    return kept
+    # what the model actually sees, bounded at PAYLOAD_LIMIT rows however tall the sheet. the SLM reads the SCHEMA and
+    # writes a description; neither needs every row, so the stratified sample is taken FIRST and always survives, and
+    # the flagged boundary rows fill whatever room is left. all index-tagged so the model places regions by position
+    kept = set(stratified_sample(list(range(len(grid))), SAMPLE_TOP, SAMPLE_BOTTOM, PAYLOAD_LIMIT))
+    for index, label in enumerate(classify_rows(grid)):
+        if len(kept) >= PAYLOAD_LIMIT:
+            break
+        if label == INTERESTING:
+            kept.add(index)
+    return sorted(kept)
