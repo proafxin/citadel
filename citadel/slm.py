@@ -26,15 +26,13 @@ from config import configure_logging, get_settings
 logger = logging.getLogger(__name__)
 
 CONSUMER = "slm"
-PROVIDER_CONCURRENCY = 8  # MUST equal qwen --max-num-seqs. table-structure calls are small (a few k
-# tokens), so the KV pool holds far more than 3 of them at once; 3 was sized for full-64k synthesis and needlessly
-# throttled the high-volume structuring calls
+DRAIN_COUNT = 256  # jobs claimed off a stream per read — a batch size for the READ, never a concurrency bound. what
+# may run at once is vllm's decision, taken against free KV
 MAX_ATTEMPTS = 3
 BLOCK_MS = 5000
 NO_TIMEOUT = httpx.Timeout(None)
 
 _tasks: set[asyncio.Task[None]] = set()
-_slot_free = asyncio.Event()
 
 
 async def _ensure_group(stream: str) -> None:
@@ -118,32 +116,30 @@ async def _fail(stream: str, msg_id: str, raw: dict[bytes, bytes], attempt: int)
         await _requeue(stream, msg_id, raw, attempt + 1)
 
 
-async def _run_job(semaphore: asyncio.Semaphore, stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _run_job(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
     job_id = raw[b"job_id"].decode()
     reply_to = raw[b"reply_to"].decode()
     attempt = int(raw.get(b"attempt", b"0"))
-    async with semaphore:
-        try:
-            await _call_provider(json.loads(raw[b"payload"].decode()), reply_to, job_id)
-        except httpx.HTTPStatusError as error:
-            logger.exception("slm job failed job=%s attempt=%d", job_id, attempt)
-            if error.response.is_client_error:
-                await _emit(reply_to, job_id, FAILED, f"provider rejected the request: {error.response.status_code}")
-                await _settle(stream, msg_id)
-            else:
-                await _fail(stream, msg_id, raw, attempt)
-            return
-        except (httpx.HTTPError, json.JSONDecodeError, KeyError):
-            logger.exception("slm job failed job=%s attempt=%d", job_id, attempt)
+    try:
+        await _call_provider(json.loads(raw[b"payload"].decode()), reply_to, job_id)
+    except httpx.HTTPStatusError as error:
+        logger.exception("slm job failed job=%s attempt=%d", job_id, attempt)
+        if error.response.is_client_error:
+            await _emit(reply_to, job_id, FAILED, f"provider rejected the request: {error.response.status_code}")
+            await _settle(stream, msg_id)
+        else:
             await _fail(stream, msg_id, raw, attempt)
-            return
+        return
+    except (httpx.HTTPError, json.JSONDecodeError, KeyError):
+        logger.exception("slm job failed job=%s attempt=%d", job_id, attempt)
+        await _fail(stream, msg_id, raw, attempt)
+        return
     await _emit(reply_to, job_id, DONE, "")
     await _settle(stream, msg_id)
 
 
 def _done(task: asyncio.Task[None]) -> None:
     _tasks.discard(task)
-    _slot_free.set()
     if task.cancelled():
         return
     exc = task.exception()
@@ -157,28 +153,26 @@ def _spawn(coro: Coroutine[Any, Any, None]) -> None:
     task.add_done_callback(_done)
 
 
-async def _drain(semaphore: asyncio.Semaphore, stream: str, count: int) -> int:
+async def _drain(stream: str) -> int:
     fresh = cast(
         "list[tuple[bytes, list[tuple[bytes, dict[bytes, bytes]]]]]",
-        await get_redis().xreadgroup(SLM_GROUP, CONSUMER, {stream: ">"}, count=count, block=BLOCK_MS),
+        await get_redis().xreadgroup(SLM_GROUP, CONSUMER, {stream: ">"}, count=DRAIN_COUNT, block=BLOCK_MS),
     )
     entries = fresh[0][1] if fresh else []
     for msg_id, raw in entries:
-        _spawn(_run_job(semaphore, stream, msg_id.decode(), raw))
+        _spawn(_run_job(stream, msg_id.decode(), raw))
     return len(entries)
 
 
 async def _pump() -> None:
-    semaphore = asyncio.Semaphore(PROVIDER_CONCURRENCY)
+    # no client-side concurrency gate. every claimed job is dispatched straight at vllm, which decides what runs and
+    # what waits — by KV, which is size-aware, where a request count never could be. a semaphore here could only
+    # STARVE the scheduler: it capped qwen at `Running: 3, Waiting: 0` for a whole run. service is fcfs; interactive is
+    # merely drained first, so a query is submitted ahead of bulk work claimed in the same pass
     while True:
-        free = PROVIDER_CONCURRENCY - len(_tasks)
-        if free <= 0:
-            _slot_free.clear()
-            await _slot_free.wait()
+        if await _drain(STREAM_SLM_INTERACTIVE):
             continue
-        if await _drain(semaphore, STREAM_SLM_INTERACTIVE, free):
-            continue
-        await _drain(semaphore, STREAM_SLM_BULK, free)
+        await _drain(STREAM_SLM_BULK)
 
 
 async def _main() -> None:
@@ -189,7 +183,7 @@ async def _main() -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    logger.info("slm consumer up concurrency=%d", PROVIDER_CONCURRENCY)
+    logger.info("slm consumer up — dispatch unbounded, vllm schedules")
     pump = asyncio.create_task(_pump())
     await stop.wait()
     pump.cancel()

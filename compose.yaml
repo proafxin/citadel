@@ -123,12 +123,13 @@ services:
       # the same card, and it does not exist at the moment vLLM profiles, so nothing here reserves room for it.
       - --gpu-memory-utilization
       - "0.55"
-      # a sequence slot is only worth having if the cache can hold that sequence at FULL length: 3 x 64k = 196,608 tokens,
-      # which the cache holds outright, so every admitted request runs and none is preempted mid-flight to make room for
-      # another. 3 rather than 4 is what the 9B's extra weights cost us, and it costs almost nothing: the 64k window only
-      # matters to SYNTHESIS, which is a single call, and the filter's batches are ~30k, so it never reaches this bound.
+      # a COUNT cap, and count is the wrong unit for two workloads of opposite shape: a table description is ~1k tokens
+      # and an evidence-filter batch is ~30k, and no single number serves both. it does not have to — vllm admits by KV,
+      # which IS size-aware: ~60 descriptions fit at once, or 4 filter calls, and whatever does not fit simply WAITS,
+      # holding token ids and no cache. so this is set high and left alone; the real bound is the 125,373-token cache.
+      # at 8 it was a throttle and nothing else — measured `Running: 3, Waiting: 0` across a whole 557s ingestion.
       - --max-num-seqs
-      - "8"
+      - "128"
       # 64k total, prompt AND completion together — that is how vLLM counts it. the model is native 256k
       # (max_position_embeddings=262144), so nothing here is rope-extended or degraded.
       - --max-model-len

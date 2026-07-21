@@ -47,9 +47,6 @@ logger = logging.getLogger(__name__)
 
 NORMALIZE_CONCURRENCY = CPU_EIGHTH
 MERGE_CONCURRENCY = CPU_EIGHTH  # light assembly
-TABLE_STRUCTURE_CONCURRENCY = CPU_EIGHTH  # table units (sheets AND documents) structured at once. each awaits the
-# SLM queue (its own global bound), so this caps units held here, not how many SLM calls run — and since an
-# in-flight sheet pins a parsed workbook, it is also what bounds that memory
 STRUCTURE_CONCURRENCY = CPU_EIGHTH  # docs being PREPARED (stitch/reclassify) and routed at once — cpu only, no SLM
 PAGES_BUFFER = DECODE_CONCURRENCY  # rendered pages sitting UNCLAIMED in `pages`, waiting for ocr to pick them up.
 # sized to fill the decode gate in one claim: shallower and ocr takes what is there, leaves decode slots idle, and
@@ -346,22 +343,19 @@ async def _structure_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -
         cap.release()
 
 
-async def _table_structure_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _table_structure_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_TABLE_STRUCTURE
-    try:
-        fields = await _decode_or_settle(stream, msg_id, raw)
-        if fields is None:
-            return
-        work = asyncio.create_task(handle_table_structure(fields))
-        await asyncio.wait({work})
-        error = work.exception()
-        if error is None:
-            await _settle(stream, msg_id)
-            return
-        logger.error("table_structure failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(error))
-        await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "table_structure"))
-    finally:
-        cap.release()
+    fields = await _decode_or_settle(stream, msg_id, raw)
+    if fields is None:
+        return
+    work = asyncio.create_task(handle_table_structure(fields))
+    await asyncio.wait({work})
+    error = work.exception()
+    if error is None:
+        await _settle(stream, msg_id)
+        return
+    logger.error("table_structure failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(error))
+    await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "table_structure"))
 
 
 # ---- normalize: read `ingest`, convert, write `normalized`. one dedicated libreoffice profile per job
@@ -427,11 +421,11 @@ async def structure() -> None:
     await _drive(STREAM_STRUCTURE, cap, lambda mid, raw: _spawn(_structure_job(cap, mid, raw)))
 
 
-# ---- table_structure: a plain stage between structure and merge. it runs as soon as a doc's tables arrive; only
-# table-bearing docs ever reach it
+# ---- table_structure: a plain stage between structure and merge. UNBOUNDED on our side — a unit does no heavy work
+# of its own, it hands a job to the slm stream, so the batching and the concurrency are vllm's to decide. a client-side
+# cap here can only starve the scheduler: measured at CPU_EIGHTH it pinned qwen to `Running: 3, Waiting: 0` all run
 async def table_structure() -> None:
-    cap = _Capacity(TABLE_STRUCTURE_CONCURRENCY)
-    await _drive(STREAM_TABLE_STRUCTURE, cap, lambda mid, raw: _spawn(_table_structure_job(cap, mid, raw)))
+    await _drive(STREAM_TABLE_STRUCTURE, None, lambda mid, raw: _spawn(_table_structure_job(mid, raw)))
 
 
 async def _main() -> None:
