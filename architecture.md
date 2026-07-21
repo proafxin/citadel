@@ -160,11 +160,19 @@ Memory then follows from what each thing is needed *for*, not how long it is ref
   its (far smaller) encoded bytes.
 - A **crop** is compressed the moment it is cut, so what is held during the wait is the wire format, not
   raw pixels.
-- **Pages in flight** are bounded only because a page must be claimed before it can be laid out, and until
-  it is laid out nothing downstream can account for it. It is a memory bound and nothing more: raising it
-  does not feed the model. A page waiting on crop budget is a page whose crops are already cut and already
-  *demanding* slots, so the semaphore saturates long before the page cap binds — measured, doubling pages in
-  flight tripled the queue, produced no additional model work, and cost a gigabyte.
+- **Pages claimed but not yet charged** are bounded, and only those. Between the claim and the detector
+  finding a page's regions, a page holds an encoded image that no other bound can see — that window is the
+  one thing a page cap must close. Past it the page is fully represented in crops and counting it again is
+  a mistake with a cost, described next.
+
+**Admission is denominated in crops, never in pages.** A page's crop yield spans **0 to 23.5** across real
+documents — a scanned book emits ~18 crops a page, a born-digital one 0.8, and a page whose text comes
+entirely from the text layer emits none at all. So any fixed page count is simultaneously too loose for one
+document and too tight for another: at 96 pages, a 0.82-crop/page book could place only ~79 crops in front
+of 128 slots and could claim no more, because its pages were still holding slots while their crops queued.
+The model idled with every queue reading zero — the failure that looks exactly like a fast GPU. Admitting
+until the *crop* supply is satisfied fixes it without anyone deciding which kind of document is arriving:
+a dense page fills the budget in eight pages, a sparse one draws hundreds, an empty one costs nothing.
 
 Host memory is therefore **flat** — a function of these bounds alone, not of how many documents are
 uploaded, how large they are, how dense their pages are, or how long the queue gets. Backpressure
@@ -172,14 +180,24 @@ propagates the whole way back: requests fill → pages stop being admitted → r
 stalls → paginate stalls. Measured: **~18 GB peak host RAM** across a 35-document run, with other
 applications on the machine, and the same figure whether the corpus is a page or a thousand.
 
-That leaves headroom, and headroom is deliberately **not** spent. Every one of these bounds is on the
-*supply* side of a saturated consumer, and raising a bound only helps if that bound is what throttles
-throughput. It is not, and the stage line says so directly: crops wait **23–26 seconds each** for a slot at
-the model on the largest documents, while every upstream wait — render, text layer, crop budget, decode —
-sits at zero. Supply already outruns the GPU by orders of magnitude. Admitting more pages would lengthen a
-queue that is already deep and hold more memory to do it; measured, doubling pages in flight tripled our own
-queue, produced identical model work, and made the run *slower*. The only lever that moves end-to-end time
-is sending the model less work, never staging more of it.
+The number that decides whether any of this is working is **occupancy**: total model work divided by what
+the GPU could have done in the elapsed time — `Σ(crops × predict)` against `runtime × concurrency`. It
+separates the two failures that look identical from the outside. The gap below 100% is a *packing* problem,
+fixable by admitting differently; the remainder is a *work* problem, fixable only by sending fewer or
+cheaper crops. Crop-denominated admission moved it from **78.9% to 84.4%**, and the run from 537.5s to
+512.7s, on an unchanged corpus.
+
+The queues that then appear are the confirmation, not a regression. `budget_wait` became non-zero for the
+first time in any run (29.5 s/pg on one document), which is the crop budget finally binding — crops are
+abundant and the model is fed. `layout_wait` rose to ~52 s/pg, which is precisely the admission window full
+(512 uncharged pages at ~100 ms a detect = 51.2s). `crop_wait` reads 109–220 s/crop on the dense books, and
+that is a queue *depth* readout, never a cost: driving it down without cutting work only moves the queue
+upstream. A saturated consumer is supposed to have a deep queue in front of it.
+
+What remains is arithmetic. At 84.4% the floor — the same work packed perfectly — is **433s**, so roughly
+80s is still recoverable by scheduling, and everything below that requires cutting the ~55,000 crop-seconds
+themselves. One 809-page scanned book is 67% of that total, which is why per-crop costs dominate every
+other consideration and why the minimum-pixel floor (below) is the only lever that reaches all of it.
 
 ### Reading pages (ocr)
 
@@ -503,12 +521,15 @@ design intends.
   questions well but can keep too little for an open "summarize everything about X": the answer is correct
   but thinner than the corpus could support. This is a prompt-tuning axis, not a structural limit.
 
-- **Throughput is bounded by the GPU's power limit, and there is no lever left but doing less work.** The
-  card runs pinned at its cap — 142 W of 145 W, clocks sagging from 2205 to 1867 MHz as it heats — at 93%
-  utilization, with the inference server reporting a full set of running sequences and *nothing waiting*
-  behind them on essentially every log line. It is saturated. Adding concurrency, workers, page supply or
-  host RAM anywhere in the pipeline does nothing, and this is now provable rather than inferred. The only
-  remaining gains come from sending the model fewer or smaller crops (below), not from feeding it faster.
+- **Throughput is bounded by the GPU's power limit, and the remaining levers are small.** The card runs
+  pinned at its cap — 142 W of 145 W, clocks sagging from 2205 to 1867 MHz as it heats — at 93%
+  utilization. It is saturated *while it has work*, and the qualifier is the correction: an earlier version
+  of this note claimed adding page supply anywhere "does nothing," which was measured on dense documents
+  and wrongly generalized. A crop-sparse document could not put 128 crops in front of the model at all
+  under a fixed page cap, and the model idled while every queue read zero. Crop-denominated admission
+  recovered 5.5 points of occupancy and 25 seconds. Occupancy now sits at 84.4%, so ~80s remains in
+  scheduling — the ramp before the first crop exists, and the tail — and everything past that requires
+  sending the model fewer or smaller crops (below), not feeding it faster.
 
 - **Every crop is upscaled to a minimum pixel count, and small ones pay for it.** A crop is smart-resized
   into a fixed pixel window before it is sent. The floor exists so a one-line crop arrives legible — but it
