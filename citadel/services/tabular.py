@@ -12,7 +12,7 @@ from citadel.llm import describe_table
 from citadel.schemas.content import Block
 from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
 from citadel.services.excel import SAMPLE_TABLE_ROWS, MaterializedTable
-from citadel.tabular.structure import structure_grid
+from citadel.tabular.structure import SKIP_TABLE_SLM, structure_grid
 
 
 async def ensure_described(tables: list[MaterializedTable], context: str) -> None:
@@ -20,6 +20,8 @@ async def ensure_described(tables: list[MaterializedTable], context: str) -> Non
     # WITHOUT a description had its structure directly (a json entity, a clean <table>), so it skipped structure_sheet.
     # those get a description-only SLM call — the same table phase, just the half of the work they need. every table
     # leaves the stage described, whatever its source
+    if SKIP_TABLE_SLM:  # measurement run: no description calls either
+        return
     missing = [table for table in tables if not table.description]
     if not missing:
         return

@@ -91,9 +91,9 @@ STREAM_NORMALIZED = "normalized"
 STREAM_RENDER = "render"  # per-page render jobs: one message per PDF page, drained by the bounded render consumer
 STREAM_PAGES = "pages"
 STREAM_STRUCTURE = "structure"  # ungated: prepare + route each doc as its ocr completes (no-table docs go on to merge)
-STREAM_TABLE_STRUCTURE = "table_structure"  # only table-bearing docs; the SLM extraction, run after ocr has drained
+STREAM_TABLE_STRUCTURE = "table_structure"  # THE table stream: every table unit from every source — spreadsheet
+# sheets and table-bearing pdf/html documents alike — is structured here, in one stage, after ocr has drained
 STREAM_MERGE = "merge"
-STREAM_TABLES = "tables"
 
 
 MAX_ATTEMPTS = 3
@@ -500,11 +500,13 @@ async def handle_paginate(fields: dict[str, str]) -> None:
                 return
             await redis.hset(f"doc:{doc_id}", "page_count", len(names))
             for sheet_no in range(1, len(names) + 1):
-                await redis.xadd(STREAM_TABLES, {"doc_id": doc_id, "kind": kind, "sheet_no": sheet_no})
+                await redis.xadd(
+                    STREAM_TABLE_STRUCTURE, {"doc_id": doc_id, "unit": "sheet", "kind": kind, "sheet_no": sheet_no}
+                )
             logger.info("paginate file=%s sheets=%d", fields["filename"], len(names))
         else:
             await redis.hset(f"doc:{doc_id}", "page_count", 1)
-            await redis.xadd(STREAM_TABLES, {"doc_id": doc_id, "kind": kind, "sheet_no": 0})
+            await redis.xadd(STREAM_TABLE_STRUCTURE, {"doc_id": doc_id, "unit": "sheet", "kind": kind, "sheet_no": 0})
             logger.info("paginate file=%s kind=%s", fields["filename"], kind)
         return
     dpi = RENDER_DPI
@@ -1079,13 +1081,20 @@ async def handle_structure(fields: dict[str, str]) -> None:
     blocks = await _read_doc_blocks(doc_id)
     prepared = prepare_document(blocks)
     await redis.set(f"structures:{doc_id}", dump_structures(prepared, {}, []), ex=DOC_TTL)
-    target = STREAM_TABLE_STRUCTURE if any(block.type == "table" for block in prepared.stitched) else STREAM_MERGE
-    await redis.xadd(target, {"doc_id": doc_id})
+    if any(block.type == "table" for block in prepared.stitched):
+        await redis.xadd(STREAM_TABLE_STRUCTURE, {"doc_id": doc_id, "unit": "document"})
+    else:
+        await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
 
 
 async def handle_table_structure(fields: dict[str, str]) -> None:
-    # GATED (runs only once ocr has drained): the SLM half. read the prepared blocks the structure stage stored,
-    # structure every table via the SLM, re-store with the structures, fire merge. a redelivery is an idempotent no-op
+    # THE table structure extraction stage — the single place a table, from ANY source, is structured. it is its own
+    # phase, entered only once ocr has drained, so the SLM owns the GPU exactly as paddle did during ocr. two kinds of
+    # unit arrive and both leave with structured tables: a SHEET (spreadsheet / csv / json, which is table data end to
+    # end) and a DOCUMENT (pdf / html, whose table blocks the structure stage found). redelivery of either is a no-op
+    if fields.get("unit") == "sheet":
+        await handle_tabular(fields)
+        return
     doc_id = fields["doc_id"]
     redis = get_redis()
     filename = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()

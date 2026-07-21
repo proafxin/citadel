@@ -117,11 +117,20 @@ def _fallback(grid: list[list[str]], height: int, width: int) -> list[TableStruc
     ]
 
 
+# TEMPORARY, for measurement only. flip to False to restore normal behaviour (or `git checkout` this file and
+# citadel/services/tabular.py). when True, EVERY ingestion SLM call is skipped — table structure falls back to the
+# deterministic header detection and descriptions are left empty — so a run measures the pipeline with zero SLM work.
+# the pipeline still completes end to end, so the total is directly comparable to a normal run
+SKIP_TABLE_SLM = True
+
+
 async def structure_grid(grid: list[list[str]]) -> list[TableStructure]:
     height = len(grid)
     if height == 0:
         return []
     width = max(len(row) for row in grid)
+    if SKIP_TABLE_SLM:
+        return _fallback(grid, height, width)
     indices = _budgeted_rows(grid, width)
     kinds = column_kinds(grid)
     hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))

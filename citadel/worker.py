@@ -22,7 +22,6 @@ from citadel.services.ingestion import (
     STREAM_RENDER,
     STREAM_STRUCTURE,
     STREAM_TABLE_STRUCTURE,
-    STREAM_TABLES,
     cleanup,
     ensure_group,
     fail_document,
@@ -35,7 +34,6 @@ from citadel.services.ingestion import (
     handle_render,
     handle_structure,
     handle_table_structure,
-    handle_tabular,
     make_profile_pool,
     reap_orphan_blobs,
     release_idle,
@@ -49,14 +47,10 @@ logger = logging.getLogger(__name__)
 
 NORMALIZE_CONCURRENCY = CPU_EIGHTH
 MERGE_CONCURRENCY = CPU_EIGHTH  # light assembly
-TABLE_STRUCTURE_CONCURRENCY = CPU_EIGHTH  # docs whose tables are being structured at once, in the post-ocr SLM phase.
-# each awaits the SLM queue (its own global bound), so this caps docs held here, not how many SLM calls run
+TABLE_STRUCTURE_CONCURRENCY = CPU_EIGHTH  # table units (sheets AND documents) structured at once. each awaits the
+# SLM queue (its own global bound), so this caps units held here, not how many SLM calls run — and since an
+# in-flight sheet pins a parsed workbook, it is also what bounds that memory
 STRUCTURE_CONCURRENCY = CPU_EIGHTH  # docs being PREPARED (stitch/reclassify) and routed at once — cpu only, no SLM
-TABULAR_CONCURRENCY = 3  # sheets processed at once — a STAGE bound, and this stage's own: each in-flight sheet pins a
-# parsed workbook, so this is what caps that memory. it is NOT an SLM bound; the SLM has its own single global pool that
-# every request shares, whatever stage issues it, and the two answer different questions.
-# it inherited its value from the XGBoost pool that used to bound this stage. that pool is gone, so 1 is now simply what
-# has always run — not a measured optimum.
 PAGES_BUFFER = DECODE_CONCURRENCY  # rendered pages sitting UNCLAIMED in `pages`, waiting for ocr to pick them up.
 # sized to fill the decode gate in one claim: shallower and ocr takes what is there, leaves decode slots idle, and
 # waits on render to catch up — a stall the GPU pays for. it does NOT bound pages in flight (ocr claims as fast as the
@@ -298,7 +292,6 @@ DRAINED_STREAMS = (
     STREAM_STRUCTURE,
     STREAM_TABLE_STRUCTURE,
     STREAM_MERGE,
-    STREAM_TABLES,
 )
 
 
@@ -367,23 +360,6 @@ async def _table_structure_job(cap: _Capacity, msg_id: str, raw: dict[bytes, byt
             return
         logger.error("table_structure failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(error))
         await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "table_structure"))
-    finally:
-        cap.release()
-
-
-async def _tabular_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
-    stream = STREAM_TABLES
-    try:
-        fields = await _decode_or_settle(stream, msg_id, raw)
-        if fields is None:
-            return
-        work = asyncio.create_task(handle_tabular(fields))
-        await asyncio.wait({work})
-        if work.exception() is None:
-            await _settle(stream, msg_id)
-            return
-        logger.error("tabular failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(work.exception()))
-        await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "tabular"))
     finally:
         cap.release()
 
@@ -461,12 +437,6 @@ async def _ocr_drained() -> int:
     return CROP_BOUND
 
 
-# ---- tabular: read `tables`, model structure + describe, write tables ----------------------------------------
-async def tabular() -> None:
-    cap = _Capacity(TABULAR_CONCURRENCY)
-    await _drive(STREAM_TABLES, cap, lambda mid, raw: _spawn(_tabular_job(cap, mid, raw)), _ocr_drained)
-
-
 # ---- structure: UNGATED. prepare each doc the moment its ocr finishes and route it — no tables goes straight to
 # merge (so it ingests during ocr), tables defers to the table_structure phase below
 async def structure() -> None:
@@ -490,7 +460,7 @@ async def _main() -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    stages = (normalize, paginate, render, ocr, structure, table_structure, merge, tabular)
+    stages = (normalize, paginate, render, ocr, structure, table_structure, merge)
     consumers = [asyncio.create_task(stage()) for stage in stages]
     consumers.append(asyncio.create_task(read_replies()))
     stop_task = asyncio.create_task(stop.wait())
