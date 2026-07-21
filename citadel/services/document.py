@@ -193,9 +193,10 @@ def _reclassify_regions(blocks: list[Block]) -> list[Block]:
     return kept
 
 
-async def _resolve_tables(blocks: list[Block], context: str) -> tuple[dict[int, int], list[MaterializedTable]]:
-    # every table block is an independent grid, so they structure CONCURRENTLY — fanned out across the SLM queue rather
-    # than one blocking round-trip after another. order is preserved, so the flat queue still lines up with build_tree.
+async def resolve_document_tables(blocks: list[Block], context: str) -> tuple[dict[int, int], list[MaterializedTable]]:
+    # the SLM half of the table path, run in the GATED table_structure stage AFTER ocr so qwen never shares the GPU with
+    # paddle. every table block is an independent grid, so they structure CONCURRENTLY — fanned out across the SLM queue
+    # rather than one blocking round-trip after another. order is preserved, so the flat queue lines up with build_tree.
     # a fallback-extracted table carries no description, so ensure_described fills it before it leaves the stage
     indices = [idx for idx, block in enumerate(blocks) if block.type == "table"]
     resolved = await asyncio.gather(*(structure_html_tables(blocks[idx].text or "") for idx in indices))
@@ -215,15 +216,12 @@ class _Prepared:
     drops: dict[str, int]
 
 
-async def structure_tables(
-    blocks: list[Block], context: str
-) -> tuple[_Prepared, dict[int, int], list[MaterializedTable]]:
-    # the decoupled structure stage's entry point: prepare (dedup / paratext split / reclassify / stitch) ONCE, then
-    # structure every table via the SLM. the prepared blocks travel to merge alongside the structures, so merge builds
-    # the tree without a second _prepare_blocks — the stitch runs exactly once per document, here
-    prepared = _prepare_blocks(blocks)
-    counts, queue = await _resolve_tables(prepared.stitched, context)
-    return prepared, counts, queue
+def prepare_document(blocks: list[Block]) -> _Prepared:
+    # the CPU half of the table path — dedup / paratext split / reclassify / stitch — run as soon as a doc's ocr ends.
+    # it stitches ONCE per doc (merge reads the result, never re-prepares). whether any stitched block is a table then
+    # decides the route: no tables → straight to merge, so the doc ingests during ocr; tables → deferred to the
+    # table_structure phase, which does only the SLM extraction, once ocr has drained
+    return _prepare_blocks(blocks)
 
 
 _TABLES_ADAPTER = TypeAdapter(list[MaterializedTable])

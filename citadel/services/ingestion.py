@@ -43,9 +43,10 @@ from citadel.services.document import (
     mark_document,
     mark_processing,
     persist_document_tree,
+    prepare_document,
+    resolve_document_tables,
     save_document_tree,
     save_sheet_tables,
-    structure_tables,
 )
 from citadel.services.excel import (
     MaterializedTable,
@@ -89,7 +90,8 @@ STREAM_INGEST = "ingest"
 STREAM_NORMALIZED = "normalized"
 STREAM_RENDER = "render"  # per-page render jobs: one message per PDF page, drained by the bounded render consumer
 STREAM_PAGES = "pages"
-STREAM_STRUCTURE = "structure"  # between OCR and merge: structure every table block via the SLM, off the merge barrier
+STREAM_STRUCTURE = "structure"  # ungated: prepare + route each doc as its ocr completes (no-table docs go on to merge)
+STREAM_TABLE_STRUCTURE = "table_structure"  # only table-bearing docs; the SLM extraction, run after ocr has drained
 STREAM_MERGE = "merge"
 STREAM_TABLES = "tables"
 
@@ -1069,14 +1071,26 @@ async def _read_doc_blocks(doc_id: str) -> list[Block]:
 
 
 async def handle_structure(fields: dict[str, str]) -> None:
-    # the decoupled table-structure stage: structure every table block via the SLM (concurrently), hand the result to
-    # merge through redis, then fire merge. this is the ONLY place table structuring happens for OCR-block documents —
-    # merge itself does none. re-running it (a redelivery) is a safe, idempotent no-op: it re-stores and re-fires merge
+    # UNGATED: the moment a doc's ocr completes, prepare (cpu) and ROUTE. no table blocks → straight to merge, so the
+    # doc ingests DURING ocr (incremental readiness); has tables → store the prepared blocks and defer to the gated
+    # table_structure stage. only table-bearing docs are held for the post-ocr SLM phase; everything else flows through
     doc_id = fields["doc_id"]
     redis = get_redis()
     blocks = await _read_doc_blocks(doc_id)
+    prepared = prepare_document(blocks)
+    await redis.set(f"structures:{doc_id}", dump_structures(prepared, {}, []), ex=DOC_TTL)
+    target = STREAM_TABLE_STRUCTURE if any(block.type == "table" for block in prepared.stitched) else STREAM_MERGE
+    await redis.xadd(target, {"doc_id": doc_id})
+
+
+async def handle_table_structure(fields: dict[str, str]) -> None:
+    # GATED (runs only once ocr has drained): the SLM half. read the prepared blocks the structure stage stored,
+    # structure every table via the SLM, re-store with the structures, fire merge. a redelivery is an idempotent no-op
+    doc_id = fields["doc_id"]
+    redis = get_redis()
     filename = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
-    prepared, table_counts, table_queue = await structure_tables(blocks, filename)
+    prepared, _, _ = load_structures(await redis.get(f"structures:{doc_id}"))
+    table_counts, table_queue = await resolve_document_tables(prepared.stitched, filename)
     await redis.set(f"structures:{doc_id}", dump_structures(prepared, table_counts, table_queue), ex=DOC_TTL)
     await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
 
