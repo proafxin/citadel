@@ -55,8 +55,9 @@ stage is a FIFO-fed sliding window — it claims only as much as it can hold, an
 item completes, never in batches. The phases:
 
 ```
-upload → normalize → paginate → render → ocr ──────────────────→ merge → relational store
-                     └──────────────────→ tabular ─────────────→ merge
+upload → normalize → paginate → render → ocr → structure ─┬──────────────────────→ merge → relational store
+                                                          └→ table_structure ────→ merge
+                     └───────────────────────────────────────→ table_structure ────→ merge
 ```
 
 | Phase | Work |
@@ -65,8 +66,19 @@ upload → normalize → paginate → render → ocr ─────────
 | paginate | count PDF pages and emit one render job each; or split markup/text/tabular into units |
 | render | rasterize one PDF page |
 | ocr | detect the page's regions, then read each one → blocks |
-| merge | blocks → split paratext → stitch tables → structure embedded tables → content tree → persist |
-| tabular | per sheet/file: structure → canonical Table (its retrieval description is written later, at finalize) |
+| structure | a document's blocks → paratext split, reclassify, stitch tables; then route — no tables goes straight to merge, each table found becomes its own job |
+| table_structure | one job per table unit — a spreadsheet sheet, or one table block — → canonical Table, described |
+| merge | assemble the content tree from the prepared blocks and the finished tables → persist |
+
+**Every table is a job on one stream**, whatever it came from. A spreadsheet sheet and a single table on
+page 340 of a scanned book are the same kind of work item, claimed the same way. A forty-table document is
+forty jobs, not one job that fans out privately inside itself — so a document's table work is bounded and
+scheduled by the same machinery as everything else, and no source gets its own concurrency by accident. The
+job that completes the last of a document's tables is the one that fires merge, the same counter-and-fire
+shape pages use, so redelivery is a no-op and merge runs exactly once.
+
+A document with no tables never enters that stream at all: it merges as soon as its pages are read, so it
+becomes searchable *during* the run rather than waiting behind work it does not have.
 
 The bus carries only lightweight in-flight state — page images and per-page blocks; the uploaded source is
 held once in a doc-keyed store and memory-mapped by each stage that reads it, never copied through the bus
@@ -118,6 +130,22 @@ one, while each carries its own CUDA context.
 out first. Get either rule wrong and the symptom is identical to a slow GPU: the model idles, every knob
 looks innocent, and nothing in our own logs says otherwise.
 
+**Bound what holds memory; never bound what the server already schedules.** The two model workloads are
+opposite in shape and take opposite treatment. A *crop* is capped by us, because an outstanding crop pins a
+decoded region in our own memory — the bound is about RAM, and it happens to equal the server's sequence
+limit. A *text request* holds nothing on our side, so every cap we place on it can only subtract: the
+inference server admits by free cache, which is size-aware in the way a request count can never be, and a
+request that does not fit simply waits, holding token ids and no cache at all. Table work is therefore
+dispatched **unbounded** and the server decides what runs.
+
+This was three separate caps before it was one rule, and their product was invisible: a stage cap derived
+from the CPU count (three, on a 24-core machine), a semaphore in the dispatcher, and the server's own
+sequence limit. Each looked defensible alone. Together they held the model at three concurrent requests and
+6% of its cache for an entire run, with *nothing waiting* behind them — the exact signature of a saturated
+GPU, and the reason it went unnoticed. A count-based cap cannot serve a table description of a thousand
+tokens and an evidence batch of thirty thousand at the same time; free cache serves both without being told
+which is which.
+
 Which is why the stage line separates **waiting** from **working** — every span is one or the other, never
 both. A span that mixes them cannot answer the only question worth asking. And no span is ever reported as a
 raw sum: pages run concurrently, and so do the crops inside a page, so every accumulator is a sum of
@@ -141,7 +169,17 @@ Memory then follows from what each thing is needed *for*, not how long it is ref
 Host memory is therefore **flat** — a function of these bounds alone, not of how many documents are
 uploaded, how large they are, how dense their pages are, or how long the queue gets. Backpressure
 propagates the whole way back: requests fill → pages stop being admitted → rendered pages back up → render
-stalls → paginate stalls.
+stalls → paginate stalls. Measured: **~18 GB peak host RAM** across a 35-document run, with other
+applications on the machine, and the same figure whether the corpus is a page or a thousand.
+
+That leaves headroom, and headroom is deliberately **not** spent. Every one of these bounds is on the
+*supply* side of a saturated consumer, and raising a bound only helps if that bound is what throttles
+throughput. It is not, and the stage line says so directly: crops wait **23–26 seconds each** for a slot at
+the model on the largest documents, while every upstream wait — render, text layer, crop budget, decode —
+sits at zero. Supply already outruns the GPU by orders of magnitude. Admitting more pages would lengthen a
+queue that is already deep and hold more memory to do it; measured, doubling pages in flight tripled our own
+queue, produced identical model work, and made the run *slower*. The only lever that moves end-to-end time
+is sending the model less work, never staging more of it.
 
 ### Reading pages (ocr)
 
@@ -205,6 +243,19 @@ boundary the query side relies on: the model writes the query, the database comp
 because the failure mode of every "AI reads your spreadsheet" system is the model quietly misreading or
 re-adding a number — so the model is never in a position to touch a value.
 
+A second rule decides *when* a model is asked at all: **the model is asked only where the source is
+genuinely ambiguous.** Almost every format states its own structure. A `<table>` marks its header with
+`<thead>` or `<th>`; the recognition model marks a header row in its own output; a CSV's first row names
+its columns; a JSON entity's keys *are* its schema. In all of those the header is read, not inferred, and
+no model call is made. Only a **spreadsheet's raw cell grid** is genuinely undecidable — tables can begin
+anywhere on a sheet, several can share one, headers can span rows, and nothing in the file says which cells
+are which. That is the one place structure is asked for.
+
+The routing is therefore by **ambiguity, not by source** — the distinction matters, because a source-shaped
+rule invites a private path per format, and the whole point is that there is exactly one. Every table from
+every origin converges on a grid, one materializer turns a grid plus a structure into the canonical shape,
+and the only thing that varies is whether that structure was read from the format or asked of a model.
+
 Tables are separated **by schema**: a run of rows with consistent columns is one table; a schema change
 starts a new one, so a single source table yields **one or more** canonical tables — a stacked invoice
 splits into its summary block and its line-items.
@@ -212,24 +263,36 @@ splits into its summary block and its line-items.
 By source:
 
 - **Spreadsheets** — every cell, merge, table object and frozen pane is captured; contiguous regions are
-  found and their structure resolved from anchors; column names are read from the header rows, not written
-  by the model.
-- **CSV/TSV** — types inferred deterministically; blank headers named from the column's position. No model
-  for structure.
+  found and each region's structure resolved by the model from anchors. **The one ambiguous source, and the
+  only one that costs a structure call.** Column names are still derived from the header rows the model
+  points at, never written by it.
+- **CSV/TSV** — one schema by construction. The parser handles quoting, embedded newlines and ragged rows,
+  skips leading blank lines, and names the columns from the first non-empty row. No model.
 - **JSON** — shredded deterministically into normalized, joinable tables: nested objects flattened by
-  dotted key, lists of objects into child tables keyed back to their parent.
-- **Embedded HTML/PDF tables** — the grid is built deterministically (spans expanded), then the same
-  structure step the spreadsheets use resolves multi-row headers and schema splits into one or more
-  tables; types inferred from the cells and column names read from the header rows. Tables continuing across consecutive pages are
-  stitched into one first — fragments with a matching column count across a page boundary merged, repeated
-  headers dropped, page furniture skipped — so a forty-page table is structured as one.
+  dotted key, lists of objects into child tables keyed back to their parent. An entity's keys are its
+  schema, so there is nothing to infer. No model.
+- **Embedded HTML/PDF tables** — the grid is built deterministically with spans expanded, and the header
+  band is read from the markup: `<thead>` or a leading run of `<th>` for documents, and for a scanned page
+  the recognition model's own header marking, which it emits alongside the cells and which is carried
+  through into the HTML rather than discarded. No structure call. Tables continuing across consecutive
+  pages are stitched into one first — fragments with a matching column count across a page boundary merged,
+  repeated headers dropped, page furniture skipped — so a forty-page table is one table.
 
-Every table gets a description written for retrieval — its subject, what a row represents, and the
-entities and vocabulary a user would search for. It is written at **finalize** (below), not during
-ingestion, uniformly over native, HTML and scanned-page tables — a search artifact, never ingested data.
-This description is what makes a table *findable*: a grid
-of numbers and terse headers has almost no natural-language surface to match a question against, so without
-a written description a search for the table's subject would miss it.
+Where a model *is* asked, it is shown a bounded view and never the table: at most **20 rows** — the top few,
+the bottom few, and every Mth in between, with M widened as the sheet grows so the sample spans its whole
+height — against **every column**, because the columns are the schema and a header dropped is a schema lost.
+A payload is therefore a function of a table's width, never of its length: a five-row sheet and a
+five-million-row sheet cost the same call. Sizing that view by a *token budget* instead is a mistake made
+and measured — it let a prompt grow to fill whatever window was available, producing 20k-token requests to
+decide which rows were headers.
+
+Every table gets a description written for retrieval — its subject, what a row represents, and the entities
+and vocabulary a user would search for. It is written **in the table stage, one call per table**, uniformly
+over native, HTML and scanned-page tables — a search artifact, never ingested data. Per-table is what makes
+it cheap to parallelize: each is a small independent request, so a hundred tables are a hundred requests the
+server batches, not one request generating a hundred descriptions one token at a time. This description is
+what makes a table *findable*: a grid of numbers and terse headers has almost no natural-language surface to
+match a question against, so without a written description a search for the table's subject would miss it.
 
 ## Search representation
 
@@ -274,12 +337,16 @@ canonical table representations. Progress is a state per document (`queued → p
 
 Making a library *answerable* is a **separate phase from ingesting it**, run once per library after its
 last document is stored — deliberately never interleaved with reading, so it can't contend with the vision
-model for the GPU. Finalize does two things:
+model for the GPU. Finalize now does one thing:
 
-- **Describe every table.** Each canonical table — native, HTML, or lifted off a scanned page — gets its
-  retrieval description written here, uniformly, as the search artifact above.
 - **Embed and index.** Each leaf's and table's search text is embedded into the dense index and the lexical
   index is built, so the library becomes queryable.
+
+Table descriptions used to be written here too, and are not any more: they moved into the table stage, one
+call per table, alongside the structure work they belong with. A table now leaves ingestion complete rather
+than half-formed, and the description work spreads across the run instead of massing into a phase at the
+end. Finalize keeps a `described` transition so the phases it reports — and the UI reading them — are
+unchanged; it is simply instant now.
 
 Both are gated by the library's **tier**. A *structure* library is ingested to the lossless tree and
 tables and stops there; a *search* library additionally gets the descriptions, embeddings and indexes that
