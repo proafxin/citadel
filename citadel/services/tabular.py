@@ -1,7 +1,5 @@
 import asyncio
 import json
-import re
-from decimal import Decimal
 from io import BytesIO
 
 import polars as pl
@@ -10,8 +8,8 @@ from bs4.element import Tag
 
 from citadel.llm import describe_table
 from citadel.schemas.content import Block
-from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
-from citadel.services.excel import SAMPLE_TABLE_ROWS, MaterializedTable
+from citadel.schemas.table import CellValue
+from citadel.tabular.materialize import MaterializedTable, materialize
 from citadel.tabular.structure import SKIP_TABLE_SLM, structure_grid
 
 
@@ -30,10 +28,6 @@ async def ensure_described(tables: list[MaterializedTable], context: str) -> Non
     )
     for table, description in zip(missing, described, strict=True):
         table.description = description
-
-
-_INT = re.compile(r"-?\d+")
-_FLOAT = re.compile(r"-?\d+\.\d+")
 
 
 def read_csv_grid(data: bytes, separator: str) -> list[list[str]]:
@@ -98,84 +92,6 @@ def _header_count(table: Tag) -> int:
     return count or 1
 
 
-def _lossless_int(value: str) -> bool:
-    # a numeric type is assigned ONLY if the value round-trips back to its exact source text. rejects "007", "+5",
-    # " 5 " etc. so codes/ids with leading zeros stay verbatim strings and are never silently renumbered. also bounded
-    # to signed 64-bit so a long numeric id can't overflow the integer cast at query time — it stays a string instead
-    if not _INT.fullmatch(value):
-        return False
-    number = int(value)
-    return str(number) == value and -(2**63) <= number <= 2**63 - 1
-
-
-def _lossless_decimal(value: str) -> bool:
-    # Decimal preserves trailing zeros and exact digits ("1.50" stays "1.50"); leading-zero/exponent forms don't
-    # round-trip and fall through to string
-    return bool(_FLOAT.fullmatch(value)) and str(Decimal(value)) == value
-
-
-def _dtype(values: list[str]) -> ColumnDType:
-    present = [value for value in values if value]
-    if not present:
-        return ColumnDType.STRING
-    if all(_lossless_int(value) for value in present):
-        return ColumnDType.INTEGER
-    if all(_lossless_int(value) or _lossless_decimal(value) for value in present):
-        return ColumnDType.DECIMAL
-    return ColumnDType.STRING
-
-
-def _cast(value: str, dtype: ColumnDType) -> CellValue:
-    # never converts: every cell is stored as its exact source text (empty → None). the dtype travels as a hint on the
-    # column and the query casts on demand — so dirty cells, codes and ids are never silently altered or dropped
-    return None if value == "" else value
-
-
-def _grid_table(grid: list[list[str]], n_header: int, caption: str | None = None) -> MaterializedTable:
-    # deterministic single-table materialization from a verbatim grid: header labels from the header band, every body
-    # cell copied verbatim (dtype is only a hint). used as the fallback when the model returns no structure
-    n_header = min(max(n_header, 0), len(grid))
-    width = len(grid[0]) if grid else 0
-    headers = [
-        " ".join(dict.fromkeys(grid[row][col] for row in range(n_header) if grid[row][col])) for col in range(width)
-    ]
-    body = grid[n_header:]
-    columns: list[Column] = []
-    data_rows: list[list[CellValue]] = [[None] * width for _ in body]
-    for col in range(width):
-        values = [row[col] for row in body]
-        dtype = _dtype(values)
-        columns.append(Column(header=headers[col] or f"col{col}", dtype=dtype))
-        for index, value in enumerate(values):
-            data_rows[index][col] = _cast(value, dtype)
-    # header band kept verbatim as the first rows, not consumed into names only
-    header_cells = [[_cast(grid[row][col], ColumnDType.STRING) for col in range(width)] for row in range(n_header)]
-    header_indices = list(range(len(header_cells)))
-    return MaterializedTable(
-        sheet_no=0,
-        columns=columns,
-        rows=[*header_cells, *data_rows],
-        sample_rows=data_rows[:SAMPLE_TABLE_ROWS],
-        n_rows=len(data_rows),
-        title=None,
-        caption=caption,
-        notes=[],
-        description="",
-        anchors={"header_rows": header_indices},
-        header_rows=header_indices,
-    )
-
-
-def extract_html_table(html: str) -> MaterializedTable:
-    table = BeautifulSoup(html, "lxml").find("table")
-    grid = _grid(table) if isinstance(table, Tag) else []
-    if not grid:
-        return MaterializedTable(0, [], [], [], 0, None, None, [], "", None)
-    caption_tag = table.find("caption") if isinstance(table, Tag) else None
-    caption = caption_tag.get_text(separator=" ", strip=True) if caption_tag is not None else None
-    return _grid_table(grid, _header_count(table), caption)
-
-
 def html_to_text(html: str) -> str:
     return BeautifulSoup(html, "lxml").get_text(separator=" ", strip=True)
 
@@ -185,76 +101,6 @@ def grid_from_html(html: str) -> list[list[str]]:
     return _grid(table) if isinstance(table, Tag) else []
 
 
-def _grid_cell(grid: list[list[str]], row: int, col: int) -> str:
-    return grid[row][col] if 0 <= row < len(grid) and 0 <= col < len(grid[row]) else ""
-
-
-def _grid_header(grid: list[list[str]], header_rows: list[int], col: int) -> str | None:
-    parts = dict.fromkeys(cell for row in header_rows if (cell := _grid_cell(grid, row, col)))
-    return " ".join(parts) or None
-
-
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-
-def _is_data_token(cell: str) -> bool:
-    value = cell.strip()
-    return bool(_EMAIL_RE.match(value) or _ISO_DATE_RE.match(value))
-
-
-def _plausible_header_rows(grid: list[list[str]], header_rows: list[int]) -> list[int]:
-    # a header NAMES the columns; it is never the data itself. emails and ISO dates are never column names, so a
-    # predicted header row made mostly of them is a data row the model promoted (its cells then get space-joined into
-    # "103 104" / two emails). bare numbers are deliberately NOT a data signal: wide sheets legitimately use years as
-    # headers (Country Name | ... | 1960 | 1961 | ...), and rejecting those would destroy a correct schema.
-    kept: list[int] = []
-    for row in header_rows:
-        cells = [cell for cell in (grid[row] if row < len(grid) else []) if cell.strip()]
-        if cells and sum(1 for cell in cells if _is_data_token(cell)) * 2 > len(cells):
-            continue
-        kept.append(row)
-    return kept
-
-
-def apply_grid_structure(grid: list[list[str]], structure: TableStructure) -> MaterializedTable:
-    count = structure.col_end - structure.col_start + 1
-    header_rows = _plausible_header_rows(grid, structure.header_rows or [])
-    # a rejected header row is data the model ate — pull data_start back so those rows are kept as rows, not lost
-    rejected = set(structure.header_rows or []) - set(header_rows)
-    data_start = min([structure.data_start, *rejected]) if rejected else structure.data_start
-    collected: list[list[str]] = []
-    for offset in range(data_start, structure.data_end + 1):
-        raw = [_grid_cell(grid, offset, structure.col_start + index) for index in range(count)]
-        if all(value == "" for value in raw):
-            continue
-        collected.append(raw)
-    dtypes = [_dtype([raw[index] for raw in collected]) for index in range(count)]
-    headers = [_grid_header(grid, header_rows, structure.col_start + index) for index in range(count)]
-    columns = [Column(header=headers[index] or f"col{index}", dtype=dtypes[index]) for index in range(count)]
-    # the header rows are kept as the first rows of the stored grid — verbatim, never dropped. a row the detector
-    # wrongly promoted to header survives as a queryable row; header_rows records what is header, deletion never does
-    header_cells = [
-        [_cast(_grid_cell(grid, row, structure.col_start + i), ColumnDType.STRING) for i in range(count)]
-        for row in sorted(header_rows)
-    ]
-    data_rows = [[_cast(raw[index], dtypes[index]) for index in range(count)] for raw in collected]
-    header_indices = list(range(len(header_cells)))
-    return MaterializedTable(
-        sheet_no=0,
-        columns=columns,
-        rows=[*header_cells, *data_rows],
-        sample_rows=data_rows[:SAMPLE_TABLE_ROWS],
-        n_rows=len(data_rows),
-        title=structure.title,
-        caption=structure.caption,
-        notes=structure.notes or [],
-        description=structure.description or "",
-        anchors={"header_rows": header_indices},
-        header_rows=header_indices,
-    )
-
-
 async def structure_html_tables(html: str) -> list[MaterializedTable]:
     table = BeautifulSoup(html, "lxml").find("table")
     grid = _grid(table) if isinstance(table, Tag) else []
@@ -262,19 +108,14 @@ async def structure_html_tables(html: str) -> list[MaterializedTable]:
         return []
     structures = await structure_grid(grid)
     # a structure that yields no data rows is not a table — drop it rather than storing an empty relation
-    tables = [t for t in (apply_grid_structure(grid, spec) for spec in structures) if t.n_rows]
-    if tables:
-        return tables
-    fallback = extract_html_table(html)
-    return [fallback] if fallback.n_rows else []
+    return [t for t in (materialize(grid, spec) for spec in structures) if t.n_rows]
 
 
 async def structure_csv_tables(data: bytes, separator: str) -> list[MaterializedTable]:
     grid = await asyncio.to_thread(read_csv_grid, data, separator)
     if not grid:
         return []
-    tables = [apply_grid_structure(grid, spec) for spec in await structure_grid(grid)]
-    return tables or [_grid_table(grid, 1)]
+    return [materialize(grid, spec) for spec in await structure_grid(grid)]
 
 
 def _next(counters: dict[str, int], entity: str) -> int:
@@ -326,46 +167,22 @@ def normalize_json(data: object, root: str) -> dict[str, list[dict]]:
     return entities
 
 
-def _infer_dtype(values: list[CellValue]) -> ColumnDType:
-    present = [value for value in values if value is not None]
-    if not present:
-        return ColumnDType.STRING
-    if all(isinstance(value, bool) for value in present):
-        return ColumnDType.BOOLEAN
-    if all(isinstance(value, int) and not isinstance(value, bool) for value in present):
-        return ColumnDType.INTEGER
-    if all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in present):
-        return ColumnDType.FLOAT
-    return ColumnDType.STRING
+def _entity_grid(rows: list[dict]) -> list[list[str]]:
+    keys = list(dict.fromkeys(key for row in rows for key in row))
+    body = [["" if (value := row.get(key)) is None else str(value) for key in keys] for row in rows]
+    return [keys, *body]
 
 
-def _entity_to_table(name: str, rows: list[dict]) -> MaterializedTable:
-    keys: list[str] = []
-    seen: set[str] = set()
-    for row in rows:
-        for key in row:
-            if key not in seen:
-                seen.add(key)
-                keys.append(key)
-    columns = [Column(header=key, dtype=_infer_dtype([row.get(key) for row in rows])) for key in keys]
-    data_rows = [[row.get(key) for key in keys] for row in rows]
-    return MaterializedTable(
-        sheet_no=0,
-        columns=columns,
-        rows=data_rows,
-        sample_rows=data_rows[:SAMPLE_TABLE_ROWS],
-        n_rows=len(data_rows),
-        title=name,
-        caption=None,
-        notes=[],
-        description="",
-        anchors=None,
-    )
-
-
-def extract_json_tables(data: bytes, root: str) -> list[tuple[int, MaterializedTable]]:
+async def extract_json_tables(data: bytes, root: str) -> list[tuple[int, MaterializedTable]]:
     entities = normalize_json(json.loads(data), root)
-    return [(ordinal, _entity_to_table(name, rows)) for ordinal, (name, rows) in enumerate(entities.items(), start=1)]
+    out: list[tuple[int, MaterializedTable]] = []
+    for name, rows in entities.items():
+        grid = _entity_grid(rows)
+        for structure in await structure_grid(grid):
+            table = materialize(grid, structure, extra_notes=[name])
+            if table.n_rows:
+                out.append((len(out) + 1, table))
+    return out
 
 
 _PARATEXT = {"header", "footer", "page_number", "page_footnote"}

@@ -1,5 +1,5 @@
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 
@@ -7,13 +7,13 @@ import openpyxl
 from openpyxl.cell.cell import Cell as OpenpyxlCell
 from openpyxl.worksheet.worksheet import Worksheet
 
-from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
+from citadel.schemas.table import TableStructure
 from citadel.services.grid import classify_grid, grid_text
+from citadel.tabular.materialize import MaterializedTable, materialize
 from citadel.tabular.structure import structure_grid
 
 type RawCellValue = str | int | float | bool | datetime | None
 
-SAMPLE_TABLE_ROWS = 10
 _A1_REF = re.compile(r"(\$?[A-Za-z]{1,3})\$?\d+")
 
 
@@ -59,26 +59,6 @@ class Region:
     max_row: int
     max_col: int
     cells: list[Cell]
-
-
-@dataclass
-class MaterializedTable:
-    sheet_no: int
-    columns: list[Column]
-    rows: list[list[CellValue]]  # the FULL stored grid: header rows first (verbatim), then data rows. header rows are
-    # kept, not deleted — a row the detector wrongly called a header (measured: Coca-Cola's NET OPERATING REVENUES, its
-    # top P&L line) survives as a queryable row instead of vanishing into a column name. what is a header is recorded in
-    # header_rows, not enforced by removal, so a wrong call is a mislabel over intact data, never a lost row
-    sample_rows: list[list[CellValue]]  # DATA rows only — the sample and n_rows are the data view, header rows excluded
-    n_rows: int
-    title: str | None
-    caption: str | None
-    notes: list[str]
-    description: str
-    anchors: dict
-    formulas: list[str] | None = None
-    header_rows: list[int] = field(default_factory=list)  # indices into `rows` that are header, not data. the query
-    # projection skips exactly these, so the typed view is unchanged while the grid stays whole and reconstructable
 
 
 @dataclass
@@ -216,10 +196,6 @@ def find_regions(sheet: SheetExtraction) -> list[Region]:
     return regions
 
 
-def _value_map(cells: list[Cell]) -> dict[tuple[int, int], RawCellValue]:
-    return {(cell.row, cell.col): cell_value(cell) for cell in cells}
-
-
 def region_comments(region: Region) -> list[str]:
     ordered = sorted(region.cells, key=lambda cell: (cell.row, cell.col))
     return [cell.comment for cell in ordered if cell.comment]
@@ -240,53 +216,6 @@ def region_formulas(region: Region) -> list[str]:
     return list(by_shape.values())
 
 
-def _infer_dtype(values: list[RawCellValue]) -> ColumnDType:
-    present = [value for value in values if value is not None]
-    if not present:
-        return ColumnDType.STRING
-    if all(isinstance(value, bool) for value in present):
-        return ColumnDType.BOOLEAN
-    if all(isinstance(value, int) and not isinstance(value, bool) for value in present):
-        return ColumnDType.INTEGER
-    if all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in present):
-        return ColumnDType.FLOAT
-    if all(isinstance(value, datetime) for value in present):
-        return ColumnDType.DATETIME
-    return ColumnDType.STRING
-
-
-def _verbatim(value: RawCellValue) -> CellValue:
-    # a header cell, kept exactly as written: datetimes to iso, everything else to its own text. never dtype-cast, so a
-    # header that happens to be numeric ("2009") stays the label it is
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return str(value)
-
-
-def _cast(value: RawCellValue, dtype: ColumnDType) -> CellValue:
-    if value is None:
-        return None
-    numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
-    if dtype == ColumnDType.INTEGER and numeric:
-        return int(value)
-    if dtype in {ColumnDType.FLOAT, ColumnDType.DECIMAL} and numeric:
-        return float(value)
-    if dtype == ColumnDType.BOOLEAN and isinstance(value, bool):
-        return value
-    if dtype in {ColumnDType.DATE, ColumnDType.DATETIME} and isinstance(value, datetime):
-        return value.isoformat()
-    return str(value)
-
-
-def _sample(rows: list[list[CellValue]]) -> list[list[CellValue]]:
-    if len(rows) <= SAMPLE_TABLE_ROWS:
-        return list(rows)
-    step = len(rows) / SAMPLE_TABLE_ROWS
-    return [rows[int(index * step)] for index in range(SAMPLE_TABLE_ROWS)]
-
-
 def _anchor_range(region: Region, structure: TableStructure) -> dict:
     top = region.min_row + (min(structure.header_rows) if structure.header_rows else structure.data_start)
     return {
@@ -295,55 +224,6 @@ def _anchor_range(region: Region, structure: TableStructure) -> dict:
         "max_row": region.min_row + structure.data_end,
         "max_col": region.min_col + structure.col_end,
     }
-
-
-def _header_at(values: dict[tuple[int, int], RawCellValue], header_rows: list[int], col: int) -> str | None:
-    parts: dict[str, None] = {}
-    for row in header_rows:
-        raw = values.get((row, col))
-        if raw is not None and (text := str(raw).strip()):
-            parts[text] = None
-    return " ".join(parts) or None
-
-
-def apply_structure(region: Region, structure: TableStructure, sheet_no: int) -> MaterializedTable:
-    values = _value_map(region.cells)
-    count = structure.col_end - structure.col_start + 1
-    header_abs = [region.min_row + offset for offset in (structure.header_rows or [])]
-    # the header rows are read VERBATIM and kept as the first rows of the stored grid — never cast to the column dtype
-    # (a header cell is a name, not a value) and never dropped. what makes them "header" is header_rows below, not
-    # their absence
-    header_cells: list[list[CellValue]] = [
-        [_verbatim(values.get((abs_row, region.min_col + structure.col_start + index))) for index in range(count)]
-        for abs_row in header_abs
-    ]
-    raw_rows: list[list[RawCellValue]] = []
-    for offset in range(structure.data_start, structure.data_end + 1):
-        abs_row = region.min_row + offset
-        raw = [values.get((abs_row, region.min_col + structure.col_start + index)) for index in range(count)]
-        if all(value is None for value in raw):
-            continue
-        raw_rows.append(raw)
-    dtypes = [_infer_dtype([raw[index] for raw in raw_rows]) for index in range(count)]
-    headers = [_header_at(values, header_abs, region.min_col + structure.col_start + index) for index in range(count)]
-    columns = [Column(header=headers[index] or f"col{index}", dtype=dtypes[index]) for index in range(count)]
-    data_rows = [[_cast(raw[index], dtypes[index]) for index in range(count)] for raw in raw_rows]
-    all_rows = [*header_cells, *data_rows]
-    header_indices = list(range(len(header_cells)))
-    return MaterializedTable(
-        sheet_no=sheet_no,
-        columns=columns,
-        rows=all_rows,
-        sample_rows=_sample(data_rows),
-        n_rows=len(data_rows),
-        title=structure.title,
-        caption=structure.caption,
-        notes=[*(structure.notes or []), *region_comments(region)],
-        description=structure.description or "",
-        anchors={**_anchor_range(region, structure), "header_rows": header_indices},
-        formulas=region_formulas(region) or None,
-        header_rows=header_indices,
-    )
 
 
 def _render_cell(value: RawCellValue) -> str:
@@ -357,7 +237,7 @@ def _render_cell(value: RawCellValue) -> str:
 def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
     # the region as a dense string grid for the header model: merged cells are filled (top-left value spans the whole
     # merge) and every typed value rendered to text, so a merged / multi-row header reads like a normal grid. offsets
-    # are region-relative (row 0 = region.min_row) to line up with structure_grid and apply_structure
+    # are region-relative (row 0 = region.min_row) to line up with structure_grid and materialize
     values = {(cell.row, cell.col): cell_value(cell) for cell in region.cells}
     for merge in sheet.merges:
         if merge.max_row < region.min_row or merge.min_row > region.max_row:
@@ -391,5 +271,13 @@ async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, Sheet
             continue
         for structure in await structure_grid(grid):
             ordinal += 1
-            items.append((ordinal, apply_structure(region, structure, sheet.sheet_no)))
+            table = materialize(
+                grid,
+                structure,
+                sheet_no=sheet.sheet_no,
+                formulas=region_formulas(region) or None,
+                extra_notes=region_comments(region),
+                anchors=_anchor_range(region, structure),
+            )
+            items.append((ordinal, table))
     return items

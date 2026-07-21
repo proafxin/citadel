@@ -19,7 +19,7 @@ from citadel.models.library import Library
 from citadel.models.status import DocumentStatus, LibraryStatus
 from citadel.models.table import Table, TableRow
 from citadel.schemas.content import Block
-from citadel.services.excel import MaterializedTable, SheetItem, SheetText
+from citadel.services.excel import SheetItem, SheetText
 from citadel.services.grid import classify_grid
 from citadel.services.tabular import (
     ensure_described,
@@ -40,6 +40,7 @@ from citadel.services.tree import (
     split_paratext,
 )
 from citadel.storage import delete_object, get_object, put_object
+from citadel.tabular.materialize import MaterializedTable
 from config import EMBED_MAX_TOKENS, get_embed_tokenizer
 
 
@@ -171,7 +172,7 @@ def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:
 
 def _reclassify_regions(blocks: list[Block]) -> list[Block]:
     # the visual model labels displayed math, prose and empty regions as "table". re-type each to the leaf it really is
-    # (equation / paragraph / dropped) so it never reaches table structuring, where it would become a col0..colN relation
+    # (equation / paragraph / dropped) so it never reaches table structuring, where it becomes a col0..colN relation
     kept: list[Block] = []
     for block in blocks:
         if block.type != "table":

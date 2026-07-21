@@ -98,42 +98,21 @@ def _derive(tables: list[dict], grid: list[list[str]], height: int, width: int) 
     return out
 
 
-def _fallback(grid: list[list[str]], height: int, width: int) -> list[TableStructure]:
-    # used only when the model returns nothing usable: the leading run of interesting rows is the header, the rest is
-    # data. deterministic and never empty, so a table always materializes rather than being lost
-    labels = classify_rows(grid)
-    header_rows: list[int] = []
-    for index, label in enumerate(labels):
-        if label != "interesting":
-            break
-        header_rows.append(index)
-    data_start = len(header_rows)
-    if data_start >= height:
-        header_rows, data_start = [], 0
-    return [
-        TableStructure(
-            col_start=0, col_end=width - 1, header_rows=header_rows, data_start=data_start, data_end=height - 1
-        )
-    ]
-
-
-# TEMPORARY, for measurement only. flip to False to restore normal behaviour (or `git checkout` this file and
-# citadel/services/tabular.py). when True, EVERY ingestion SLM call is skipped — table structure falls back to the
-# deterministic header detection and descriptions are left empty — so a run measures the pipeline with zero SLM work.
-# the pipeline still completes end to end, so the total is directly comparable to a normal run
-SKIP_TABLE_SLM = True
+# measurement switch. True skips the SLM entirely so a run measures the pipeline with zero table-structure work.
+# it produces NO tables rather than deterministic ones — there is no fallback to fall back to, and inventing a
+# structure to fill the gap is exactly what was just removed
+SKIP_TABLE_SLM = False
 
 
 async def structure_grid(grid: list[list[str]]) -> list[TableStructure]:
     height = len(grid)
     if height == 0:
         return []
-    width = max(len(row) for row in grid)
     if SKIP_TABLE_SLM:
-        return _fallback(grid, height, width)
+        return []
+    width = max(len(row) for row in grid)
     indices = _budgeted_rows(grid, width)
     kinds = column_kinds(grid)
     hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))
     tables = await structure_sheet(_payload_text(grid, indices, width), hint, height, width)
-    derived = _derive(tables, grid, height, width)
-    return derived or _fallback(grid, height, width)
+    return _derive(tables, grid, height, width)  # the model's answer, whatever it is — nothing is invented here

@@ -654,7 +654,7 @@ async def handle_tabular(fields: dict[str, str]) -> None:
         data = await asyncio.to_thread(path.read_bytes)
         filename = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
         if kind == "json":
-            items = await asyncio.to_thread(extract_json_tables, data, filename.rsplit(".", 1)[0] or "root")
+            items = await extract_json_tables(data, filename.rsplit(".", 1)[0] or "root")
         else:
             separator = "\t" if kind == "tsv" else ","
             items = list(enumerate(await structure_csv_tables(data, separator), start=1))
