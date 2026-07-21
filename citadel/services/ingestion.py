@@ -120,6 +120,12 @@ DETECT_WORKERS = 1  # ONE detector process. more is not just unnecessary, it is 
 # measured SLOWER than one (22.5 pages/s at one, 19.5 at two, 11.7 at two under load), while each carries its own
 # cuda context and model — the second cost ~1.7GB of VRAM to make the detector slower. demand is ~4 pages/s.
 # batching is pointless too (44ms/page at batch 1, 42ms at batch 16): the cost is CPU-side, not GPU
+UNCHARGED_PAGES = 512  # pages claimed but not yet charged to the crop budget — the ONE window a page is invisible to
+# every other bound, between its claim and the detector finding its regions. it is NOT a limit on pages in flight: a
+# charged page is already counted in crops and must not be counted again. sized generously because a page sits here
+# only for a detector pass (~100ms), and because a crop-sparse document needs many pages resident to put 128 crops in
+# front of the model at all — measured 0.82 crops/page on a born-digital book against 23.5 on a scanned one, so any
+# fixed page count is right for one of them and starves the other. host RAM bounds it: ~2MB of encoded image each
 CROP_BUFFER = 12288  # crops cut and waiting on the semaphore. if it cannot cover the pages in flight they simply queue
 # HERE instead, and budget_wait — not the model — becomes what limits us. a crop is PNG bytes by the time it is charged
 # (~40KB, not the ~400KB of raw pixels), so the headroom is cheap. the semaphore still caps what is in flight AT the
@@ -180,6 +186,32 @@ class _CropBudget:
             self.waiters.popleft()
             self.used += need
             waiter.set_result(None)
+
+
+@dataclass
+class _Admission:
+    # pages CLAIMED but not yet accounted for in crops. this is the only window a page is unmeasurable: the crop budget
+    # cannot see a page until the detector has found its regions, so between the claim and that charge the page holds an
+    # encoded image the budget reads as free. bound THAT window — not the page's whole life. a page that has charged is
+    # already represented in the crop budget, and counting it twice is what starved the model: at a fixed 96 pages, a
+    # document yielding 0.8 crops a page could put only ~79 crops in front of 128 slots and could not claim more,
+    # because its pages sat holding slots while their crops queued. crops are the unit the GPU consumes; pages are not
+    limit: int
+    pending: set[tuple[str, int]] = field(default_factory=set)
+
+    def free(self) -> int:
+        return self.limit - len(self.pending)
+
+    def enter(self, doc_id: str, page_idx: int) -> None:
+        self.pending.add((doc_id, page_idx))
+
+    def settle(self, doc_id: str, page_idx: int) -> None:
+        self.pending.discard((doc_id, page_idx))  # idempotent: charged normally, or released by the job's finally
+
+
+@lru_cache
+def get_admission() -> _Admission:
+    return _Admission(UNCHARGED_PAGES)
 
 
 @lru_cache
@@ -812,7 +844,7 @@ async def _read_crop(
         budget.release(1)
 
 
-async def extract_page(doc_id: str, image: bytes, digital: bool) -> list[Block]:
+async def extract_page(doc_id: str, page_idx: int, image: bytes, digital: bool) -> list[Block]:
     # a page's ~10MB decoded bitmap is needed only to CUT — never to wait on the model, which is the long part. so it
     # lives inside the decode gate: cut, drop the bitmap, leave. the page then waits out the model holding just its
     # crops and the ~2MB of encoded bytes it already had.
@@ -831,6 +863,9 @@ async def extract_page(doc_id: str, image: bytes, digital: bool) -> list[Block]:
     # CUT.
     mark = time.time()
     granted = await budget.acquire(max(len(indices), 1))
+    # charged: this page is now represented in crops, so it stops occupying an admission slot and the next page can be
+    # claimed. a sparse page frees its slot having added almost nothing, so admission keeps pulling until crops fill
+    get_admission().settle(doc_id, page_idx)
     spans.budget_wait = time.time() - mark
     mark = time.time()
     async with get_decode_gate():
@@ -986,7 +1021,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     digital = fields.get("digital") == "1"
     await get_redis().hincrby(f"doc:{doc_id}", "started_count", 1)
     ocr_t = time.time()
-    blocks = await extract_page(doc_id, image, digital)
+    blocks = await extract_page(doc_id, page_idx, image, digital)
     for block in blocks:
         block.page_idx = page_idx
 

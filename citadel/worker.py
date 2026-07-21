@@ -26,6 +26,7 @@ from citadel.services.ingestion import (
     ensure_group,
     fail_document,
     fail_page,
+    get_admission,
     get_crop_budget,
     handle_merge,
     handle_normalize,
@@ -53,21 +54,14 @@ PAGES_BUFFER = DECODE_CONCURRENCY  # rendered pages sitting UNCLAIMED in `pages`
 # waits on render to catch up — a stall the GPU pays for. it does NOT bound pages in flight (ocr claims as fast as the
 # crop budget allows), so it is purely a render-ahead buffer and purely a RAM bound (~2MB an image), deep enough that
 # ocr never waits on pdfium and shallow enough that an 800-page PDF cannot rasterize itself into redis.
-PAGES_IN_FLIGHT = 96  # pages CLAIMED at once — each pins its ~2MB encoded image in redis AND here (~4MB apiece).
-# EXPERIMENT: this does not change what the GPU sees — the crop semaphore decides the batch, and this only decides how
-# many crops are CUT and left pending on it. at 128 pages that is ~2,300 coroutines awaiting a permit, all live on the
-# event loop (833k context switches/sec). fewer pages is less scheduler churn and less RAM; whether any of that reaches
-# the GPU is the question, and the honest prior is no — the model is not starved.
-# NOT tied to CROP_CONCURRENCY, though it used to be: they bound different things and the coupling made one unraisable
-# without paying for the other. this is a RAM bound; the crop semaphore is a MODEL-saturation bound. going 128 -> 160
-# with the semaphore cost 3GB of host memory and fed the model nothing.
-# raising it does NOT feed the model: measured, doubling it tripled the queue on our own semaphore (crop_wait 260k ->
-# 772k seconds on the scanned book) while the model did the SAME amount of work (predict unchanged at ~42k) and wall
-# time got WORSE (799s -> 844s). the crops were never short of supply — a page sitting in crop_wait is a page whose
-# crops are already cut and DEMANDING slots, so the semaphore is saturated long before the page cap binds. every page
-# above this is a pinned image lengthening a queue that is already full.
-# it must exist at all: a page has to be claimed before it can lay out, and the crop budget cannot see it until it
-# does, so without a cap admission never blocks and claimed pages grow without end (measured: ~1700 claimed, ~3.4GB).
+#
+# there is no cap on pages IN FLIGHT any more, and its removal is the point. it was a fixed page count (96) standing in
+# for a crop bound, and a page's crop yield spans 0 to 23.5 — so it was simultaneously too loose for a scanned book and
+# too tight for a born-digital one, which could put only ~79 crops in front of 128 slots and then could claim no more,
+# its pages held by crops still queueing. admission is now UNCHARGED_PAGES (the invisible window) plus the crop budget:
+# both denominated in what the GPU consumes. the old measurement that raising the page cap hurt (799s -> 844s) still
+# holds and is not contradicted — raising a cap uniformly deepens a queue that is already full, whereas admitting on
+# crop supply adds pages only when the model would otherwise sit idle.
 
 BLOCK_MS = 5000
 
@@ -263,7 +257,7 @@ async def _render_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> N
         cap.release()
 
 
-async def _ocr_job(cap: _Capacity | None, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _ocr_job(doc_id: str, page_idx: int, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_PAGES
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
@@ -277,8 +271,18 @@ async def _ocr_job(cap: _Capacity | None, msg_id: str, raw: dict[bytes, bytes]) 
         logger.error("ocr failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
         await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
     finally:
-        if cap is not None:
-            cap.release()
+        # normally already settled the moment the page charged its crops; this covers the paths that never got there
+        # (undecodable entry, detector failure), so a page can never leak an admission slot
+        get_admission().settle(doc_id, page_idx)
+
+
+def _ocr_claim(msg_id: str, raw: dict[bytes, bytes]) -> None:
+    # the slot is taken SYNCHRONOUSLY at claim, before the dispatch loop can read free() again — a page accounted for
+    # only once its task started running would let the loop claim the whole stream in the gap
+    doc_id = raw[b"doc_id"].decode()
+    page_idx = int(raw[b"page_idx"])
+    get_admission().enter(doc_id, page_idx)
+    _spawn(_ocr_job(doc_id, page_idx, msg_id, raw))
 
 
 DRAINED_STREAMS = (
@@ -393,19 +397,19 @@ async def render() -> None:
 
 
 async def _ocr_room() -> int:
-    # crops are the bottleneck, so admission is gated on them — but the crop budget CANNOT see a page until the
-    # detector has found its regions, and a page must be claimed to be detected. so a claimed page still waiting on the
-    # detector has charged nothing, the budget reads free, and this gate would keep claiming forever: every one of
-    # those pages holds its encoded image, and they pile up unbounded. PAGES_IN_FLIGHT closes that hole.
-    return get_crop_budget().free()
+    # admission is denominated in CROPS, the unit the GPU actually consumes — never in pages, whose crop yield varies
+    # more than twentyfold across documents. the crop budget cannot see a page until the detector has found its
+    # regions, so the uncharged window is bounded separately; past that a page is fully represented in crops and no
+    # longer occupies a slot. so a sparse document keeps drawing pages until it has filled the model, and a dense one
+    # stops after a handful, without either being told which it is
+    return min(get_crop_budget().free(), get_admission().free())
 
 
 # ---- ocr: read `pages`, extract via vLLM, write blocks + `merge`. crops decide how much work is in flight; this cap
 # only bounds the encoded images we hold while it happens, and is set far above what the crop budget will ever admit
 # (a page yields at least one crop, and only ~2 on a born-digital page) so it can never throttle the model ------------
 async def ocr() -> None:
-    cap = _Capacity(PAGES_IN_FLIGHT)
-    await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)), _ocr_room)
+    await _drive(STREAM_PAGES, None, _ocr_claim, _ocr_room)
 
 
 # ---- merge: read `merge`, assemble result.json, clean up. light concurrency ----------------------------
