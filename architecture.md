@@ -531,12 +531,24 @@ design intends.
   scheduling — the ramp before the first crop exists, and the tail — and everything past that requires
   sending the model fewer or smaller crops (below), not feeding it faster.
 
-- **Every crop is upscaled to a minimum pixel count, and small ones pay for it.** A crop is smart-resized
-  into a fixed pixel window before it is sent. The floor exists so a one-line crop arrives legible — but it
-  means a 27×22 page number is upscaled roughly 190× and still bills a full ~183 image tokens. Since the
-  workload is prefill-bound, that floor is the single largest remaining cost, and lowering it is a direct cut
-  across *every* crop. It has not been changed, because it is the reference pipeline's value and it trades
-  directly against legibility: it needs a quality comparison, not an argument.
+- **Every crop pays a fixed token toll, and most crops are a fraction of what that toll buys.** The
+  recognition model's own image processor smart-resizes each crop into `[112896, 1003520]` pixels — the
+  same window our own resize uses — at `patch_size 14`, `merge_size 2`, so one token covers 28×28 pixels
+  and the floor is **144 tokens, charged whether the region fills it or not**. Measured over a full run:
+  **95.5% of 21,607 crops fall below that floor**, 52.8% below an eighth of it, and **74.1% of the entire
+  token bill is padding** rather than content.
+
+  Lowering our own `MIN_PIXELS` does **not** recover it, and that is a closed question: the model re-floors
+  anything smaller itself, so removing our floor entirely moved the bill from 193.3 to 196.0 tokens/crop —
+  *up*. Our resize duplicates the model's and costs only CPU and bandwidth. It is also not a legibility
+  tradeoff, for the same reason.
+
+  What the padding measures is **packing headroom**. Eight regions that each cost 144 tokens alone still
+  cost 144 tokens merged, so the lever is crop *count*, never crop size. The 809-page scanned book carries
+  ~18 crops a page and 68% of all model work, which is exactly the shape that packs well. Two constraints
+  make it real work rather than a constant change: only adjacent regions sharing a task prompt may merge,
+  since the prompt is chosen per region type; and the returned text must be re-associated with its regions
+  to keep the content tree intact.
 
 - **Page furniture is re-recognized on born-digital pages.** Headers, footers and page numbers are cropped
   and sent to the recognition model even when the page has a text layer that already holds them exactly.

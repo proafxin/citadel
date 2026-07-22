@@ -43,11 +43,11 @@ from citadel.services.ingestion import (
 )
 from citadel.services.paddle import log_crop_sizes
 from citadel.services.slm import read_replies
-from config import CPU_EIGHTH, configure_logging, get_settings
+from config import CPU_EIGHTH, CPU_THIRD, configure_logging, get_settings
 
 logger = logging.getLogger(__name__)
 
-NORMALIZE_CONCURRENCY = CPU_EIGHTH
+NORMALIZE_CONCURRENCY = CPU_THIRD  # see PAGINATE_CONCURRENCY: the ramp, not steady state
 MERGE_CONCURRENCY = CPU_EIGHTH  # light assembly
 STRUCTURE_CONCURRENCY = CPU_EIGHTH  # docs being PREPARED (stitch/reclassify) and routed at once — cpu only, no SLM
 PAGES_BUFFER = DECODE_CONCURRENCY  # rendered pages sitting UNCLAIMED in `pages`, waiting for ocr to pick them up.

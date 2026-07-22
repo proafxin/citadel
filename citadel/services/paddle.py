@@ -113,10 +113,14 @@ def is_readable(block: DetBlock) -> bool:
     return block.label not in PICTURE_LABELS and block.label != "inline_formula"
 
 
-# MEASUREMENT. prefill cost is proportional to the pixels we SEND, so the question the floor poses is: what share of
-# sent pixels exists only because of the floor? that share is the ceiling on what lowering it could return. bucketed
-# against the floor so the answer also says WHERE a new floor would sit — a bucket at 1/2 stops being upscaled the
-# moment the floor halves. counters only; no per-crop logging, which would be 21k lines a run
+# MEASUREMENT. prefill is billed in image TOKENS, not in pixels we transmit, and the two are not interchangeable:
+# the model's own processor resizes into the same [MIN_PIXELS, MAX_PIXELS] window we do, so shrinking our floor
+# changes the bytes on the wire and not one token. one token covers PATCH_PIXELS, so the model's floor is a fixed
+# toll per crop — charged whether the region fills it or not. what this measures is PACKING HEADROOM: the share of
+# the bill that is toll rather than content, which is what merging adjacent regions into one crop could recover.
+# the buckets say how far below the toll the regions sit, i.e. how many would fit in a single crop's worth of it
+PATCH_PIXELS = 14 * 14 * 2 * 2  # patch_size 14, merge_size 2 — from the model's own preprocessor_config
+FLOOR_TOKENS = MIN_PIXELS // PATCH_PIXELS
 _SIZE_BUCKETS = (0.125, 0.25, 0.5, 1.0)
 
 
@@ -126,8 +130,6 @@ class _CropSizes:
     floor_bound: int = 0
     source_pixels: int = 0
     sent_pixels: int = 0
-    floor_added: int = 0  # pixels the FLOOR invented, counted only on crops it upscaled. never netted against the
-    # ceiling's downscaling of huge crops, which is a different knob and would silently cancel this one out
     buckets: list[int] = field(default_factory=lambda: [0] * (len(_SIZE_BUCKETS) + 1))
 
 
@@ -143,7 +145,6 @@ def _record_crop_size(source: int, sent: int) -> None:
     sizes.sent_pixels += sent
     if source < MIN_PIXELS:
         sizes.floor_bound += 1
-        sizes.floor_added += sent - source
     ratio = source / MIN_PIXELS
     index = next((i for i, edge in enumerate(_SIZE_BUCKETS) if ratio < edge), len(_SIZE_BUCKETS))
     sizes.buckets[index] += 1
@@ -155,13 +156,18 @@ def log_crop_sizes() -> None:
         return
     edges = ["<1/8", "1/8-1/4", "1/4-1/2", "1/2-1", ">=1"]
     spread = " ".join(f"{name}={value}" for name, value in zip(edges, sizes.buckets, strict=True))
+    billed = sizes.sent_pixels / PATCH_PIXELS
+    content = sizes.source_pixels / PATCH_PIXELS
     logger.info(
-        "crop sizes n=%d floor_bound=%.1f%% sent_px=%.1fM source_px=%.1fM floor_padding=%.1f%% of sent | %s",
+        "crops n=%d at_floor=%.1f%% billed=%.0fk tok (%.0f/crop, floor=%d) content=%.0fk tok "
+        "packing_headroom=%.1f%% | %s",
         sizes.count,
         100 * sizes.floor_bound / sizes.count,
-        sizes.sent_pixels / 1e6,
-        sizes.source_pixels / 1e6,
-        100 * sizes.floor_added / sizes.sent_pixels if sizes.sent_pixels else 0.0,
+        billed / 1e3,
+        billed / sizes.count,
+        FLOOR_TOKENS,
+        content / 1e3,
+        100 * (billed - content) / billed if billed else 0.0,
         spread,
     )
     get_crop_sizes.cache_clear()  # per-RUN figures: without this a second ingestion in the same worker reports the
@@ -321,11 +327,35 @@ LOOP_STRIDE = 16
 LOOP_DISTINCT_RATIO = 0.35  # measured: real text lands at 0.9+, the loop above at 0.10
 
 
+def _distinct_ratio(text: str) -> float:
+    shingles = [text[i : i + LOOP_SHINGLE] for i in range(0, len(text) - LOOP_SHINGLE, LOOP_STRIDE)]
+    return len(set(shingles)) / len(shingles) if shingles else 1.0
+
+
 def is_looping(text: str) -> bool:
     if len(text) < LOOP_MIN_CHARS:
         return False
-    shingles = [text[i : i + LOOP_SHINGLE] for i in range(0, len(text) - LOOP_SHINGLE, LOOP_STRIDE)]
-    return bool(shingles) and len(set(shingles)) / len(shingles) < LOOP_DISTINCT_RATIO
+    return _distinct_ratio(text) < LOOP_DISTINCT_RATIO
+
+
+def salvage_prefix(text: str) -> str:
+    # a loop is a SUFFIX: the model reads the region, then degenerates and repeats until it stops or hits the cap. the
+    # prefix before that is real output, and dropping the whole generation throws it away — one drop this run carried
+    # 8,196 characters of which only the tail was garbage. binary search the longest prefix the loop test accepts.
+    # used ONLY where the alternative is returning nothing, so it can never be worse than what it replaces
+    # the ratio is tested DIRECTLY here, never through is_looping: that treats anything under LOOP_MIN_CHARS as clean,
+    # so a generation that looped from its first character would "salvage" a full 1,499 characters of garbage — worse
+    # than the drop it replaces
+    if not is_looping(text):
+        return text
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _distinct_ratio(text[:mid]) < LOOP_DISTINCT_RATIO:
+            high = mid - 1
+        else:
+            low = mid
+    return text[:low]
 
 
 def _ran_away(content: str, finish: str, prompt: str) -> bool:
@@ -347,12 +377,18 @@ async def recognize(payload: bytes, prompt: str) -> str:
     # 12,000 characters of nothing. a repetition penalty fixed only four of six and made one strictly worse, and it
     # would have changed decoding for all eighteen thousand crops to repair eleven.
     if prompt == PROMPT_OCR:
-        logger.warning("runaway generation on the plain read prompt, chars=%d — dropped", len(content))
-        return ""
+        kept = salvage_prefix(content)
+        logger.warning(
+            "runaway generation on the plain read prompt, chars=%d — salvaged %d", len(content), len(kept)
+        )
+        return kept.strip()
     retry, retry_finish = await _ask(payload, PROMPT_OCR)
     if _ran_away(retry, retry_finish, PROMPT_OCR):
-        logger.warning("runaway generation prompt=%r, and the plain read looped too — dropped", prompt)
-        return ""
+        kept = salvage_prefix(retry) or salvage_prefix(content)  # whichever attempt got further before degenerating
+        logger.warning(
+            "runaway generation prompt=%r, and the plain read looped too — salvaged %d", prompt, len(kept)
+        )
+        return kept.strip()
     logger.info(
         "runaway generation prompt=%r chars=%d — recovered by plain read, chars=%d", prompt, len(content), len(retry)
     )

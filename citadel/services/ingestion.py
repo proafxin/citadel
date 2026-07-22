@@ -62,6 +62,7 @@ from citadel.services.library import library_exists
 from citadel.services.paddle import (
     CROP_CONCURRENCY,
     LAYER_LABELS,
+    MIN_PIXELS,
     PICTURE_LABELS,
     PROMPT_OCR,
     block_text,
@@ -84,7 +85,7 @@ from citadel.services.presentation import parse_pptx
 from citadel.services.tabular import ensure_described, extract_json_tables, structure_csv_tables
 from citadel.tabular.materialize import MaterializedTable
 from citadel.utils import normalize_file
-from config import CPU_EIGHTH
+from config import CPU_EIGHTH, CPU_THIRD
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,11 @@ DOC_TTL = 86_400  # safety expiry on doc/blocks/sheets keys: set at submit, refr
 # that somehow never reaches merge (and so never hits cleanup) still self-evicts instead of accumulating in Redis
 # forever. far longer than any single doc's processing, so it never evicts live state; cleanup shortens it on finish.
 RENDER_DPI = 150  # validated equal to 200 and ~26% faster
-PAGINATE_CONCURRENCY = CPU_EIGHTH
+# the RAMP, and the one place a cpu bound is worth spending: until a document is paginated the gpu has no work from it
+# AT ALL, so these are not "feeding more than enough" — they are the serialization in front of an idle model. measured:
+# 36 files through 3 slots left the 809-page book, which carries 68% of all model work, unpaginated for 10.8s of a
+# ~510s run. cpu stays deliberately under-used everywhere downstream, where supply already outruns the gpu
+PAGINATE_CONCURRENCY = CPU_THIRD
 RENDER_CONCURRENCY = CPU_EIGHTH
 PDFIUM_WORKERS = 4  # every pdfium job — counting, rendering AND text-layer extraction — shares these, and the text
 # layer is the one that matters: it is awaited INSIDE the ocr path, so a page waiting for a pdfium worker is a page not
@@ -811,13 +816,62 @@ def _cut_one(img: Image.Image, bbox: list[float]) -> Image.Image:
     return img.crop((box[0], box[1], max(box[2], box[0] + 1), max(box[3], box[1] + 1)))
 
 
-def _cut_crops(img: Image.Image, blocks: list[DetBlock], indices: list[int]) -> list[bytes]:
+# regions that may be READ TOGETHER. every crop costs the model's 144-token floor whether it fills it or not, so two
+# adjacent regions read as one cost half. only prose qualifies: a run of paragraphs concatenated is still the same
+# prose, whereas merging two headings would fuse two titles, two display formulas would return one LaTeX blob for two
+# equations, and a list is already whole. measured on the 809-page scanned book — 12,908 regions become 9,938 crops
+MERGEABLE_LABELS = frozenset({"text", "footnote", "reference_content", "content", "abstract"})
+
+
+def _union(first: list[float], second: list[float]) -> list[float]:
+    return [
+        min(first[0], second[0]),
+        min(first[1], second[1]),
+        max(first[2], second[2]),
+        max(first[3], second[3]),
+    ]
+
+
+def _bbox_pixels(bbox: list[float], size: tuple[int, int]) -> int:
+    return max(1, int((bbox[2] - bbox[0]) * size[0])) * max(1, int((bbox[3] - bbox[1]) * size[1]))
+
+
+def group_crops(blocks: list[DetBlock], indices: list[int], size: tuple[int, int]) -> list[list[int]]:
+    # consecutive same-label prose regions share a crop while their UNION still fits the model's floor. past the floor
+    # a merge stops being free — the bill grows with the union — so the group closes and a new one starts
+    groups: list[list[int]] = []
+    unions: list[list[float]] = []
+    for index in indices:
+        label = blocks[index].label
+        bbox = list(blocks[index].bbox)
+        # index + 1, not merely "the previous readable region": a picture sitting between two paragraphs is not in
+        # `indices`, and merging across it would place its content after text that follows it on the page
+        joins = groups and label in MERGEABLE_LABELS and index == groups[-1][-1] + 1
+        if joins and blocks[groups[-1][-1]].label == label:
+            candidate = _union(unions[-1], bbox)
+            if _bbox_pixels(candidate, size) <= MIN_PIXELS:
+                groups[-1].append(index)
+                unions[-1] = candidate
+                continue
+        groups.append([index])
+        unions.append(bbox)
+    return groups
+
+
+def group_bbox(blocks: list[DetBlock], group: list[int]) -> list[float]:
+    bbox = list(blocks[group[0]].bbox)
+    for index in group[1:]:
+        bbox = _union(bbox, list(blocks[index].bbox))
+    return bbox
+
+
+def _cut_crops(img: Image.Image, blocks: list[DetBlock], groups: list[list[int]]) -> list[bytes]:
     # cut, fit the model's pixel window, and encode — all while the bitmap is alive, so the raw pixels die here and only
     # the compressed form (~8x smaller) waits out the queue. PNG and NOT base64: base64 is 33% larger and every crop
     # alive would carry that, which is host RAM spent to save an encode that was never on the critical path
     payloads: list[bytes] = []
-    for i in indices:
-        crop = _cut_one(img, blocks[i].bbox)
+    for group in groups:
+        crop = _cut_one(img, group_bbox(blocks, group))
         sized = resize_for_vlm(crop)
         payloads.append(png_bytes(sized))
         if sized is not crop:
@@ -871,8 +925,9 @@ async def extract_page(doc_id: str, page_idx: int, image: bytes, digital: bool) 
     async with get_decode_gate():
         spans.decode_wait = 0.0
         with Image.open(io.BytesIO(image)) as img:
+            groups = group_crops(blocks, indices, img.size)
             try:
-                payloads = await asyncio.to_thread(_cut_crops, img, blocks, indices)
+                payloads = await asyncio.to_thread(_cut_crops, img, blocks, groups)
             except BaseException:
                 budget.release(granted)  # the crops never existed, so no _read_crop will hand this back
                 raise
@@ -882,21 +937,34 @@ async def extract_page(doc_id: str, page_idx: int, image: bytes, digital: bool) 
 
     texts = await asyncio.gather(
         *(
-            _read_crop(payload, prompt_for(blocks[i].label), semaphore, budget, spans)
-            for i, payload in zip(indices, payloads, strict=True)
+            _read_crop(payload, prompt_for(blocks[group[0]].label), semaphore, budget, spans)
+            for group, payload in zip(groups, payloads, strict=True)
         )
     )
-    content = dict(zip(indices, texts, strict=True))
     await _record_spans(doc_id, spans)
-    return [
-        Block(
-            type=block.label,
-            page_idx=0,  # set by the caller, which knows the page
-            bbox=list(block.bbox),
-            text=block_text(block.label, content.get(i, "")),
+    return _blocks_from_groups(blocks, groups, texts)
+
+
+def _blocks_from_groups(blocks: list[DetBlock], groups: list[list[int]], texts: list[str]) -> list[Block]:
+    # a merged group leaves ONE block, carrying the union of its regions and the single text the model returned for
+    # them. the regions folded in are not emitted — their content is in that text, and a second empty block for each
+    # would be a node with no content. order is untouched: a group is contiguous, so its head sits where it always did
+    read = {group[0]: (group, text) for group, text in zip(groups, texts, strict=True)}
+    folded = {index for group in groups for index in group[1:]}
+    out: list[Block] = []
+    for index, block in enumerate(blocks):
+        if index in folded:
+            continue
+        group, text = read.get(index, ([index], ""))
+        out.append(
+            Block(
+                type=block.label,
+                page_idx=0,  # set by the caller, which knows the page
+                bbox=group_bbox(blocks, group),
+                text=block_text(block.label, text),
+            )
         )
-        for i, block in enumerate(blocks)
-    ]
+    return out
 
 
 async def _reread(image: bytes, blocks: list[Block]) -> None:
@@ -916,7 +984,7 @@ async def _reread(image: bytes, blocks: list[Block]) -> None:
                     _cut_crops,
                     img,
                     [DetBlock(label=b.type, score=1.0, bbox=list(b.bbox or []), order=None) for b in blocks],
-                    list(range(len(blocks))),
+                    [[index] for index in range(len(blocks))],  # a re-read targets one block at a time; never merged
                 )
             except BaseException:
                 budget.release(granted)
