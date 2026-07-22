@@ -1,5 +1,56 @@
 # Benchmark Results
 
+> The OmniDocBench and speed sections dated 2026-06-27 describe the **MinerU-era** pipeline and no longer
+> describe what runs today (PaddleOCR-VL via vLLM). Kept for history; do not quote them as current.
+
+## vs stock PaddleOCR-VL — 24 real PDFs, 2,175 pages (2026-07-23)
+
+Both sides ran **the same model on the same vLLM server** (`paddleocr-vl`, port 8099, `--max-num-seqs 128`)
+on the same GPU, so serving is held constant and only the pipeline differs. Vanilla was run three ways;
+the two parallel modes agreed to 0.2%, so 643.1s is its floor, not a harness artefact.
+
+| | wall | note |
+|---|---|---|
+| vanilla, one document at a time | 743.4s | 17 of 24 files finish in <10s and cannot fill 128 slots |
+| vanilla, `predict([...])` | 677.4s | recovers exactly the small-file idle |
+| vanilla, 8 threads | 676.3s | agrees with the above — this is the ceiling |
+| vanilla, PDFs only | **643.1s** | |
+| **citadel** | **413.2s** | **1.56x**, while also building the tree and 106 tables |
+
+The margin is architectural, not faster recognition: born-digital pages never reach the model (a 324-page
+book costs 62 crops, not thousands), and admission keeps the GPU fed across document boundaries.
+
+### Text accuracy — scored against each PDF's own text layer
+
+Ground truth is the digital PDFs' embedded characters. 18 documents, 258,246 reference words.
+
+| | weighted recall |
+|---|---|
+| stock PaddleOCR-VL | **0.9854** |
+| citadel | **0.9845** |
+
+**A tie.** It is the same model with the same prompts, so this is the expected result and the honest
+headline: *level on reading characters, ahead on turning them into data.* Citadel is better on 10
+documents, tied on 6, worse on 2; its largest wins are forms where the text-layer path beats
+re-recognition (0.980 vs 0.799, 0.981 vs 0.929). Citadel does **not** score 1.0 despite taking the layer —
+~1.5% of layer text is still lost, which is a real open gap in our own path.
+
+Scanned pages have **no ground truth** and are reported only as agreement between the two outputs:
+0.991 and 0.968 on the two large books.
+
+### Where citadel is categorically ahead
+
+- **Coverage** — 5 of 35 files are outside stock PaddleOCR entirely (2 legacy `.xls`, csv, json, markdown).
+- **Spreadsheets** — `doc2md` reads xlsx losslessly and deterministically (100% cell recall, no GPU), but
+  emits **one HTML `<table>` per sheet** with no segmentation, no header detection beyond "row 1 is the
+  header" (wrong on the first file tried, whose row 1 is a title), and no types. On a 105-row financial
+  sheet holding three statements it produced **one blob of 17 MB / 8.5M tokens — 130x its own model's
+  context window — of which 99.94% were empty cells**, because it materialises the sheet's *declared*
+  dimensions rather than its data region. Citadel produced three titled, typed, SQL-queryable tables.
+- **Model cost at scale** — our structuring payload is capped at 20 rows whatever the sheet's height, so a
+  million-row sheet costs the same one call as a hundred-row one.
+
+
 ## OmniDocBench v1.6 — Quality (2026-06-27)
 
 Citadel, **pure-VLM** path (MinerU2.5-Pro core, `CITADEL_GAP_FILL=0`), scored with OmniDocBench's

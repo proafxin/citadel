@@ -578,16 +578,24 @@ design intends.
   blocked by a **label change 81.1%** of the time and by the crop running out of room only 18.7%. The next
   region is a formula, a heading, a list — not more prose. So composing crops more tightly recovers almost
   nothing, and the remaining ~68% is reachable only by merging **non-adjacent** same-label regions, which
-  requires re-associating one returned text with several source regions. That is a fidelity-sensitive
-  change, not a tuning one, and it is the only remaining lever that moves the floor.
+  requires re-associating one returned text with several source regions. A probe settled that: composing
+  four regions into one crop cost 25% of the tokens and returned **byte-identical output whether or not a
+  separator was drawn between them** — the model transcribes the image and ignores rules and index marks
+  alike, so there is no boundary to split on. Non-adjacent merging is therefore closed, not merely hard.
 
-- ~~Page furniture is re-recognized on born-digital pages.~~ **Fixed.** Headers, footers and page numbers
-  were cropped and sent to the model even where the text layer already held them exactly — wasted prefill
-  *and* a needless re-read of characters we had. They now come from the layer like every other prose region
-  on a digital page. Measured at **1,719 crops, 9.2%** of a run (a 491-page technical book went from 1,101
-  crops to 161; a 150-page act from 362 to 3), and it is more accurate as well as cheaper: the layer is
-  exact where the model reads prose at 98.1%. A header with no characters behind it — a scanned letterhead
-  on an otherwise digital page — comes back empty and is re-read by the model, so nothing is lost.
+- **A merge may grow a block downward, never sideways — and area cannot express that.** The first version of
+  region packing tested only whether the union still fitted the token floor. Two regions **side by side**
+  have a *small* union area, so two columns merged happily into one wide strip: measured on a bilingual
+  letterhead, the Kazakh and Russian addresses became one 89%-wide crop and the model returned `данфылы`
+  where the scan reads `даңғылы`, which the reference pipeline read correctly by keeping the columns apart.
+  The fix is a test on **width**: a merge must not widen the block beyond the wider of its two parts. It
+  caught **887 fused pairs in a single multi-column book**, whose agreement with an independent read of the
+  same pages rose 0.935 → 0.968 while documents with no fusions moved within noise, and it cost no runtime.
+
+  The lesson generalises past this bug. The claim "packing is harmless" had been made twice off aggregates —
+  once from the model never queueing, once from 0.99 corpus-wide agreement — and both times the failure was
+  real but confined to a minority of blocks, which a mean cannot show. The 0.935-vs-0.990 gap *was* the
+  signal. It took rendering the actual scanned page to produce a mechanism to attach to it.
 
 - **Recognition requests are dropped intermittently, and the cause is not established.** About one crop in
   sixteen thousand fails with the server closing the connection without a response; the server logs nothing
