@@ -82,8 +82,7 @@ from citadel.services.pdf import (
     uncovered_layer_runs,
 )
 from citadel.services.presentation import parse_pptx
-from citadel.services.tabular import ensure_described, extract_json_tables, structure_csv_tables
-from citadel.tabular.materialize import MaterializedTable
+from citadel.services.tabular import extract_json_tables, structure_csv_tables
 from citadel.utils import normalize_file
 from config import CPU_EIGHTH, CPU_THIRD
 
@@ -830,7 +829,6 @@ async def handle_tabular(fields: dict[str, str]) -> None:
             separator = "\t" if kind == "tsv" else ","
             items = list(enumerate(await structure_csv_tables(data, separator), start=1))
         sheet_name = filename
-    await ensure_described([item for _, item in items if isinstance(item, MaterializedTable)], sheet_name)
     await save_sheet_tables(int(doc_id), sheet_no, sheet_name, items)
     await record_sheet(doc_id, sheet_no)
 

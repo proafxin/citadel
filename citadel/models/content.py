@@ -18,47 +18,18 @@ class ContentNode(Base):
             postgresql_using="gin",
             postgresql_ops={"search_text": "gin_trgm_ops"},
         ),
+        Index("ix_content_document_block", "document_id", "block_ordinal", unique=True),
     )
 
-    content_id: Mapped[str] = mapped_column(unique=True)
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
-    parent_id: Mapped[int | None] = mapped_column(
-        ForeignKey("content.id", ondelete="CASCADE"), index=True, default=None
-    )
     ordinal: Mapped[int]
+    block_ordinal: Mapped[int | None] = mapped_column(default=None)
     page_no: Mapped[int | None] = mapped_column(default=None)
     sheet_no: Mapped[int | None] = mapped_column(default=None)
     type: Mapped[str]
-    level: Mapped[int | None] = mapped_column(default=None)
-    label: Mapped[str | None] = mapped_column(default=None)
+    heading: Mapped[str | None] = mapped_column(default=None)
     bbox: Mapped[list[float] | None] = mapped_column(JSONB, default=None)
+    raw: Mapped[dict | None] = mapped_column(JSONB, default=None)
     search_text: Mapped[str | None] = mapped_column(Text, default=None)
     token_count: Mapped[int | None] = mapped_column(default=None)  # BGE-M3 tokens in search_text, set at ingestion
-
-
-class Paragraph(Base):
-    __tablename__ = "paragraphs"
-
-    content_id: Mapped[str] = mapped_column(ForeignKey("content.content_id", ondelete="CASCADE"), unique=True)
-    text: Mapped[str] = mapped_column(Text)
-
-
-class Code(Base):
-    __tablename__ = "codes"
-
-    content_id: Mapped[str] = mapped_column(ForeignKey("content.content_id", ondelete="CASCADE"), unique=True)
-    text: Mapped[str] = mapped_column(Text)
-
-
-class Equation(Base):
-    __tablename__ = "equations"
-
-    content_id: Mapped[str] = mapped_column(ForeignKey("content.content_id", ondelete="CASCADE"), unique=True)
-    latex: Mapped[str] = mapped_column(Text)
-
-
-class ListBlock(Base):
-    __tablename__ = "lists"
-
-    content_id: Mapped[str] = mapped_column(ForeignKey("content.content_id", ondelete="CASCADE"), unique=True)
-    items: Mapped[list[dict]] = mapped_column(JSONB)
+    qwen_token_count: Mapped[int | None] = mapped_column(default=None)

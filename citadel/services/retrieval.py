@@ -18,6 +18,7 @@ from citadel.models.embedding import Embedding
 from citadel.models.library import Library
 from citadel.models.status import DocumentStatus
 from citadel.models.table import Table
+from citadel.services.batching import render_raw
 from config import get_embedder
 
 logger = logging.getLogger(__name__)
@@ -108,12 +109,11 @@ async def _embed(texts: list[str], longest: int) -> list[list[float]]:
 
 @dataclass
 class TableCand:
-    content_id: str
+    content_id: int
     table_id: int
     filename: str
     n_rows: int
     columns: list[dict]
-    description: str
     metadata: dict
     sample_rows: list[list]
     header_rows: list[int]  # row_idx values in table_rows that are header, not data — the query projection skips them
@@ -121,22 +121,22 @@ class TableCand:
 
 @dataclass
 class Retrieval:
-    text: list[str]
-    tables: list[str]
+    text: list[int]
+    tables: list[int]
 
 
 @dataclass
 class Passage:
-    content_id: str
+    content_id: int
     text: str
     document_id: int
-    section_id: int | None
+    heading: str | None
     score: int = 0
 
 
 @dataclass
 class _PendingNode:
-    content_id: str
+    content_id: int
     search_text: str
     node_type: str
     token_len: int = 0
@@ -164,7 +164,7 @@ def _search_semaphore() -> asyncio.Semaphore:
     return asyncio.Semaphore(RETRIEVAL_CONCURRENCY)
 
 
-async def _dense(is_table: bool, vector: list[float], library_id: int) -> list[str]:
+async def _dense(is_table: bool, vector: list[float], library_id: int) -> list[int]:
     # dense search runs entirely on the small embeddings table: library_id is denormalized there, so retrieval is
     # library-scoped (no cross-library leak) with no join, and the HNSW/halfvec index does the ANN ordering
     channel = (Embedding.type == "table") if is_table else (Embedding.type != "table")
@@ -178,14 +178,14 @@ async def _dense(is_table: bool, vector: list[float], library_id: int) -> list[s
         return list(await session.scalars(stmt))
 
 
-async def _sparse(is_table: bool, terms: list[str], library_id: int) -> list[str]:
+async def _sparse(is_table: bool, terms: list[str], library_id: int) -> list[int]:
     if not terms:
         return []
     channel = (ContentNode.type == "table") if is_table else (ContentNode.type != "table")
     conditions = [ContentNode.search_text.ilike(_like(term), escape="\\") for term in terms]
     hits = functools.reduce(operator.add, (case((cond, 1), else_=0) for cond in conditions))
     stmt = (
-        select(ContentNode.content_id)
+        select(ContentNode.id)
         .join(Document, ContentNode.document_id == Document.id)
         .where(channel, Document.library_id == library_id, ContentNode.search_text.isnot(None), or_(*conditions))
         .order_by(hits.desc())
@@ -195,15 +195,15 @@ async def _sparse(is_table: bool, terms: list[str], library_id: int) -> list[str
         return list(await session.scalars(stmt))
 
 
-def _rrf(rankings: list[list[str]]) -> list[str]:
-    scores: dict[str, float] = {}
+def _rrf(rankings: list[list[int]]) -> list[int]:
+    scores: dict[int, float] = {}
     for ranking in rankings:
         for rank, content_id in enumerate(ranking, start=1):
             scores[content_id] = scores.get(content_id, 0.0) + 1.0 / (RRF_K + rank)
     return sorted(scores, key=lambda content_id: scores[content_id], reverse=True)
 
 
-async def _channel(is_table: bool, vectors: list[list[float]], terms: list[str], library_id: int) -> list[str]:
+async def _channel(is_table: bool, vectors: list[list[float]], terms: list[str], library_id: int) -> list[int]:
     # every dense (one per query variant) and the sparse search run concurrently, each on its own session, bounded by
     # the shared search semaphore — one question fans out into a single concurrent batch instead of serial round-trips
     searches = [_dense(is_table, vector, library_id) for vector in vectors]
@@ -216,16 +216,16 @@ async def _pending_nodes(library_id: int) -> list[_PendingNode]:
     # ones (anti-join, replacing the old embedding-IS-NULL-on-content trick now that embeddings live in their own table)
     async with get_sessionmaker()() as session:
         rows = await session.execute(
-            select(ContentNode.content_id, ContentNode.search_text, ContentNode.type, ContentNode.token_count)
+            select(ContentNode.id, ContentNode.search_text, ContentNode.type, ContentNode.token_count)
             .join(Document, ContentNode.document_id == Document.id)
-            .outerjoin(Embedding, Embedding.content_id == ContentNode.content_id)
+            .outerjoin(Embedding, Embedding.content_id == ContentNode.id)
             .where(
                 Document.library_id == library_id,
                 ContentNode.search_text.isnot(None),
                 Embedding.content_id.is_(None),
             )
         )
-    return [_PendingNode(row.content_id, row.search_text or "", row.type, row.token_count or 0) for row in rows]
+    return [_PendingNode(row.id, row.search_text or "", row.type, row.token_count or 0) for row in rows]
 
 
 def _upsert_chunks(records: list[dict[str, object]], size: int) -> Iterator[list[dict[str, object]]]:
@@ -346,37 +346,38 @@ async def retrieve(queries: list[str], library_id: int) -> Retrieval:
     return Retrieval(text=text[:CANDIDATES], tables=tables[:CANDIDATES])
 
 
-async def load_passages(content_ids: list[str]) -> list[Passage]:
+async def load_passages(content_ids: list[int]) -> list[Passage]:
     if not content_ids:
         return []
     async with get_sessionmaker()() as session:
         rows = list(
             await session.execute(
                 select(
-                    ContentNode.content_id,
+                    ContentNode.id,
                     ContentNode.document_id,
-                    ContentNode.parent_id,
                     ContentNode.page_no,
-                    ContentNode.search_text,
+                    ContentNode.heading,
+                    ContentNode.raw,
                     Document.filename,
                 )
                 .join(Document, ContentNode.document_id == Document.id)
-                .where(ContentNode.content_id.in_(content_ids))
+                .where(ContentNode.id.in_(content_ids))
             )
         )
-    lookup = {row.content_id: row for row in rows}
+    lookup = {row.id: row for row in rows}
     passages: list[Passage] = []
     for content_id in content_ids:
         row = lookup.get(content_id)
-        if row is not None and row.search_text:
+        # the evidence a model reads is the block's own content, never its search_text — that string exists to be
+        # matched, and its normalization would put mangled code and flattened lists into the answer
+        body = render_raw(row.raw) if row is not None else ""
+        if body.strip():
             page = f" p{row.page_no}" if row.page_no else ""
-            passages.append(
-                Passage(content_id, f"[{row.filename}{page}] {row.search_text}", row.document_id, row.parent_id)
-            )
+            passages.append(Passage(content_id, f"[{row.filename}{page}] {body}", row.document_id, row.heading))
     return passages
 
 
-async def load_tables(content_ids: list[str]) -> list[TableCand]:
+async def load_tables(content_ids: list[int]) -> list[TableCand]:
     if not content_ids:
         return []
     async with get_sessionmaker()() as session:
@@ -400,7 +401,6 @@ async def load_tables(content_ids: list[str]) -> list[TableCand]:
                     filename,
                     table.n_rows,
                     table.columns,
-                    table.description,
                     table.table_metadata,
                     table.sample_rows,
                     (table.anchors or {}).get("header_rows", []),

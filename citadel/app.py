@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from citadel.db import get_engine
 from citadel.router import router
+from citadel.services.batching import build_library_batches
 from citadel.services.document import (
     mark_described,
     mark_embed_started,
@@ -37,12 +38,23 @@ async def _finalize(library_id: int, tag: str) -> None:
         await mark_finalize_started(library_id)
         await mark_described(library_id)  # descriptions are produced inline during structure now; this is an instant
         # status transition kept so the finalize phases (and the UI reading them) are unchanged
+        batch_t = time.time()
+        batches = await build_library_batches(library_id)
+        batch_s = time.time() - batch_t
         await mark_embed_started(library_id)
         t = time.time()
         embedded = await embed_library(library_id)
         embed_s = time.time() - t
         await mark_library_ready(library_id)
-        logger.info("%s library=%d nodes=%d embed=%.1fs", tag, library_id, embedded, embed_s)
+        logger.info(
+            "%s library=%d batches=%d batch=%.1fs nodes=%d embed=%.1fs",
+            tag,
+            library_id,
+            batches,
+            batch_s,
+            embedded,
+            embed_s,
+        )
     finally:
         _finalizing.discard(library_id)
 

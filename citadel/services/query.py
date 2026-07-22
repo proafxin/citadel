@@ -264,18 +264,19 @@ def _fit_results(results: list[SqlResult], budget: int) -> list[SqlResult]:
 @dataclass
 class _Evidence:
     text: str
-    sources: list[str]
+    sources: list[int]
     tokens: int
     score: int
-    section_id: int | None
+    heading: str | None
     document_id: int
 
 
 def _group_key(evidence: _Evidence, level: int) -> object:
-    # level 0 merges within a section (siblings), level 1 within a document, level 2+ merges anything. escalating the
-    # grain only when a finer merge did not free enough keeps "do not summarize a summary" as far as the budget allows
+    # level 0 merges within a section (blocks under one heading), level 1 within a document, level 2+ merges anything.
+    # escalating the grain only when a finer merge did not free enough keeps "do not summarize a summary" as far as the
+    # budget allows
     if level == 0:
-        return evidence.section_id
+        return (evidence.document_id, evidence.heading)
     if level == 1:
         return evidence.document_id
     return 0
@@ -306,7 +307,7 @@ async def _merge_chunk(question: str, chunk: list[_Evidence]) -> _Evidence:
     else:  # merge failed: concatenate verbatim so no source is lost (tokens do not shrink → reduce escalates)
         summary = "\n".join(evidence.text for evidence in chunk)
         tokens = sum(evidence.tokens for evidence in chunk)
-    return _Evidence(summary, sources, tokens, max(e.score for e in chunk), chunk[0].section_id, chunk[0].document_id)
+    return _Evidence(summary, sources, tokens, max(e.score for e in chunk), chunk[0].heading, chunk[0].document_id)
 
 
 async def _reduce(question: str, evidences: list[_Evidence], budget: int, level: int) -> list[_Evidence]:
@@ -346,7 +347,7 @@ async def _reduce_passages(question: str, passages: list[Passage], budget: int) 
             [passage.content_id],
             counts[index],
             passage.score,
-            passage.section_id,
+            passage.heading,
             passage.document_id,
         )
         for index, passage in enumerate(passages)

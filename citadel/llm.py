@@ -5,7 +5,6 @@ from collections.abc import AsyncIterator
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from citadel.prompts import load_prompt
-from citadel.schemas.table import Column
 from citadel.services.slm import collect, submit
 from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL
 
@@ -68,27 +67,6 @@ async def call_slm(prompt: str, schema: dict, interactive: bool) -> dict:
     return json.loads(_extract_json(raw))
 
 
-_DESCRIPTION_SCHEMA = {
-    "type": "object",
-    "properties": {"description": {"type": "string"}},
-    "required": ["description"],
-}
-
-
-async def describe_table(
-    columns: list[Column], sample_rows: list[list], context: str, formulas: list[str] | None = None
-) -> str:
-    # description-only: for tables whose structure we ALREADY have (a json entity, a clean <table>), so we skip
-    # structure inference and ask only for the summary. same table stage, same phase — just the half of the work needed
-    header = " | ".join(column.header or f"col{index}" for index, column in enumerate(columns))
-    rows = "\n".join(" | ".join("" if value is None else str(value) for value in row) for row in sample_rows)
-    prompt = f"{load_prompt('table_description')}\nsource: {context}\ncolumns: {header}\nsample rows:\n{rows}"
-    if formulas:
-        prompt += "\ncalculations used in this table:\n" + "\n".join(formulas)
-    data = await call_slm(prompt, _DESCRIPTION_SCHEMA, interactive=False)
-    return str(data.get("description", ""))
-
-
 _STRUCTURE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -102,9 +80,8 @@ _STRUCTURE_SCHEMA = {
                     "col_end": {"type": "integer"},
                     "title": {"type": "string"},
                     "notes": {"type": "array", "items": {"type": "string"}},
-                    "description": {"type": "string"},
                 },
-                "required": ["header_rows", "col_start", "col_end", "title", "notes", "description"],
+                "required": ["header_rows", "col_start", "col_end", "title", "notes"],
             },
         }
     },
@@ -114,7 +91,7 @@ _STRUCTURE_SCHEMA = {
 
 async def structure_sheet(rows: str, column_hint: str, height: int, width: int) -> list[dict]:
     # one call per sheet: the model is shown only the interesting rows and a body sample (rows, index-tagged) and it
-    # returns the table(s) — header rows, column span, title, notes, a description — reasoning over structure it can
+    # returns the table(s) — header rows, column span, title, notes — reasoning over structure it can
     # SEE, never over data it cannot. it decides the semantic calls (what is a header, where a table splits); the
     # mechanical data spans are derived by the caller from the header positions it returns
     prompt = (

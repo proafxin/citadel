@@ -60,7 +60,6 @@ def _derive(tables: list[dict], grid: list[list[str]], height: int, width: int) 
                 data_end=data_end,
                 title=table.get("title") or None,
                 notes=table.get("notes") or [],
-                description=table.get("description") or None,
             )
         )
     return out

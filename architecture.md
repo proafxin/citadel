@@ -405,106 +405,151 @@ while the embedder was down.
 
 ## Part II — Query
 
-Built. Runs over the persisted tree and tables: the model decides what to ask, the database computes the
-numbers. The hard part here is not finding candidates — it is deciding, reliably and at scale, which of a
-large body of evidence actually bears on the question, and fitting exactly that into one answer without
-ever letting the model invent a figure or miscount what fits.
+**Designed, not yet built.** This replaces the wide-net pipeline that is currently in the code
+(reformulate → retrieve → filter → compute → unify → fit). That pipeline is described at the end of this
+part, together with the reason it is being replaced.
+
+The hard part is not finding candidates. It is deciding which of a large body of evidence actually bears
+on the question, fitting exactly that into one answer, and never letting the model invent a figure or
+miscount what fits.
 
 ## Query pipeline
 
 ```bash
-question → reformulate → retrieve ─────────→ filter ──→ compute ──→ unify ──→ fit ──→ synthesize → cited answer
-             (model)      text ‖ tables        (model)   (model +    (model)  (exact)          (model)
-                          dense + lexical                 database)   essential /
-                          → fused wide net                            supporting
+question ─┬─ text channel ───→ relevant batches ─┐
+          │   (model over batch summaries)       ├─→ round-robin descent ──→ synthesize → cited answer
+          └─ table channel ──→ SQL queries ──────┘      (exact, depth only)      (model)
+              (model over schema + samples)         database runs the queries
 ```
 
 | Stage | Work |
 |---|---|
-| reformulate | rewrite the question for recall; translate into the corpus language |
-| retrieve | search text and tables as separate channels, each dense + lexical, fuse each channel into one **wide net** |
-| filter | keep only the evidence that bears on the question — the model judges, over the net, in batches, stopping when the ranking goes dry |
-| compute | the model writes one read-only query per kept table; the database executes it and returns exact values |
-| unify | across both kinds of evidence, mark each item essential or supporting; drop the rest |
-| fit | pack the kept evidence into the answer's budget: essential before supporting, large tables shrunk not dropped |
-| synthesize | compose one cited answer from the passages and the computed results |
+| text channel | over every document's batch summaries, the model names the batches that are **mandatory** to answer |
+| table channel | over every table's schema and sample rows, the model writes the SQL queries that are **mandatory** to answer |
+| descent | one round-robin over both channels' selections, deepening each item until the budget is spent |
+| synthesize | compose one cited answer from the text evidence and the computed results |
 
-### Retrieve — a wide net, not a short list
+Both channels read the whole corpus, in a compressed representation, and both may legitimately return
+nothing. There is **no query reformulation, no similarity search over the corpus, no relevance ranking,
+and no separate table filter** — the reasons are below.
 
-Two channels — text and tables — each searched by meaning (dense) and by exact match (lexical) for every
-reformulation, then fused by reciprocal-rank fusion (rank-based, so text and tables need no comparable
-scores). Rows are never searched; a table is found through its description and columns and answered by SQL.
+### Batches — the unit of text relevance, built at ingestion
 
-Each channel returns a **wide net, not a fixed top-K**. The reason is that a fused rank is an *ordering*,
-not a relevance judgment: it can say one candidate matched more strongly than another, but not whether the
-top one actually answers the question. A short top-K would stake the answer on that ordering. Instead the
-net is deliberately broad and the relevance decision is handed to a model that reads the candidates. The
-ordering is not thrown away — it is used only to decide how deep to look.
+The reason batches exist is **amortization**. Deciding which prose bears on a question requires reading
+prose, and reading a whole corpus per question is a map-reduce every time — paid again on every query, over
+text that never changed. Summarizing once at ingestion moves that cost to the batch stage and makes it
+reusable: the corpus is read once, and every subsequent query judges relevance against the stored result.
+Query-time map-reduce then becomes the fallback for evidence that genuinely exceeds the window, not the
+routine path.
 
-### Filter — the model judges relevance; the rank only bounds the search
+Headings are author-written labels. "Introduction" or "Section 3" carries no signal, so a channel that
+judges relevance from headings alone judges from metadata rather than content. Tables have an organic
+compressed form — schema and sample rows, the table's own content uninterpreted — but prose has none:
+sampled paragraphs are not representative. This is the one place in the system where generated text is
+justified, and it is confined to ingestion.
 
-The model reads the candidates and keeps the ones that bear on the question: for a passage, its text; for
-a table, its columns and sample rows — **not** its description, which the model itself wrote, so it would
-be grading its own summary. It is allowed to keep nothing.
+Each document is packed into **batches**: heading subtrees are added until a token limit is reached, and a
+subtree that alone exceeds the limit becomes its own batch. Each batch is summarized once, at ingestion.
+The batch stores its own **block and page range** at creation, so citation is a stored field rather than a
+traversal.
 
-This stage is where three otherwise-tempting shortcuts are deliberately refused:
+This gives the hierarchy the query side needs — batch summary → heading subtree → block — and it means
+relevance is judged against content, not labels.
 
-- **No score threshold.** A cutoff on the retrieval score would throw away relevant evidence that happened
-  to score low — and low-scoring evidence is often still relevant. Relevance is the model's call, not a
-  number's.
-- **No reranker.** A cross-encoder can score how well a passage matches a question, but it cannot score a
-  value a query has not produced yet — and once the model reads the whole net, a reranker adds nothing it
-  isn't already doing.
-- **No arbitrary cap on how much to read.** The net is judged in batches, best-first, and the search stops
-  after the ranking goes dry for a few batches in a row. Relevant evidence clusters near the top of the
-  ranking, so once it stops appearing, the tail is almost always empty. This is how a net of hundreds or
-  thousands is filtered while the model reads only the part that carries signal — the ranking is trusted
-  to *bound the search*, never to *make the selection*.
+### Two channels, judged independently
 
-### Compute — the model writes the query, the database runs it
+The channels never see each other's payload. Headings and summaries cannot help write a SQL predicate,
+and schemas cannot help pick a section, so mixing them would only cost context.
 
-For each kept table the model writes **one read-only query** against that table's columns, referring to
-columns by position from a map of index to header and type. The query runs through a typed
-projection that turns the stored cells into typed, named columns, inside a **read-only sandbox**: SELECT
-only, no other tables, a time limit. The model writes the logic; the database computes every value — the
-same integrity boundary as ingestion, so no figure is ever aggregated or invented by the model.
+**Text.** Filenames and batch summaries for the whole corpus go to the model, which returns the batches
+that are mandatory to answer, in relevance order. Emission order is taken as the ordering — no scores are
+requested, since a score would cost output tokens and be used only for sorting.
 
-Queries are run *before* the final selection, on purpose: the next stage then judges tables by their
-actual computed results and true sizes, not by a guess at what they might contain.
+**Tables.** Each table's schema and sample rows go to the model, which returns the SQL queries needed. The
+sample rows are load-bearing: they are what show how values are *encoded* — `2022-Q2` versus `Q2 2022`,
+`"007"` as a string — and a predicate written against a schema alone silently matches nothing.
 
-### Unify — essential vs supporting
+Relevance here is **constructive**, which is why nothing needs ranking. A query names its own rows through
+its `WHERE`/`JOIN`/`GROUP BY`; a batch names its own subtree. A table is relevant precisely when some query
+references it, so an empty query list *is* the verdict that no table bears on the question, and there is no
+second stage that can silently overrule the first.
 
-The passages that survived and the computed results go back to the model together. It makes the final
-cross-modal selection — dropping anything that, read against the computed answer, turns out not to be
-needed — and marks each remaining item **essential** (the answer is wrong or incomplete without it) or
-**supporting** (it corroborates or adds context, but the answer stands without it). This priority is the
-input to fitting.
+### Why the wide net was removed
 
-### Fit — keep what matters, never miscount
+Similarity deciding *membership* over the whole corpus is what made broad questions pathological. "What are
+these documents" matches everything, so a corpus-wide net sweeps every passage in order to filter nothing.
+Under batch selection the same question selects every batch and renders each at summary depth — the widest
+question becomes the *cheapest* path, not the most expensive.
 
-The kept evidence is packed into the answer's budget, and this is done **deterministically, by the system,
-not the model** — because a model cannot reliably count tokens, so the hard size limit can never be its
-job. The rules:
+Similarity is not gone; it is demoted. Inside an already-selected batch, ranking the blocks against the
+question is how a subtree is shortened when it cannot be shown whole. Structure decides membership and
+coverage; similarity decides what to show within something already known to be relevant.
 
-- **Essential before supporting.** Priority, not size, decides what survives contention; a large
-  supporting item can never displace an essential one.
-- **A large table is shrunk, not dropped.** A table result too big to fit keeps a fair share of its rows
-  — distributed round-robin across the kept tables so no one table starves the others — and is marked as
-  showing part of a larger result. Because a table is divisible, "essential but large" resolves to
-  "essential, represented by its top rows," never to "gone."
-- **Passages are atomic, kept by rank.** They can't be trimmed without mangling prose, so they're included
-  whole in priority order until the budget is spent.
+### Descent — never cut membership, only depth
 
-The division of labor is the point: the model decides *what matters*, the system decides *what fits*.
+Everything selected is represented. Under budget pressure the system reduces **depth**, never membership,
+because a dropped item is invisible in the answer while a shallow one is still present and still cited.
+
+Text descends: batch summary → the batch's heading subtrees → individual blocks.
+Tables descend: fewer rows, distributed round-robin so no table starves another.
+
+Both channels enter **one round-robin in emission order**, each item taking a turn of descent until the
+window is full. The text/table ratio is never chosen — it *emerges*. A table-heavy question selects few
+batches, so text exhausts early and the remaining turns go to tables; a prose question emits no queries and
+text takes the whole window; a question that saturates both degrades uniformly, which is the honest outcome
+when everything is equally relevant.
+
+Round-robin also sidesteps a problem that cannot be solved: the value of descending into an item is
+unobservable until you descend, since the summary that established relevance is also all you have to
+predict the payoff. Alternating means no item is starved on the basis of a guess that cannot be made.
+
+### Arithmetic stays in the database
+
+Text has no exact reduction operator, so it reduces by selection. Tables do, so they never reduce by
+selection: a `SUM` is computed by SQL, never by a model reading rows. When a result is too large, the
+repair is to aggregate in SQL — coarsening `GROUP BY` — not to truncate rows, because a truncated
+aggregate looks complete and is wrong.
+
+A join's cardinality is not predictable from its inputs, so overflow there is only discoverable after
+execution, and a join that multiplies its inputs is usually a wrong key rather than a legitimate result —
+worth logging as a correctness signal, not just a budget event.
+
+Whenever anything is reduced, it is marked as such, so the answer says "the top 50 of 500" rather than
+presenting a partial as a total.
+
+### Citation is structural and free
+
+Citations do not depend on depth. A batch selected at summary depth still cites at block and page level,
+because the batch stored its range when it was built. Ranges merge at synthesis, so a section cites as a
+span rather than as one entry per block.
+
+This is what makes shallow representation honest: an item that could not afford descent still contributes
+its real provenance, and "what are these documents" cites every block it summarizes.
 
 ### Synthesize
 
-One model call merges the passages, each carrying its document and page, and the computed results, each
-carrying its table, into a single cited answer. Computed results are the authority for figures and totals;
-passages supply narrative and context; there is no single numeric ranking across the two — the model is
-where they reconcile. If the evidence does not answer the question, it says so plainly. For a search
-interface that wants a ranked list of hits instead of prose, the channel rankings are fused the same
-rank-based way.
+One model call merges the text evidence, each carrying its document and page range, and the computed
+results, each carrying its table. Computed results are the authority for figures and totals; text supplies
+narrative and context; the model is where the two reconcile. If the evidence does not answer the question,
+it says so plainly.
+
+### Open
+
+- **Turn granularity.** Whether one turn advances an item by one level (equalizing depth) or by a fixed
+  token quantum (equalizing space) is not settled.
+- **Corpus scale.** The text channel's payload is every document's batch summaries, so it grows with the
+  corpus. At the current corpus this is comfortable; at a few thousand documents scoping needs its own
+  retrieval step ahead of it.
+
+### The pipeline this replaces
+
+The built pipeline reformulates the question, retrieves a wide net (`CANDIDATES=1000`, RRF over dense and
+lexical channels), filters it with a batched two-step model pass, writes SQL for the kept tables, marks
+evidence essential or supporting, and fits deterministically. Its properties were sound in isolation — no
+score threshold, no reranker, no arbitrary read cap, all fitting done by the system rather than the model —
+but it rests on similarity deciding membership, which is the assumption that fails on broad questions. Its
+table filter and SQL stage could also disagree: the filter could keep a table that the SQL stage then
+silently declined to query, and the table would vanish from the answer with nothing detecting it.
 
 ## Models
 

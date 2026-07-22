@@ -25,7 +25,6 @@ class MaterializedTable:
     title: str | None
     caption: str | None
     notes: list[str]
-    description: str
     anchors: dict
     formulas: list[str] | None = None
     header_rows: list[int] = field(default_factory=list)  # indices into `rows` that are header, not data. the query
@@ -144,7 +143,6 @@ def materialize(
         title=structure.title,
         caption=structure.caption,
         notes=[*(structure.notes or []), *(extra_notes or [])],
-        description=structure.description or "",
         anchors={**(anchors or {}), "header_rows": header_indices},
         formulas=formulas,
         header_rows=header_indices,

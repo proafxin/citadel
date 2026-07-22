@@ -2,7 +2,7 @@ import re
 import unicodedata
 
 from citadel.schemas.content import Block
-from citadel.schemas.tree import NodeSpec
+from citadel.schemas.tree import ContentBlock
 from citadel.services.grid import is_math_text
 
 # the block types are the detector's own 25 classes, kept as it labels them rather than flattened into something
@@ -10,7 +10,6 @@ from citadel.services.grid import is_math_text
 # caption from body text, and every one of those distinctions is information we would otherwise throw away.
 # this maps each to the KIND of leaf it becomes; anything unlisted is prose.
 _KIND_BY_TYPE = {
-    "doc_title": "heading",
     "paragraph_title": "heading",
     "reference": "heading",
     "algorithm": "code",
@@ -113,10 +112,6 @@ def detail_kind(block_type: str) -> str:
     return _KIND_BY_TYPE.get(block_type, "paragraph")
 
 
-def make_content_id(library_id: int, doc_id: int, page_no: int, ordinal: int) -> str:
-    return f"{library_id}_{doc_id}_{page_no}_{ordinal}"
-
-
 def _flatten(text: str | None) -> str:
     return re.sub(r"\s*[\r\n]+\s*", " ", text or "").strip()
 
@@ -148,17 +143,23 @@ def _next_ordinal(counters: dict[int, int], page_no: int) -> int:
     return ordinal
 
 
-def _push(stack: list[tuple[int, str]], level: int, content_id: str) -> str | None:
+def _push(stack: list[tuple[int, str]], level: int, heading: str) -> None:
     while stack and stack[-1][0] >= level:
         stack.pop()
-    parent = stack[-1][1] if stack else None
-    stack.append((level, content_id))
-    return parent
+    stack.append((level, heading))
 
 
-def _list_node(
-    blocks: list[Block], idx: int, library_id: int, doc_id: int, stack: list[tuple[int, str]], counters: dict[int, int]
-) -> tuple[NodeSpec, int]:
+def _path(stack: list[tuple[int, str]]) -> list[str]:
+    return [heading for _, heading in stack]
+
+
+def _heading(stack: list[tuple[int, str]]) -> str | None:
+    return stack[-1][1] if stack else None
+
+
+def _list_block(
+    blocks: list[Block], idx: int, stack: list[tuple[int, str]], counters: dict[int, int]
+) -> tuple[ContentBlock, int]:
     page_idx = blocks[idx].page_idx
     bbox = blocks[idx].bbox
     items: list[dict] = []
@@ -168,102 +169,75 @@ def _list_node(
         items.append({"ordinal": len(items), "content": _flatten(content), "depth": block.text_level or 0})
         idx += 1
     page_no = page_idx + 1
-    ordinal = _next_ordinal(counters, page_no)
-    spec = NodeSpec(
-        content_id=make_content_id(library_id, doc_id, page_no, ordinal),
-        parent_content_id=stack[-1][1] if stack else None,
-        ordinal=ordinal,
+    built = ContentBlock(
+        heading=_heading(stack),
+        heading_path=_path(stack),
+        ordinal=_next_ordinal(counters, page_no),
         page_no=page_no,
         type="list",
         kind="list",
-        level=None,
         bbox=bbox,
         items=items,
     )
-    return spec, idx
+    return built, idx
 
 
-def _heading_nodes(
-    block: Block,
-    library_id: int,
-    doc_id: int,
-    stack: list[tuple[int, str]],
-    counters: dict[int, int],
-) -> list[NodeSpec]:
-    page_no = block.page_idx + 1
-    nodes: list[NodeSpec] = []
+def _push_heading(block: Block, stack: list[tuple[int, str]]) -> None:
+    # a heading is not content: it sets the section every following block belongs to and is never stored on its own
     for piece in split_heading(block.text or ""):
-        level = block.text_level or 1
-        ordinal = _next_ordinal(counters, page_no)
-        content_id = make_content_id(library_id, doc_id, page_no, ordinal)
-        parent = _push(stack, level, content_id)
-        nodes.append(
-            NodeSpec(
-                content_id=content_id,
-                parent_content_id=parent,
-                ordinal=ordinal,
-                page_no=page_no,
-                type="level",
-                kind="heading",
-                level=level,
-                bbox=block.bbox,
-                text=piece,
-            )
-        )
-    return nodes
+        _push(stack, block.text_level or 1, piece)
 
 
-def _content_node(
-    block: Block, library_id: int, doc_id: int, stack: list[tuple[int, str]], counters: dict[int, int]
-) -> NodeSpec:
+def _content_block(block: Block, stack: list[tuple[int, str]], counters: dict[int, int]) -> ContentBlock:
     page_no = block.page_idx + 1
     kind = detail_kind(block.type)
-    ordinal = _next_ordinal(counters, page_no)
-    spec = NodeSpec(
-        content_id=make_content_id(library_id, doc_id, page_no, ordinal),
-        parent_content_id=stack[-1][1] if stack else None,
-        ordinal=ordinal,
+    built = ContentBlock(
+        heading=_heading(stack),
+        heading_path=_path(stack),
+        ordinal=_next_ordinal(counters, page_no),
         page_no=page_no,
         type=block.type,
         kind=kind,
-        level=None,
         bbox=block.bbox,
     )
     match kind:
         case "equation":
-            spec.latex = _normalize_newlines(block.text)
+            built.latex = _normalize_newlines(block.text)
         case "code":
-            spec.text = _normalize_newlines(block.text)
+            built.text = _normalize_newlines(block.text)
         case _:
-            spec.text = _flatten(block.text)
-    return spec
+            built.text = _flatten(block.text)
+    return built
 
 
-def _table_nodes(
-    block: Block, library_id: int, doc_id: int, stack: list[tuple[int, str]], counters: dict[int, int], count: int
-) -> list[NodeSpec]:
+def _table_blocks(
+    block: Block, stack: list[tuple[int, str]], counters: dict[int, int], count: int
+) -> list[ContentBlock]:
     page_no = block.page_idx + 1
-    parent = stack[-1][1] if stack else None
-    nodes: list[NodeSpec] = []
-    for _ in range(count):
-        ordinal = _next_ordinal(counters, page_no)
-        nodes.append(
-            NodeSpec(
-                content_id=make_content_id(library_id, doc_id, page_no, ordinal),
-                parent_content_id=parent,
-                ordinal=ordinal,
-                page_no=page_no,
-                type="table",
-                kind="table",
-                level=None,
-                bbox=block.bbox,
-            )
+    return [
+        ContentBlock(
+            heading=_heading(stack),
+            heading_path=_path(stack),
+            ordinal=_next_ordinal(counters, page_no),
+            page_no=page_no,
+            type="table",
+            kind="table",
+            bbox=block.bbox,
         )
-    return nodes
+        for _ in range(count)
+    ]
 
 
-def build_tree(blocks: list[Block], library_id: int, doc_id: int, table_counts: dict[int, int]) -> list[NodeSpec]:
-    specs: list[NodeSpec] = []
+DOC_TITLE_TYPE = "doc_title"
+
+
+def split_title(blocks: list[Block]) -> tuple[str | None, list[Block]]:
+    title = next((_flatten(block.text) for block in blocks if block.type == DOC_TITLE_TYPE and block.text), None)
+    return title, [block for block in blocks if block.type != DOC_TITLE_TYPE]
+
+
+def build_tree(blocks: list[Block], table_counts: dict[int, int]) -> list[ContentBlock]:
+    built: list[ContentBlock] = []
     stack: list[tuple[int, str]] = []
     counters: dict[int, int] = {}
     idx = 0
@@ -271,28 +245,45 @@ def build_tree(blocks: list[Block], library_id: int, doc_id: int, table_counts: 
         block = blocks[idx]
         kind = detail_kind(block.type)
         if is_list_item(block):
-            spec, idx = _list_node(blocks, idx, library_id, doc_id, stack, counters)
-            specs.append(spec)
+            item, idx = _list_block(blocks, idx, stack, counters)
+            built.append(item)
         elif kind == "list":
             idx += 1
         elif kind == "heading":
-            specs.extend(_heading_nodes(block, library_id, doc_id, stack, counters))
+            _push_heading(block, stack)
             idx += 1
         elif kind == "table":
-            specs.extend(_table_nodes(block, library_id, doc_id, stack, counters, table_counts.get(idx, 1)))
+            built.extend(_table_blocks(block, stack, counters, table_counts.get(idx, 1)))
             idx += 1
         else:
-            specs.append(_content_node(block, library_id, doc_id, stack, counters))
+            built.append(_content_block(block, stack, counters))
             idx += 1
-    return specs
+    return built
 
 
-def _leaf_text(spec: NodeSpec) -> str:
-    if spec.kind == "equation":
-        return spec.latex or ""
-    if spec.kind == "list":
-        return " ".join(item.get("content", "") for item in spec.items or [])
-    return spec.text or ""
+def _leaf_text(block: ContentBlock) -> str:
+    if block.kind == "equation":
+        return block.latex or ""
+    if block.kind == "list":
+        # the item's position is content: "the second item" is only answerable if the ordinal survives flattening
+        return " ".join(f"{int(item.get('ordinal', 0)) + 1}. {item.get('content', '')}" for item in block.items or [])
+    return block.text or ""
+
+
+def build_raw(block: ContentBlock) -> dict | None:
+    # the block's own content in its source shape — what markdown is rebuilt from. a table's cells are NOT here: they
+    # live in table_rows because they are queried by SQL
+    match block.kind:
+        case "equation":
+            return {"latex": block.latex or ""}
+        case "code":
+            return {"text": block.text or ""}
+        case "list":
+            return {"items": block.items or []}
+        case "table":
+            return None
+        case _:
+            return {"text": block.text or ""}
 
 
 def _clean_text(text: str) -> str:
@@ -314,9 +305,8 @@ def build_table_search_text(
     caption: str | None,
     notes: list[str],
     headers: list[str],
-    description: str,
 ) -> str:
-    fields = [sheet, title or "", caption or "", *notes, *headers, description]
+    fields = [sheet, title or "", caption or "", *notes, *headers]
     parts = [
         _clean_name(library_name),
         _clean_name(filename.rsplit(".", 1)[0] if "." in filename else filename),
@@ -328,48 +318,35 @@ def build_table_search_text(
 EQUATION_CONTEXT_BACK = 3  # blocks to look back for the sentence that introduces an equation
 
 
-def _introducing_prose(specs: list[NodeSpec], index: int) -> str:
+def _introducing_prose(blocks: list[ContentBlock], index: int) -> str:
     # an equation is unsearchable on its own. LaTeX has no natural-language surface: nobody asks a question in
     # \sum_{n=1}^{\infty}, they ask for "the sum of the reciprocals of the squares" — and those words are sitting in the
     # prose that INTRODUCES the equation, one or two blocks above it ("Theorem 3.1 states that..."). that sentence is
     # already in the tree; it was simply never part of the equation's own search text. same page only: a sentence from
     # the previous page is not introducing anything.
-    page = specs[index].page_no
-    for spec in reversed(specs[max(index - EQUATION_CONTEXT_BACK, 0) : index]):
-        if spec.page_no != page:
+    page = blocks[index].page_no
+    for block in reversed(blocks[max(index - EQUATION_CONTEXT_BACK, 0) : index]):
+        if block.page_no != page:
             break
-        if spec.kind == "paragraph" and (spec.text or "").strip():
-            return spec.text or ""
+        if block.kind == "paragraph" and (block.text or "").strip():
+            return block.text or ""
     return ""
 
 
-def _heading_path(by_id: dict[str, NodeSpec], spec: NodeSpec) -> list[str]:
-    headings: list[str] = []
-    parent = spec.parent_content_id
-    while parent is not None:
-        ancestor = by_id[parent]
-        if ancestor.kind == "heading" and ancestor.text:
-            headings.append(ancestor.text)
-        parent = ancestor.parent_content_id
-    headings.reverse()
-    return headings
-
-
-def build_search_text(specs: list[NodeSpec], library_name: str, filename: str) -> dict[str, str]:
+def build_search_text(blocks: list[ContentBlock], library_name: str, filename: str) -> dict[int, str]:
     # paratext is DELIBERATELY absent: a running header repeated into every node's search text makes every embedding on
     # the page share an identical block of tokens, which destroys discrimination. it lives in document metadata instead.
-    by_id = {spec.content_id: spec for spec in specs}
-    result: dict[str, str] = {}
-    for index, spec in enumerate(specs):
-        if spec.kind in {"heading", "table"}:
+    result: dict[int, str] = {}
+    for index, block in enumerate(blocks):
+        if block.kind == "table":  # a table's search text is built from its schema, not its cells
             continue
-        context = _introducing_prose(specs, index) if spec.kind == "equation" else ""
+        context = _introducing_prose(blocks, index) if block.kind == "equation" else ""
         parts = [
             _clean_name(library_name),
             _clean_name(filename.rsplit(".", 1)[0] if "." in filename else filename),
-            *(_clean_text(text) for text in _heading_path(by_id, spec)),
+            *(_clean_text(text) for text in block.heading_path),
             _clean_text(context),
-            _clean_text(_leaf_text(spec)),
+            _clean_text(_leaf_text(block)),
         ]
-        result[spec.content_id] = "\n".join(part for part in parts if part)
+        result[index] = "\n".join(part for part in parts if part)
     return result

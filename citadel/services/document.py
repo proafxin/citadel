@@ -13,16 +13,16 @@ from sqlalchemy import func, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
-from citadel.models.content import Code, ContentNode, Equation, ListBlock, Paragraph
+from citadel.models.content import ContentNode
 from citadel.models.document import Document
 from citadel.models.library import Library
 from citadel.models.status import DocumentStatus, LibraryStatus
 from citadel.models.table import Table, TableRow
 from citadel.schemas.content import Block
+from citadel.schemas.tree import ContentBlock
 from citadel.services.excel import SheetItem, SheetText
 from citadel.services.grid import classify_grid
 from citadel.services.tabular import (
-    ensure_described,
     grid_from_html,
     html_to_text,
     stitch_tables,
@@ -30,14 +30,14 @@ from citadel.services.tabular import (
 )
 from citadel.services.tree import (
     EMPTY_IMAGE_TYPES,
-    NodeSpec,
+    build_raw,
     build_search_text,
     build_table_search_text,
     build_tree,
     collapse_loops,
     detail_kind,
-    make_content_id,
     split_paratext,
+    split_title,
 )
 from citadel.storage import delete_object, get_object, put_object
 from citadel.tabular.materialize import MaterializedTable
@@ -158,18 +158,6 @@ async def mark_library_ready(library_id: int) -> None:
         library.ready_at = datetime.now(UTC)
 
 
-def _add_detail(session: AsyncSession, spec: NodeSpec, doc_id: int) -> None:
-    match spec.kind:
-        case "code":
-            session.add(Code(content_id=spec.content_id, text=spec.text or ""))
-        case "equation":
-            session.add(Equation(content_id=spec.content_id, latex=spec.latex or ""))
-        case "list":
-            session.add(ListBlock(content_id=spec.content_id, items=spec.items or []))
-        case _:
-            session.add(Paragraph(content_id=spec.content_id, text=spec.text or ""))
-
-
 def _reclassify_regions(blocks: list[Block]) -> list[Block]:
     # the visual model labels displayed math, prose and empty regions as "table". re-type each to the leaf it really is
     # (equation / paragraph / dropped) so it never reaches table structuring, where it becomes a col0..colN relation
@@ -201,9 +189,7 @@ def table_block_indices(blocks: list[Block]) -> list[int]:
 async def structure_table_block(block: Block, context: str) -> list[MaterializedTable]:
     # ONE table block = ONE job. the stage claims it off the stream like any other unit, so table structuring is bounded
     # by the stream's capacity and the slm queue, not by a fan-out hidden inside a single claimed job
-    tables = structure_html_tables(block.text or "")
-    await ensure_described(tables, context)
-    return tables
+    return structure_html_tables(block.text or "")
 
 
 @dataclass
@@ -211,6 +197,7 @@ class _Prepared:
     stitched: list[Block]
     paratext: list[str]
     drops: dict[str, int]
+    title: str | None = None
 
 
 def prepare_document(blocks: list[Block]) -> _Prepared:
@@ -267,16 +254,15 @@ def _token_count(text: str | None) -> int:
     return min(EMBED_MAX_TOKENS, len(get_embed_tokenizer()(text, add_special_tokens=True)["input_ids"]))
 
 
-def _node_row(spec: NodeSpec, doc_id: int, search: str | None) -> dict[str, object]:
+def _block_row(block: ContentBlock, doc_id: int, search: str | None) -> dict[str, object]:
     return {
-        "content_id": spec.content_id,
         "document_id": doc_id,
-        "ordinal": spec.ordinal,
-        "page_no": spec.page_no,
-        "type": spec.type,
-        "level": spec.level,
-        "label": spec.text if spec.kind == "heading" else None,
-        "bbox": spec.bbox,
+        "ordinal": block.ordinal,
+        "page_no": block.page_no,
+        "type": block.type,
+        "heading": block.heading,
+        "bbox": block.bbox,
+        "raw": build_raw(block),
         "search_text": search,
         "token_count": _token_count(search),
     }
@@ -291,32 +277,15 @@ def _table_search(table: MaterializedTable, library_name: str, filename: str) ->
         table.caption,
         table.notes,
         [column.header or "" for column in table.columns],
-        table.description,
     )
 
 
-async def _insert_nodes_bfs(session: AsyncSession, specs: list[NodeSpec], rows: dict[str, dict[str, object]]) -> None:
-    # BFS by depth: all nodes at one level go in a single INSERT ... RETURNING (id, content_id); the returned ids feed
-    # the next level's parent_id. specs are already parent-before-child, so depth is a one-pass computation and each
-    # level's parents are guaranteed present. ~tree-depth statements instead of one flush per node.
-    parent_of = {spec.content_id: spec.parent_content_id for spec in specs}
-    depth: dict[str, int] = {}
-    levels: dict[int, list[str]] = {}
-    for spec in specs:
-        node_depth = 0 if spec.parent_content_id is None else depth[spec.parent_content_id] + 1
-        depth[spec.content_id] = node_depth
-        levels.setdefault(node_depth, []).append(spec.content_id)
-    id_map: dict[str, int] = {}
-    for level in sorted(levels):
-        payload = []
-        for content_id in levels[level]:
-            parent = parent_of[content_id]
-            payload.append({**rows[content_id], "parent_id": id_map[parent] if parent is not None else None})
-        result = await session.execute(insert(ContentNode).returning(ContentNode.id, ContentNode.content_id), payload)
-        id_map.update({node_content_id: node_id for node_id, node_content_id in result})
+async def _insert_blocks(session: AsyncSession, rows: list[dict[str, object]]) -> list[int]:
+    result = await session.execute(insert(ContentNode).returning(ContentNode.id), rows)
+    return list(result.scalars())
 
 
-async def _insert_tables_bulk(session: AsyncSession, doc_id: int, pairs: list[tuple[str, MaterializedTable]]) -> None:
+async def _insert_tables_bulk(session: AsyncSession, doc_id: int, pairs: list[tuple[int, MaterializedTable]]) -> None:
     if not pairs:
         return
     table_payload = [
@@ -330,7 +299,6 @@ async def _insert_tables_bulk(session: AsyncSession, doc_id: int, pairs: list[tu
                 "notes": table.notes,
                 "formulas": table.formulas,
             },
-            "description": table.description,
             "n_rows": table.n_rows,
             "sample_rows": table.sample_rows,
             "anchors": table.anchors,
@@ -390,7 +358,10 @@ def _prepare_blocks(blocks: list[Block]) -> _Prepared:
     content_blocks, paratext = split_paratext(deduped)
     reclassified = _reclassify_regions(content_blocks)  # math/prose/empty must not reach table structuring
     drops = _drop_counts(deduped, content_blocks, reclassified)
-    return _Prepared(stitch_tables(reclassified), paratext, drops)
+    # the document title is metadata, not content: it leaves the block stream here, before table jobs are keyed by
+    # block index, so nothing downstream has to know it ever existed
+    title, titleless = split_title(reclassified)
+    return _Prepared(stitch_tables(titleless), paratext, drops, title)
 
 
 async def save_document_tree(
@@ -410,8 +381,8 @@ async def save_document_tree(
         library = await session.get_one(Library, document.library_id)
         library_id, filename, library_name = document.library_id, document.filename, library.name
     await asyncio.to_thread(persist_document_blocks, doc_id, blocks)
-    specs = list(build_tree(prepared.stitched, library_id, doc_id, table_counts))
-    search_text = build_search_text(specs, library_name, filename)
+    built = list(build_tree(prepared.stitched, table_counts))
+    search_text = build_search_text(built, library_name, filename)
     tables = iter(table_queue)
     async with get_sessionmaker()() as session, session.begin():
         # per-doc advisory lock: serialize concurrent/redelivered merges of the same document so the "already
@@ -422,49 +393,50 @@ async def save_document_tree(
         if document is None:
             return
         document.status = status
+        document.title = prepared.title
         document.ingest_seconds = _ingest_seconds(document)
         document.blocks_in = len(blocks)
-        document.nodes_out = len(specs)
+        document.nodes_out = len(built)
         document.drops = prepared.drops
         document.paratext = prepared.paratext
         if await session.scalar(select(ContentNode.id).where(ContentNode.document_id == doc_id).limit(1)) is not None:
             await _maybe_notify_embed(session, library_id)
             return
-        node_rows: dict[str, dict[str, object]] = {}
-        table_pairs: list[tuple[str, MaterializedTable]] = []
-        detail_specs: list[NodeSpec] = []
-        for spec in specs:
-            if spec.kind == "table":
+        rows: list[dict[str, object]] = []
+        table_blocks: list[tuple[int, MaterializedTable]] = []
+        for index, block in enumerate(built):
+            if block.kind == "table":
                 table = next(tables)
-                table_pairs.append((spec.content_id, table))
-                node_rows[spec.content_id] = _node_row(spec, doc_id, _table_search(table, library_name, filename))
+                table_blocks.append((index, table))
+                rows.append(_block_row(block, doc_id, _table_search(table, library_name, filename)))
             else:
-                node_rows[spec.content_id] = _node_row(spec, doc_id, search_text.get(spec.content_id))
-                if spec.kind != "heading":
-                    detail_specs.append(spec)
-        await _insert_nodes_bfs(session, specs, node_rows)
-        for spec in detail_specs:
-            _add_detail(session, spec, doc_id)
-        await _insert_tables_bulk(session, doc_id, table_pairs)
+                rows.append(_block_row(block, doc_id, search_text.get(index)))
+        ids = await _insert_blocks(session, rows)
+        await _insert_tables_bulk(session, doc_id, [(ids[index], table) for index, table in table_blocks])
         await _maybe_notify_embed(session, library_id)
 
 
+def _sheet_text_search(library_name: str, filename: str, sheet_name: str, text: str) -> str:
+    # prose inside a spreadsheet gets the same library / filename / sheet prefix every other block carries, so it is
+    # findable by filename or sheet like anything else in the corpus
+    return build_table_search_text(library_name, filename, sheet_name, None, None, [], [text])
+
+
 def _add_sheet_text(
-    session: AsyncSession, item: SheetText, content_id: str, doc_id: int, parent_id: int, sheet_no: int, ordinal: int
+    session: AsyncSession, item: SheetText, doc_id: int, sheet_no: int, ordinal: int, search: str
 ) -> None:
     session.add(
         ContentNode(
-            content_id=content_id,
             document_id=doc_id,
-            parent_id=parent_id,
             sheet_no=sheet_no,
             ordinal=ordinal,
             type="text",
-            search_text=item.text,
-            token_count=_token_count(item.text),
+            heading=None,
+            raw={"text": item.text},
+            search_text=search,
+            token_count=_token_count(search),
         )
     )
-    session.add(Paragraph(content_id=content_id, text=item.text))
 
 
 async def save_sheet_tables(doc_id: int, sheet_no: int, sheet_name: str, items: list[tuple[int, SheetItem]]) -> None:
@@ -476,21 +448,10 @@ async def save_sheet_tables(doc_id: int, sheet_no: int, sheet_name: str, items: 
             return
         document = await session.get_one(Document, doc_id)
         library = await session.get_one(Library, document.library_id)
-        sheet = ContentNode(
-            content_id=make_content_id(document.library_id, doc_id, sheet_no, 0),
-            document_id=doc_id,
-            sheet_no=sheet_no,
-            ordinal=0,
-            type="level",
-            level=1,
-            label=sheet_name,
-        )
-        session.add(sheet)
-        await session.flush()
         for ordinal, item in items:
-            content_id = make_content_id(document.library_id, doc_id, sheet_no, ordinal)
             if isinstance(item, SheetText):
-                _add_sheet_text(session, item, content_id, doc_id, sheet.id, sheet_no, ordinal)
+                search = _sheet_text_search(library.name, document.filename, sheet_name, item.text)
+                _add_sheet_text(session, item, doc_id, sheet_no, ordinal, search)
                 continue
             table = item
             node_search = build_table_search_text(
@@ -501,22 +462,20 @@ async def save_sheet_tables(doc_id: int, sheet_no: int, sheet_name: str, items: 
                 table.caption,
                 table.notes,
                 [column.header or "" for column in table.columns],
-                table.description,
             )
             node = ContentNode(
-                content_id=content_id,
                 document_id=doc_id,
-                parent_id=sheet.id,
                 sheet_no=sheet_no,
                 ordinal=ordinal,
                 type="table",
+                heading=None,
                 search_text=node_search,
                 token_count=_token_count(node_search),
             )
             session.add(node)
             await session.flush()
             row = Table(
-                content_id=content_id,
+                content_id=node.id,
                 document_id=doc_id,
                 columns=[column.model_dump() for column in table.columns],
                 table_metadata={
@@ -526,7 +485,6 @@ async def save_sheet_tables(doc_id: int, sheet_no: int, sheet_name: str, items: 
                     "notes": table.notes,
                     "formulas": table.formulas,
                 },
-                description=table.description,
                 n_rows=table.n_rows,
                 sample_rows=table.sample_rows,
                 anchors=table.anchors,
@@ -559,79 +517,32 @@ async def mark_document(doc_id: int, status: DocumentStatus) -> None:
         await _maybe_notify_embed(session, document.library_id)
 
 
-async def _load_payloads(session: AsyncSession, ids: list[str]) -> dict[str, dict]:
-    return {
-        "paragraphs": {
-            row.content_id: row.text
-            for row in await session.scalars(select(Paragraph).where(Paragraph.content_id.in_(ids)))
-        },
-        "codes": {
-            row.content_id: row.text for row in await session.scalars(select(Code).where(Code.content_id.in_(ids)))
-        },
-        "equations": {
-            row.content_id: row.latex
-            for row in await session.scalars(select(Equation).where(Equation.content_id.in_(ids)))
-        },
-        "lists": {
-            row.content_id: row.items
-            for row in await session.scalars(select(ListBlock).where(ListBlock.content_id.in_(ids)))
-        },
-        "tables": {
-            row.content_id: row for row in await session.scalars(select(Table).where(Table.content_id.in_(ids)))
-        },
-    }
+async def _load_tables(session: AsyncSession, doc_id: int) -> dict[int, Table]:
+    return {row.content_id: row for row in await session.scalars(select(Table).where(Table.document_id == doc_id))}
 
 
-def _node_dict(node: ContentNode, payloads: dict[str, dict]) -> dict:
-    data: dict = {"type": node.type}
-    if node.level is not None:
-        data["level"] = node.level
-    if node.label is not None:
-        data["label"] = node.label
-    if node.type == "level":
-        return data
-    match detail_kind(node.type):
-        case "code":
-            data["content"] = payloads["codes"].get(node.content_id)
-        case "equation":
-            data["content"] = payloads["equations"].get(node.content_id)
-        case "list":
-            data["list_items"] = payloads["lists"].get(node.content_id)
-        case "table":
-            table = payloads["tables"].get(node.content_id)
-            if table is not None:
-                data["columns"] = table.columns
-                data["sample_rows"] = table.sample_rows
-                data["n_rows"] = table.n_rows
-                data["description"] = table.description
-                data["metadata"] = table.table_metadata
-        case _:
-            data["content"] = payloads["paragraphs"].get(node.content_id)
-    return data
-
-
-def _build_node(node: ContentNode, children_of: dict[int | None, list[ContentNode]], payloads: dict[str, dict]) -> dict:
-    data = _node_dict(node, payloads)
-    children = [_build_node(child, children_of, payloads) for child in children_of.get(node.id, [])]
-    if children:
-        data["children"] = children
+def _block_dict(node: ContentNode, tables: dict[int, Table]) -> dict:
+    data: dict = {"type": node.type, "page_no": node.page_no, "sheet_no": node.sheet_no, "heading": node.heading}
+    table = tables.get(node.id)
+    if table is not None:
+        data["columns"] = table.columns
+        data["sample_rows"] = table.sample_rows
+        data["n_rows"] = table.n_rows
+        data["metadata"] = table.table_metadata
+    elif node.raw is not None:
+        data.update(node.raw)
     return data
 
 
 async def build_document_tree(session: AsyncSession, document: Document) -> dict:
     nodes = list(
         await session.scalars(
-            select(ContentNode)
-            .where(ContentNode.document_id == document.id)
-            .order_by(ContentNode.page_no, ContentNode.ordinal)
+            select(ContentNode).where(ContentNode.document_id == document.id).order_by(ContentNode.block_ordinal)
         )
     )
-    payloads = await _load_payloads(session, [node.content_id for node in nodes])
-    children_of: dict[int | None, list[ContentNode]] = {}
-    for node in nodes:
-        children_of.setdefault(node.parent_id, []).append(node)
-    roots = [_build_node(node, children_of, payloads) for node in children_of.get(None, [])]
-    return {"type": "document", "filename": document.filename, "children": roots}
+    tables = await _load_tables(session, document.id)
+    blocks = [_block_dict(node, tables) for node in nodes]
+    return {"type": "document", "filename": document.filename, "title": document.title, "blocks": blocks}
 
 
 def _tree_key(doc_id: int) -> str:
@@ -707,52 +618,35 @@ def _md_table(columns: list[dict], rows: list[list]) -> list[str]:
     return lines
 
 
-def _md_node(
-    node: ContentNode,
-    children_of: dict[int | None, list[ContentNode]],
-    payloads: dict[str, dict],
-    tables: dict[str, Table],
-    table_rows: dict[int, list[list]],
-    lines: list[str],
-) -> None:
-    if node.type == "level":
-        lines.extend(["#" * min(node.level or 1, 6) + " " + (node.label or ""), ""])
-    else:
-        match detail_kind(node.type):
-            case "table":
-                table = tables.get(node.content_id)
-                if table is not None:
-                    lines.extend(_md_table(table.columns, table_rows.get(table.id, [])))
-            case "list":
-                lines.extend(
-                    "  " * int(item.get("depth", 0) or 0) + "- " + str(item.get("content", ""))
-                    for item in payloads["lists"].get(node.content_id) or []
-                )
-                lines.append("")
-            case "code":
-                lines.extend(["```", payloads["codes"].get(node.content_id) or "", "```", ""])
-            case "equation":
-                lines.extend(["$$", payloads["equations"].get(node.content_id) or "", "$$", ""])
-            case _:
-                text = payloads["paragraphs"].get(node.content_id)
-                if text:
-                    lines.extend([text, ""])
-    for child in children_of.get(node.id, []):
-        _md_node(child, children_of, payloads, tables, table_rows, lines)
+def _md_block(node: ContentNode, tables: dict[int, Table], table_rows: dict[int, list[list]], lines: list[str]) -> None:
+    table = tables.get(node.id)
+    if table is not None:
+        lines.extend(_md_table(table.columns, table_rows.get(table.id, [])))
+        return
+    raw = node.raw or {}
+    match detail_kind(node.type):
+        case "list":
+            lines.extend(
+                "  " * int(item.get("depth", 0) or 0) + "- " + str(item.get("content", ""))
+                for item in raw.get("items") or []
+            )
+            lines.append("")
+        case "code":
+            lines.extend(["```", raw.get("text") or "", "```", ""])
+        case "equation":
+            lines.extend(["$$", raw.get("latex") or "", "$$", ""])
+        case _:
+            if raw.get("text"):
+                lines.extend([raw["text"], ""])
 
 
 async def _document_markdown(session: AsyncSession, doc_id: int) -> str:
     nodes = list(
         await session.scalars(
-            select(ContentNode)
-            .where(ContentNode.document_id == doc_id)
-            .order_by(ContentNode.page_no, ContentNode.ordinal)
+            select(ContentNode).where(ContentNode.document_id == doc_id).order_by(ContentNode.block_ordinal)
         )
     )
-    payloads = await _load_payloads(session, [node.content_id for node in nodes])
-    tables = {
-        table.content_id: table for table in await session.scalars(select(Table).where(Table.document_id == doc_id))
-    }
+    tables = await _load_tables(session, doc_id)
     table_rows: dict[int, list[list]] = {}
     table_ids = [table.id for table in tables.values()]
     if table_ids:
@@ -761,12 +655,14 @@ async def _document_markdown(session: AsyncSession, doc_id: int) -> str:
         )
         for row in rows:
             table_rows.setdefault(row.table_id, []).append(row.values)
-    children_of: dict[int | None, list[ContentNode]] = {}
-    for node in nodes:
-        children_of.setdefault(node.parent_id, []).append(node)
     lines: list[str] = []
-    for root in children_of.get(None, []):
-        _md_node(root, children_of, payloads, tables, table_rows, lines)
+    heading: str | None = None
+    for node in nodes:
+        if node.heading != heading:  # the heading is a field now, so sections are emitted where it changes
+            heading = node.heading
+            if heading:
+                lines.extend(["## " + heading, ""])
+        _md_block(node, tables, table_rows, lines)
     return "\n".join(lines).strip() + "\n"
 
 

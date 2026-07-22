@@ -20,7 +20,7 @@ class Embedding(Base):
         ),
     )
 
-    content_id: Mapped[str] = mapped_column(ForeignKey("content.content_id", ondelete="CASCADE"), unique=True)
+    content_id: Mapped[int] = mapped_column(ForeignKey("content.id", ondelete="CASCADE"), unique=True)
     library_id: Mapped[int] = mapped_column(index=True)
     type: Mapped[str]
     embedding: Mapped[list[float]] = mapped_column(HALFVEC(EMBED_DIM))

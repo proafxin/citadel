@@ -6,28 +6,9 @@ import polars as pl
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
-from citadel.llm import describe_table
 from citadel.schemas.content import Block
 from citadel.schemas.table import CellValue, TableStructure
 from citadel.tabular.materialize import MaterializedTable, materialize
-from citadel.tabular.structure import SKIP_TABLE_SLM
-
-
-async def ensure_described(tables: list[MaterializedTable], context: str) -> None:
-    # the uniform description step, and for everything except a spreadsheet region it is the ONLY thing a model is asked
-    # for: a csv, a json entity and an html/pdf <table> all carry their own schema, so their structure is derived, not
-    # inferred. a spreadsheet region arrives already described by the call that structured it. every table leaves the
-    # stage described, whatever its source
-    if SKIP_TABLE_SLM:  # measurement run: no description calls either
-        return
-    missing = [table for table in tables if not table.description]
-    if not missing:
-        return
-    described = await asyncio.gather(
-        *(describe_table(table.columns, table.sample_rows, context, table.formulas) for table in missing)
-    )
-    for table, description in zip(missing, described, strict=True):
-        table.description = description
 
 
 def read_csv_grid(data: bytes, separator: str) -> list[list[str]]:
@@ -135,7 +116,7 @@ def structure_html_tables(html: str) -> list[MaterializedTable]:
 
 async def structure_csv_tables(data: bytes, separator: str) -> list[MaterializedTable]:
     # a csv/tsv carries ONE schema by construction: polars parses it (quoting, embedded newlines, ragged lines) and the
-    # first row names the columns. no structure call — the description is the only thing the model is asked for
+    # first row names the columns. no structure call, and no model at all
     grid = await asyncio.to_thread(read_csv_grid, data, separator)
     if not grid:
         return []

@@ -1,14 +1,13 @@
 from pydantic import BaseModel
 
 
-class NodeSpec(BaseModel):
-    content_id: str
-    parent_content_id: str | None
+class ContentBlock(BaseModel):
     ordinal: int
     page_no: int
     type: str
     kind: str
-    level: int | None
+    heading: str | None
+    heading_path: list[str]
     bbox: list[float] | None
     text: str | None = None
     latex: str | None = None
