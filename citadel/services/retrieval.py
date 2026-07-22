@@ -247,14 +247,23 @@ def _take_group(nodes: list[_PendingNode], start: int, budget: int) -> tuple[int
     return end, longest
 
 
-async def _embed_group(library_id: int, batch: list[_PendingNode], longest: int, label: str) -> int:
+async def _encode_group(
+    library_id: int, batch: list[_PendingNode], longest: int, label: str
+) -> list[dict[str, object]]:
     total = sum(node.token_len for node in batch)  # real tokens packed vs the padded ceiling (rows x longest)
     logger.info("embed_group %s rows=%d longest=%d total=%d", label, len(batch), longest, total)
     vectors = await _embed([node.search_text for node in batch], longest)  # GPU work outside any open transaction
-    records: list[dict[str, object]] = [
+    return [
         {"content_id": node.content_id, "library_id": library_id, "type": node.node_type, "embedding": vector}
         for node, vector in zip(batch, vectors, strict=True)
     ]
+
+
+async def _write_group(records: list[dict[str, object]], label: str) -> None:
+    # runs CONCURRENTLY with the next group's encode. the two contend for nothing — this is postgres I/O, that is the
+    # GPU — and the write is half of finalize, so leaving it on the critical path idles the card for its whole
+    # duration. deferring the writes to the end instead would save nothing: the cost is ~1ms PER ROW of hnsw graph
+    # maintenance, flat across group sizes, so it is paid whenever it happens. only overlap removes it from the clock
     write_t = time.time()
     async with get_sessionmaker()() as session, session.begin():
         for chunk in _upsert_chunks(records, UPSERT_CHUNK):
@@ -263,7 +272,6 @@ async def _embed_group(library_id: int, batch: list[_PendingNode], longest: int,
                 ins.on_conflict_do_update(index_elements=["content_id"], set_={"embedding": ins.excluded.embedding})
             )
     logger.info("embed_group %s write %.2fs", label, time.time() - write_t)
-    return len(batch)
 
 
 async def _mark_documents_embedded(library_id: int) -> None:
@@ -294,15 +302,23 @@ async def embed_library(library_id: int) -> int:
     started = time.time()
     index = 0
     group_no = 0
+    writing: asyncio.Task[None] | None = None
     while index < total:
         end, longest = _take_group(pending, index, token_budget())
         group_no += 1
-        embedded += await _embed_group(library_id, pending[index:end], longest, f"lib{library_id}.g{group_no}")
+        label = f"lib{library_id}.g{group_no}"
+        records = await _encode_group(library_id, pending[index:end], longest, label)
+        if writing is not None:
+            await writing  # one open transaction at a time, and a failed write raises here rather than being lost
+        writing = asyncio.create_task(_write_group(records, label))
+        embedded += end - index
         index = end
         elapsed = time.time() - started
         rate = embedded / elapsed if elapsed > 0 else 0.0
         await redis.hset(f"embed:{library_id}", mapping={"done": embedded, "total": total})
         logger.info("embed library=%d %d/%d nodes %.1fs %.0f nodes/s", library_id, embedded, total, elapsed, rate)
+    if writing is not None:
+        await writing  # the last group's write must land before any document is marked embedded
     await _mark_documents_embedded(library_id)
     await redis.hset(f"embed:{library_id}", mapping={"t_done": time.time(), "nodes": embedded})
     return embedded

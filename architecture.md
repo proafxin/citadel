@@ -214,8 +214,16 @@ upstream. A saturated consumer is supposed to have a deep queue in front of it.
 
 What remains is arithmetic, and scheduling is now spent. At 90.6% the idle is **41s**, of which 3s is the
 ramp before the first crop exists and 38s is the drain — the last document's last pages, which no ordering
-can fill. Everything below that requires cutting the work itself. One 809-page scanned book is 67% of that total, which is why per-crop costs dominate every
-other consideration and why the minimum-pixel floor (below) is the only lever that reaches all of it.
+can fill. Everything below that requires cutting the work itself, and once page furniture stopped being
+re-recognized (below) the pipeline landed exactly on its throughput floor:
+
+```
+crops 16,933 ÷ 39.5 crops/s = 428.7s        actual runtime 428.5s
+```
+
+**Runtime is now the crop count divided by a fixed GPU rate.** Three concurrency sweeps put that rate at
+39.5 crops/s and it does not move, so every further gain has to remove crops. Two scanned books are **92.6%
+of them** — the corpus is, for optimisation purposes, those two documents.
 
 ### Reading pages (ocr)
 
@@ -223,8 +231,10 @@ The detector runs on every page and produces the same thing regardless: regions,
 a human would read them in. What happens to each region then depends on whether its characters already exist,
 because re-recognizing text that is already present only introduces errors:
 
-- **Digital page** (real text layer) — prose regions are taken from the page's own text layer at each
-  region's box, so they are the document's own characters, never re-recognized, and never sent to the model.
+- **Digital page** (real text layer) — prose regions AND page furniture are taken from the page's own text
+  layer at each region's box, so they are the document's own characters, never re-recognized, and never sent
+  to the model. Headers, footers and page numbers belong here for the same reason the body does: the layer
+  holds them exactly, and cropping them cost ~1.5 crops a page to get a worse answer.
   Only what the text layer cannot supply is cropped and read. Blank and fill-in fields are re-read from a
   close crop to catch ink the text layer lacks.
 - **Scanned page** — every readable region is cropped and read. There is no second pass: the detector finds
@@ -571,12 +581,13 @@ design intends.
   requires re-associating one returned text with several source regions. That is a fidelity-sensitive
   change, not a tuning one, and it is the only remaining lever that moves the floor.
 
-- **Page furniture is re-recognized on born-digital pages.** Headers, footers and page numbers are cropped
-  and sent to the recognition model even when the page has a text layer that already holds them exactly.
-  They are paratext — never leaves — so this is both wasted prefill and a needless re-recognition of
-  characters we already had. Taking them from the text layer, as every other prose region on a digital page
-  already is, is the fix. It is worth roughly 6% of crops on the current corpus: the arithmetic is dominated
-  by one 809-page *scanned* book that alone accounts for 80% of every crop in a run.
+- ~~Page furniture is re-recognized on born-digital pages.~~ **Fixed.** Headers, footers and page numbers
+  were cropped and sent to the model even where the text layer already held them exactly — wasted prefill
+  *and* a needless re-read of characters we had. They now come from the layer like every other prose region
+  on a digital page. Measured at **1,719 crops, 9.2%** of a run (a 491-page technical book went from 1,101
+  crops to 161; a 150-page act from 362 to 3), and it is more accurate as well as cheaper: the layer is
+  exact where the model reads prose at 98.1%. A header with no characters behind it — a scanned letterhead
+  on an otherwise digital page — comes back empty and is re-read by the model, so nothing is lost.
 
 - **Recognition requests are dropped intermittently, and the cause is not established.** About one crop in
   sixteen thousand fails with the server closing the connection without a response; the server logs nothing
