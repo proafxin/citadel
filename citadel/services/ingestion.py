@@ -92,16 +92,24 @@ logger = logging.getLogger(__name__)
 GROUP = "citadel"
 STREAM_INGEST = "ingest"
 STREAM_NORMALIZED = "normalized"
-STREAM_RENDER = "render"  # per-page render jobs: one message per PDF page, drained by the bounded render consumer.
-# ONE stream, deliberately. per-document streams read round-robin were built and measured: they did fix the supply
-# stall (slot-idle 80.8s -> 33.8s, the model pinned at 128 for the whole run) and the run got 5s SLOWER, because the
-# dominant document is 69% of all crops and IS the critical path — sharing its slots out stretched it 27%. makespan
-# wants the longest job favoured, not equalised, and FIFO already does that by accident
+RENDER_DOCS = "render:docs"  # documents with render jobs outstanding — the rotation the render consumer reads over.
+# render jobs are per-DOCUMENT streams, read with a share PROPORTIONAL TO REMAINING WORK. all three orderings have now
+# been measured on this corpus:
+#   FIFO            472.8s — the dominant doc's jobs sit behind everyone's, so sparse docs run alone for 70s and the
+#                            model collapses to 1-5 crops in flight while every queue reads empty
+#   round-robin     478.0s — equal share gave the critical path 1/N ~ 5%, fixing the stall and stretching that doc 27%
+#   proportional      this — both finish together, which is where makespan is minimised
+# EQUAL SHARE IS THE BUG and must never be the fallback, including on the first pass before any density is known —
+# there the weight comes from PAGE COUNT, which already ranks the dominant document first
 STREAM_PAGES = "pages"
 STREAM_STRUCTURE = "structure"  # ungated: prepare + route each doc as its ocr completes (no-table docs go on to merge)
 STREAM_TABLE_STRUCTURE = "table_structure"  # THE table stream: every table unit from every source — spreadsheet
 # sheets and table-bearing pdf/html documents alike — is structured here, in one stage, after ocr has drained
 STREAM_MERGE = "merge"
+
+
+def render_stream(doc_id: str) -> str:
+    return f"render:{doc_id}"
 
 
 MAX_ATTEMPTS = 3
@@ -626,10 +634,13 @@ async def handle_paginate(fields: dict[str, str]) -> None:
         logger.info("paginate file=%s pages=0 → merge", fields["filename"])
         return
     await redis.hset(f"doc:{doc_id}", "page_count", count)
+    stream = render_stream(doc_id)
     pipe = redis.pipeline(transaction=False)
     for idx in range(count):
-        pipe.xadd(STREAM_RENDER, {"doc_id": doc_id, "page_idx": idx, "dpi": dpi})
+        pipe.xadd(stream, {"doc_id": doc_id, "page_idx": idx, "dpi": dpi})
     await pipe.execute()  # emit one render job per page → the bounded render consumer does the work
+    # joins the rotation only AFTER its jobs exist, so "in the set with an empty stream" means drained, never pending
+    await redis.sadd(RENDER_DOCS, doc_id)
     await redis.hsetnx(f"doc:{doc_id}", "t_paginated", time.time())
     logger.info("paginate file=%s pages=%d", fields["filename"], count)
 
@@ -699,6 +710,34 @@ def _requeue() -> AsyncScript:
 async def requeue_message(stream: str, msg_id: str, fields: dict[bytes, bytes]) -> None:
     flat = [item for pair in fields.items() for item in pair]
     await _requeue()(keys=[stream], args=[GROUP, msg_id, *flat])
+
+
+async def render_weights(docs: list[str]) -> dict[str, float]:
+    # REMAINING CROPS per document, which is what the share must be proportional to. density is observed
+    # (crops seen / pages finished) and refines as the document runs; a document that has finished no pages yet has no
+    # density of its own and borrows the corpus mean, so its weight is still denominated in crops and comparable.
+    # the fallback chain never reaches "all equal" — that is the ordering that measured worst
+    redis = get_redis()
+    pipe = redis.pipeline(transaction=False)
+    for doc_id in docs:
+        pipe.hmget(f"doc:{doc_id}", "page_count", "done_count", "crops_n")
+    rows = await pipe.execute()
+    stats: dict[str, tuple[float, float, float]] = {}
+    seen_crops = seen_pages = 0.0
+    for doc_id, row in zip(docs, rows, strict=True):
+        pages, done, crops = (float(value or 0) for value in row)
+        stats[doc_id] = (pages, done, crops)
+        seen_crops += crops
+        seen_pages += done
+    mean_density = seen_crops / seen_pages if seen_pages else 1.0
+    weights: dict[str, float] = {}
+    for doc_id, (pages, done, crops) in stats.items():
+        density = crops / done if done else mean_density
+        # floored at ONE crop per page: a fully-digital document owes no crops at all (its text comes from the layer),
+        # and weighting purely by crops would give it no share and never render its pages — it would simply never
+        # finish. every remaining page costs a render and a detect whatever its crop yield, so it always carries weight
+        weights[doc_id] = max(1.0, (pages - done) * max(density, 1.0))
+    return weights
 
 
 async def record_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
@@ -903,6 +942,43 @@ def _bbox_pixels(bbox: list[float], size: tuple[int, int]) -> int:
     return max(1, int((bbox[2] - bbox[0]) * size[0])) * max(1, int((bbox[3] - bbox[1]) * size[1]))
 
 
+@dataclass
+class _GroupCloses:
+    # WHY a group ended, which decides where packing can go next. adjacent merging is at 23% and prose runs average
+    # 1.57 — if groups mostly close on AREA the union bbox is the limit (two stacked lines carry the dead whitespace
+    # between them, so composing the crop tightly instead of taking their union would pack far more). if they mostly
+    # close on LABEL then adjacent merging is exhausted and the remaining headroom needs non-adjacent regions, which
+    # means re-associating returned text with its source regions. very different projects; this says which
+    joined: int = 0
+    area: int = 0
+    label: int = 0
+    gap: int = 0
+    first: int = 0
+
+
+@lru_cache
+def get_group_closes() -> _GroupCloses:
+    return _GroupCloses()
+
+
+def log_group_closes() -> None:
+    closes = get_group_closes()
+    total = closes.joined + closes.area + closes.label + closes.gap + closes.first
+    if not total:
+        return
+    logger.info(
+        "group closes joined=%d area=%d label=%d gap=%d first=%d — merge blocked by area %.1f%% / label %.1f%%",
+        closes.joined,
+        closes.area,
+        closes.label,
+        closes.gap,
+        closes.first,
+        100 * closes.area / max(1, closes.area + closes.label + closes.gap),
+        100 * closes.label / max(1, closes.area + closes.label + closes.gap),
+    )
+    get_group_closes.cache_clear()
+
+
 def group_crops(blocks: list[DetBlock], indices: list[int], size: tuple[int, int]) -> list[list[int]]:
     # consecutive same-label prose regions share a crop while their UNION still fits the model's floor. past the floor
     # a merge stops being free — the bill grows with the union — so the group closes and a new one starts
@@ -913,13 +989,21 @@ def group_crops(blocks: list[DetBlock], indices: list[int], size: tuple[int, int
         bbox = list(blocks[index].bbox)
         # index + 1, not merely "the previous readable region": a picture sitting between two paragraphs is not in
         # `indices`, and merging across it would place its content after text that follows it on the page
-        joins = groups and label in MERGEABLE_LABELS and index == groups[-1][-1] + 1
-        if joins and blocks[groups[-1][-1]].label == label:
+        closes = get_group_closes()
+        if not groups:
+            closes.first += 1
+        elif label not in MERGEABLE_LABELS or blocks[groups[-1][-1]].label != label:
+            closes.label += 1
+        elif index != groups[-1][-1] + 1:
+            closes.gap += 1
+        else:
             candidate = _union(unions[-1], bbox)
             if _bbox_pixels(candidate, size) <= MIN_PIXELS:
                 groups[-1].append(index)
                 unions[-1] = candidate
+                closes.joined += 1
                 continue
+            closes.area += 1
         groups.append([index])
         unions.append(bbox)
     return groups
@@ -1340,6 +1424,8 @@ async def cleanup(doc_id: str) -> None:
     redis = get_redis()
     _SHEETS_CACHE.pop(doc_id, None)  # doc finished → drop its parsed workbook
     await redis.delete(f"blocks:{doc_id}", f"sheets:{doc_id}", f"structures:{doc_id}", f"tables:{doc_id}")
+    await redis.srem(RENDER_DOCS, doc_id)
+    await redis.delete(render_stream(doc_id))
     blob_path(doc_id).unlink(missing_ok=True)  # the doc's source file is freed the moment it finishes
     await redis.expire(f"doc:{doc_id}", 3600)  # keep final status briefly, then auto-evict — no accumulation
 

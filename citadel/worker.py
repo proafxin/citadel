@@ -4,7 +4,8 @@ import signal
 import traceback
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Any
+from functools import lru_cache
+from typing import Any, cast
 
 from citadel.bus import get_redis
 from citadel.db import get_engine
@@ -15,11 +16,11 @@ from citadel.services.ingestion import (
     MAX_ATTEMPTS,
     PAGINATE_CONCURRENCY,
     RENDER_CONCURRENCY,
+    RENDER_DOCS,
     STREAM_INGEST,
     STREAM_MERGE,
     STREAM_NORMALIZED,
     STREAM_PAGES,
-    STREAM_RENDER,
     STREAM_STRUCTURE,
     STREAM_TABLE_STRUCTURE,
     cleanup,
@@ -35,10 +36,13 @@ from citadel.services.ingestion import (
     handle_render,
     handle_structure,
     handle_table_structure,
+    log_group_closes,
     log_timeline,
     make_profile_pool,
     reap_orphan_blobs,
     release_idle,
+    render_stream,
+    render_weights,
     requeue_message,
     sample_timeline,
     shutdown,
@@ -244,7 +248,7 @@ async def _paginate_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) ->
 
 
 async def _render_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
-    stream = STREAM_RENDER
+    stream = render_stream(raw[b"doc_id"].decode())  # settle against the document's OWN stream, never a shared one
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
         if fields is None:
@@ -291,7 +295,6 @@ def _ocr_claim(msg_id: str, raw: dict[bytes, bytes]) -> None:
 DRAINED_STREAMS = (
     STREAM_INGEST,
     STREAM_NORMALIZED,
-    STREAM_RENDER,
     STREAM_PAGES,
     STREAM_STRUCTURE,
     STREAM_TABLE_STRUCTURE,
@@ -309,9 +312,12 @@ async def _release_if_drained() -> None:
     for stream in DRAINED_STREAMS:
         if await redis.xlen(stream):
             return
+    if await redis.scard(RENDER_DOCS):  # a doc leaves the rotation only at xlen 0, i.e. drained AND acked
+        return
     await asyncio.to_thread(release_idle)
     log_crop_sizes()
     log_timeline()
+    log_group_closes()
     logger.info("pipeline drained → released process pools")
 
 
@@ -392,13 +398,83 @@ async def _pages_room() -> int:
     return PAGES_BUFFER - unclaimed
 
 
-# ---- render: read `render`, render one PDF page via the pdfium pool, write `pages`. bounded to the pool width and
-# gated on the UNCLAIMED depth of `pages`, so it keeps a shallow buffer ready without bounding what ocr may hold ----
+@lru_cache
+def get_render_credit() -> dict[str, float]:
+    # a pass has RENDER_CONCURRENCY slots — three — so a document owed 1.4% of it rounds to zero and would never be
+    # claimed at all, which is LPT by accident: the dominant document takes every slot and the rest starve until it
+    # drains. credit ACCUMULATES across passes instead, so a small share is paid late rather than never, and the
+    # long-run allocation is the proportional one even though no single pass can express it
+    return {}
+
+
+async def _claim_by_share(consumer: str, cap: _Capacity, spawn: Spawn, room: int) -> int:
+    # each document gets a slice of this pass PROPORTIONAL to the crops it still owes, largest first so that when the
+    # room is small it is the critical path that gets it. proportional is the whole point: equal share starves the
+    # dominant document (measured, +5s) and no share at all starves the model (measured, a 70s collapse)
+    redis = get_redis()
+    docs = sorted(name.decode() for name in cast("set[bytes]", await redis.smembers(RENDER_DOCS)))
+    if not docs:
+        return 0
+    weights = await render_weights(docs)
+    total = sum(weights.values()) or 1.0
+    credit = get_render_credit()
+    for gone in set(credit) - set(docs):
+        del credit[gone]  # a finished document must not carry credit back if its id is ever reused
+    for doc_id in docs:
+        credit[doc_id] = credit.get(doc_id, 0.0) + room * weights[doc_id] / total
+    claimed = 0
+    for doc_id in sorted(docs, key=lambda name: credit[name], reverse=True):
+        if claimed >= room:
+            break
+        share = min(int(credit[doc_id]), room - claimed)
+        if share <= 0:
+            continue
+        stream = render_stream(doc_id)
+        await ensure_group(stream)
+        fresh = cast(
+            "list[tuple[bytes, list[tuple[bytes, dict[bytes, bytes]]]]]",
+            await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=share),
+        )
+        entries = fresh[0][1] if fresh else []
+        if not entries:
+            # xlen counts a claimed-but-unacked entry too, so zero means drained AND finished — never merely quiet
+            if not await redis.xlen(stream):
+                await redis.srem(RENDER_DOCS, doc_id)
+                credit.pop(doc_id, None)
+            continue
+        for msg_id, raw in entries:
+            cap.take()
+            spawn(msg_id.decode(), raw)
+            claimed += 1
+        credit[doc_id] -= len(entries)  # spend only what was actually taken; unclaimed credit rolls to the next pass
+    return claimed
+
+
+async def _recover_render(consumer: str, cap: _Capacity, spawn: Spawn) -> None:
+    # startup only: this consumer's own delivered-but-unacked entries, orphaned by a previous crash, one doc at a time
+    redis = get_redis()
+    for name in cast("set[bytes]", await redis.smembers(RENDER_DOCS)):
+        stream = render_stream(name.decode())
+        await ensure_group(stream)
+        await _recover(stream, consumer, cap, spawn)
+
+
+# ---- render: read each document's OWN stream, sharing each pass in proportion to the crops it still owes, so the
+# critical path runs at full rate and sparse documents fill what it leaves. gated on the UNCLAIMED depth of `pages` --
 async def render() -> None:
     await ensure_group(STREAM_PAGES)  # our gate reads `pages`' pending list, and ocr — which owns that group — may not
     # have created it yet. XPENDING on a missing group is an error, not an empty answer. idempotent.
     cap = _Capacity(RENDER_CONCURRENCY)
-    await _drive(STREAM_RENDER, cap, lambda mid, raw: _spawn(_render_job(cap, mid, raw)), _pages_room)
+    consumer = f"render-{get_settings().worker_id}"
+    spawn: Spawn = lambda mid, raw: _spawn(_render_job(cap, mid, raw))  # ruff:ignore[lambda-assignment]
+    await _recover_render(consumer, cap, spawn)
+    while True:
+        if cap.free() <= 0:
+            await cap.wait_free()
+            continue
+        room = min(cap.free(), await _pages_room())
+        if room <= 0 or not await _claim_by_share(consumer, cap, spawn, room):
+            await asyncio.sleep(0.1)
 
 
 async def _ocr_room() -> int:
