@@ -31,16 +31,19 @@ def _pending() -> dict[str, asyncio.Queue[tuple[str, str]]]:
     return {}
 
 
-async def submit(payload: dict, interactive: bool) -> AsyncIterator[str]:
+async def emit(payload: dict, interactive: bool) -> str:
+    # put ONE job on the stream and return its id WITHOUT waiting for the reply. many jobs can be emitted back to back so
+    # they sit on the stream together and vllm batches them; the reply is collected later by job id
     job_id = uuid.uuid4().hex
-    queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
-    _pending()[job_id] = queue
+    _pending()[job_id] = asyncio.Queue()
     stream = STREAM_SLM_INTERACTIVE if interactive else STREAM_SLM_BULK
+    await get_redis().xadd(stream, {"job_id": job_id, "reply_to": reply_stream(), "payload": json.dumps(payload)})
+    return job_id
+
+
+async def stream_reply(job_id: str) -> AsyncIterator[str]:
+    queue = _pending()[job_id]
     try:
-        await get_redis().xadd(
-            stream,
-            {"job_id": job_id, "reply_to": reply_stream(), "payload": json.dumps(payload)},
-        )
         while True:
             kind, value = await queue.get()
             if kind == DONE:
@@ -51,6 +54,16 @@ async def submit(payload: dict, interactive: bool) -> AsyncIterator[str]:
             yield value
     finally:
         _pending().pop(job_id, None)
+
+
+async def collect_reply(job_id: str) -> str:
+    return "".join([chunk async for chunk in stream_reply(job_id)])
+
+
+async def submit(payload: dict, interactive: bool) -> AsyncIterator[str]:
+    job_id = await emit(payload, interactive)
+    async for chunk in stream_reply(job_id):
+        yield chunk
 
 
 async def collect(payload: dict, interactive: bool) -> str:

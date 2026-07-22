@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from citadel.prompts import load_prompt
-from citadel.services.slm import collect, submit
+from citadel.services.slm import collect, collect_reply, emit, submit
 from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL
 
 STRUCT_MAX_TOKENS = 4096  # structured calls emit short JSON (indices, a concise merge summary, SQL)
@@ -65,6 +65,14 @@ def _inline_refs(schema: dict) -> dict:
 async def call_slm(prompt: str, schema: dict, interactive: bool) -> dict:
     raw = await collect(_struct_payload(prompt, _inline_refs(schema)), interactive)
     return json.loads(_extract_json(raw))
+
+
+async def emit_slm(prompt: str, schema: dict, interactive: bool) -> str:
+    return await emit(_struct_payload(prompt, _inline_refs(schema)), interactive)
+
+
+async def collect_slm(job_id: str) -> dict:
+    return json.loads(_extract_json(await collect_reply(job_id)))
 
 
 _STRUCTURE_SCHEMA = {

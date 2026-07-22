@@ -1,17 +1,21 @@
-import asyncio
 import logging
 from dataclasses import dataclass
 
-from sqlalchemy import bindparam, delete, select, text, update
+from sqlalchemy import delete, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
-from citadel.llm import call_slm, count_tokens, count_tokens_batch
+from citadel.llm import collect_slm, count_tokens, count_tokens_batch, emit_slm
 from citadel.models.batch import ContentBatch
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
+from citadel.models.library import Library
 from citadel.models.table import Table
 from citadel.prompts import load_prompt
+
+STREAM_BATCH = "batch"  # one job per document batch: emits a summary to the slm stream and writes it back on reply
 
 logger = logging.getLogger(__name__)
 
@@ -146,18 +150,12 @@ def summary_budget(content_tokens: int) -> int:
     return min(int(content_tokens * SUMMARY_RATIO), SUMMARY_TOKENS_MAX)
 
 
-async def summarize(spec: BatchSpec) -> str:
-    instructions = load_prompt("batch_summary").replace("{summary_tokens}", str(summary_budget(spec.content_tokens)))
-    data = await call_slm(f"{instructions}\ntext:\n{spec.text}", _SUMMARY_SCHEMA, interactive=False)
-    return str(data.get("summary", "")).strip()
-
-
 async def store_token_counts(session: AsyncSession, blocks: list[BlockText]) -> None:
     if not blocks:
         return
     await session.execute(
-        update(ContentNode).where(ContentNode.id == bindparam("cid")).values(qwen_token_count=bindparam("count")),
-        [{"cid": block.content_id, "count": block.tokens} for block in blocks],
+        update(ContentNode),
+        [{"id": block.content_id, "qwen_token_count": block.tokens} for block in blocks],
     )
 
 
@@ -170,30 +168,83 @@ async def build_document_specs(session: AsyncSession, doc_id: int) -> list[Batch
     return pack_batches(doc_id, blocks)
 
 
-async def build_library_batches(library_id: int) -> int:
+async def _is_tier_2(session: AsyncSession, doc_id: int) -> bool:
+    tier = await session.scalar(
+        select(Library.tier).join(Document, Document.library_id == Library.id).where(Document.id == doc_id)
+    )
+    return tier == "tier_2"
+
+
+async def emit_document_batches(doc_id: int) -> None:
+    # called once a document is fully persisted (its blocks all exist). block ordinals and qwen token counts are
+    # assigned here, the document is packed into batches, and ONE job per batch is put on the batch stream. batching is
+    # a tier_2 retrieval artifact, so tier_1 documents are skipped
     async with get_sessionmaker()() as session, session.begin():
-        doc_ids = list(await session.scalars(select(Document.id).where(Document.library_id == library_id)))
-        specs: list[BatchSpec] = []
-        for doc_id in doc_ids:
-            specs.extend(await build_document_specs(session, doc_id))
-    if not specs:
-        return 0
-    summaries = await asyncio.gather(*(summarize(spec) for spec in specs))
-    async with get_sessionmaker()() as session, session.begin():
-        await session.execute(delete(ContentBatch).where(ContentBatch.document_id.in_(doc_ids)))
-        session.add_all(
-            ContentBatch(
-                document_id=spec.document_id,
-                batch_no=spec.batch_no,
-                start_block_ordinal=spec.start_block_ordinal,
-                end_block_ordinal=spec.end_block_ordinal,
-                start_page_no=spec.start_page_no,
-                end_page_no=spec.end_page_no,
-                summary=summary,
-                summary_tokens=count_tokens(summary),
-                content_tokens=spec.content_tokens,
-            )
-            for spec, summary in zip(specs, summaries, strict=True)
+        if not await _is_tier_2(session, doc_id):
+            return
+        specs = await build_document_specs(session, doc_id)
+        await session.execute(delete(ContentBatch).where(ContentBatch.document_id == doc_id))
+    redis = get_redis()
+    for spec in specs:
+        await redis.xadd(
+            STREAM_BATCH,
+            {
+                "doc_id": str(doc_id),
+                "batch_no": str(spec.batch_no),
+                "start": str(spec.start_block_ordinal),
+                "end": str(spec.end_block_ordinal),
+                "start_page": "" if spec.start_page_no is None else str(spec.start_page_no),
+                "end_page": "" if spec.end_page_no is None else str(spec.end_page_no),
+                "content_tokens": str(spec.content_tokens),
+            },
         )
-    logger.info("batches library=%d docs=%d batches=%d", library_id, len(doc_ids), len(specs))
-    return len(specs)
+    logger.info("batches doc=%d batches=%d", doc_id, len(specs))
+
+
+async def _load_batch_text(session: AsyncSession, doc_id: int, start: int, end: int) -> str:
+    nodes = list(
+        await session.scalars(
+            select(ContentNode)
+            .where(
+                ContentNode.document_id == doc_id,
+                ContentNode.block_ordinal >= start,
+                ContentNode.block_ordinal <= end,
+            )
+            .order_by(ContentNode.block_ordinal)
+        )
+    )
+    tables = {row.content_id: row for row in await session.scalars(select(Table).where(Table.document_id == doc_id))}
+    rendered = [body for node in nodes if (body := render_block(node, tables.get(node.id)).strip())]
+    return "\n\n".join(rendered)
+
+
+async def summarize_batch(fields: dict[str, str]) -> None:
+    # one batch stream job: render the batch's blocks, hand a summary job to the slm stream, and write the reply back.
+    # the stream drives many of these at once, so summaries run concurrently and none waits on another
+    doc_id = int(fields["doc_id"])
+    content_tokens = int(fields["content_tokens"])
+    async with get_sessionmaker()() as session:
+        text_body = await _load_batch_text(session, doc_id, int(fields["start"]), int(fields["end"]))
+    instructions = load_prompt("batch_summary").replace("{summary_tokens}", str(summary_budget(content_tokens)))
+    job_id = await emit_slm(f"{instructions}\ntext:\n{text_body}", _SUMMARY_SCHEMA, interactive=False)
+    data = await collect_slm(job_id)
+    summary = str(data.get("summary", "")).strip()
+    row = {
+        "document_id": doc_id,
+        "batch_no": int(fields["batch_no"]),
+        "start_block_ordinal": int(fields["start"]),
+        "end_block_ordinal": int(fields["end"]),
+        "start_page_no": int(fields["start_page"]) if fields["start_page"] else None,
+        "end_page_no": int(fields["end_page"]) if fields["end_page"] else None,
+        "summary": summary,
+        "summary_tokens": count_tokens(summary),
+        "content_tokens": content_tokens,
+    }
+    async with get_sessionmaker()() as session, session.begin():
+        insert_stmt = pg_insert(ContentBatch).values(row)
+        await session.execute(
+            insert_stmt.on_conflict_do_update(
+                index_elements=["document_id", "batch_no"],
+                set_={key: insert_stmt.excluded[key] for key in row if key not in ("document_id", "batch_no")},
+            )
+        )

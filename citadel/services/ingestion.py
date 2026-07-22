@@ -30,6 +30,7 @@ from sqlalchemy import select
 from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
 from citadel.models.document import Document
+from citadel.services.batching import emit_document_batches
 from citadel.models.status import DocumentStatus
 from citadel.schemas.content import Block
 from citadel.schemas.document import DocProgress, DocumentRead, IngestResponse
@@ -1420,6 +1421,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
     await redis.hsetnx(f"doc:{doc_id}", "t_merge", now)
     if (await redis.hget(f"doc:{doc_id}", "mode") or b"").decode() == "tabular":
         await finalize_tabular(int(doc_id))
+        await emit_document_batches(int(doc_id))
         await redis.hset(f"doc:{doc_id}", mapping={"state": "ingested", "t_done": time.time()})
         doc = await redis.hgetall(f"doc:{doc_id}")
         logger.info("merge doc_id=%s state=ingested tabular %s", doc_id, _stage_line(doc))
@@ -1432,6 +1434,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
     table_counts, table_queue = collect_tables({int(key): value for key, value in results.items()})
     await save_document_tree(int(doc_id), blocks, state, prepared, table_counts, table_queue)
     await persist_document_tree(int(doc_id))
+    await emit_document_batches(int(doc_id))
     await redis.hset(f"doc:{doc_id}", mapping={"state": state, "t_done": time.time()})
     doc = await redis.hgetall(f"doc:{doc_id}")
     t0 = float(doc.get(b"t0", 0) or 0)

@@ -47,6 +47,7 @@ from citadel.services.ingestion import (
     sample_timeline,
     shutdown,
 )
+from citadel.services.batching import STREAM_BATCH, summarize_batch
 from citadel.services.paddle import log_crop_sizes
 from citadel.services.slm import read_replies
 from config import CPU_EIGHTH, CPU_THIRD, configure_logging, get_settings
@@ -373,6 +374,21 @@ async def _table_structure_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
     await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "table_structure"))
 
 
+async def _batch_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
+    stream = STREAM_BATCH
+    fields = await _decode_or_settle(stream, msg_id, raw)
+    if fields is None:
+        return
+    work = asyncio.create_task(summarize_batch(fields))
+    await asyncio.wait({work})
+    error = work.exception()
+    if error is None:
+        await _settle(stream, msg_id)
+        return
+    logger.error("batch failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(error))
+    await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "batch"))
+
+
 # ---- normalize: read `ingest`, convert, write `normalized`. one dedicated libreoffice profile per job
 async def normalize() -> None:
     cap = _Capacity(NORMALIZE_CONCURRENCY)
@@ -513,13 +529,19 @@ async def table_structure() -> None:
     await _drive(STREAM_TABLE_STRUCTURE, None, lambda mid, raw: _spawn(_table_structure_job(mid, raw)))
 
 
+# ---- batch: read `batch`, one job per document batch. UNBOUNDED like table_structure — each job hands a summary to the
+# slm stream and writes the reply back, so the batching and concurrency are vllm's to decide, not a client-side cap
+async def batch() -> None:
+    await _drive(STREAM_BATCH, None, lambda mid, raw: _spawn(_batch_job(mid, raw)))
+
+
 async def _main() -> None:
     await reap_orphan_blobs()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    stages = (normalize, paginate, render, ocr, structure, table_structure, merge)
+    stages = (normalize, paginate, render, ocr, structure, table_structure, merge, batch)
     consumers = [asyncio.create_task(stage()) for stage in stages]
     consumers.extend((asyncio.create_task(read_replies()), asyncio.create_task(sample_timeline())))
     stop_task = asyncio.create_task(stop.wait())
