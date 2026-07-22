@@ -942,6 +942,21 @@ def _bbox_pixels(bbox: list[float], size: tuple[int, int]) -> int:
     return max(1, int((bbox[2] - bbox[0]) * size[0])) * max(1, int((bbox[3] - bbox[1]) * size[1]))
 
 
+COLUMN_WIDEN = 1.25  # a merge may grow the block DOWNWARD, never sideways
+
+
+def _stacked(group: list[float], bbox: list[float]) -> bool:
+    # regions in one column sit above one another: merging them leaves the width alone and only adds height. two
+    # regions SIDE BY SIDE are a different matter — their union is a wide short strip holding two independent columns,
+    # and reading it as one crop both scrambles the order and costs accuracy. measured on a bilingual letterhead: the
+    # Kazakh and Russian addresses merged into one 89%-wide block and the model returned "данфылы" for "даңғылы",
+    # which the reference pipeline read correctly by keeping the two columns apart. area alone cannot catch this —
+    # two short columns have a SMALL union area — so the test is on width: a merge must not widen the block
+    union = max(group[2], bbox[2]) - min(group[0], bbox[0])
+    widest = max(group[2] - group[0], bbox[2] - bbox[0])
+    return union <= widest * COLUMN_WIDEN
+
+
 @dataclass
 class _GroupCloses:
     # WHY a group ended, which decides where packing can go next. adjacent merging is at 23% and prose runs average
@@ -953,6 +968,7 @@ class _GroupCloses:
     area: int = 0
     label: int = 0
     gap: int = 0
+    column: int = 0
     first: int = 0
 
 
@@ -966,15 +982,19 @@ def log_group_closes() -> None:
     total = closes.joined + closes.area + closes.label + closes.gap + closes.first
     if not total:
         return
+    blocked = max(1, closes.area + closes.label + closes.gap + closes.column)
     logger.info(
-        "group closes joined=%d area=%d label=%d gap=%d first=%d — merge blocked by area %.1f%% / label %.1f%%",
+        "group closes joined=%d area=%d label=%d gap=%d column=%d first=%d — blocked by area %.1f%% / label %.1f%%"
+        " / column %.1f%%",
         closes.joined,
         closes.area,
         closes.label,
         closes.gap,
+        closes.column,
         closes.first,
-        100 * closes.area / max(1, closes.area + closes.label + closes.gap),
-        100 * closes.label / max(1, closes.area + closes.label + closes.gap),
+        100 * closes.area / blocked,
+        100 * closes.label / blocked,
+        100 * closes.column / blocked,
     )
     get_group_closes.cache_clear()
 
@@ -996,6 +1016,8 @@ def group_crops(blocks: list[DetBlock], indices: list[int], size: tuple[int, int
             closes.label += 1
         elif index != groups[-1][-1] + 1:
             closes.gap += 1
+        elif not _stacked(unions[-1], bbox):
+            closes.column += 1
         else:
             candidate = _union(unions[-1], bbox)
             if _bbox_pixels(candidate, size) <= MIN_PIXELS:
