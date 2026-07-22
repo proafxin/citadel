@@ -184,8 +184,26 @@ The number that decides whether any of this is working is **occupancy**: total m
 the GPU could have done in the elapsed time — `Σ(crops × predict)` against `runtime × concurrency`. It
 separates the two failures that look identical from the outside. The gap below 100% is a *packing* problem,
 fixable by admitting differently; the remainder is a *work* problem, fixable only by sending fewer or
-cheaper crops. Crop-denominated admission moved it from **78.9% to 84.4%**, and the run from 537.5s to
-512.7s, on an unchanged corpus.
+cheaper crops. Crop-denominated admission moved it from **78.9% to 84.4%**; proportional-share admission
+(below) took it to **90.6%**, and the run from 537.5s to **454.6s**, on an unchanged corpus.
+
+**Admission is shared between documents in proportion to the work each still owes.** A document's remaining
+crops are its observed density — crops read divided by pages finished — times the pages it has left, so the
+share is computed per run from the corpus at hand and nothing here is fitted to a particular library. All
+three orderings were measured, and the two obvious ones are both wrong:
+
+| ordering | runtime | why |
+|---|---|---|
+| FIFO | 472.8s | the dominant document's jobs sit behind everyone's, so crop-sparse documents run alone and the model collapses to 1-5 crops in flight for 70 seconds |
+| round-robin | 478.0s | equal share gives the critical path 1/N — about 5% — which fixes the stall and stretches that document 27% |
+| proportional | **454.6s** | every document finishes at once, which is where makespan is minimised |
+
+Equal share is therefore never the fallback, including on the first pass before any density exists — there
+the weight comes from page count, which already ranks the dominant document first. And because a pass offers
+only a handful of slots, a document owed one percent of it would round to zero and never be served at all;
+shares accumulate as credit across passes so a small share is paid late rather than never. The density is
+floored at one crop per page, because a fully-digital document owes no crops — its text comes from the
+layer — and weighting on crops alone would leave it unrendered forever.
 
 The queues that then appear are the confirmation, not a regression. `budget_wait` became non-zero for the
 first time in any run (29.5 s/pg on one document), which is the crop budget finally binding — crops are
@@ -194,9 +212,9 @@ abundant and the model is fed. `layout_wait` rose to ~52 s/pg, which is precisel
 that is a queue *depth* readout, never a cost: driving it down without cutting work only moves the queue
 upstream. A saturated consumer is supposed to have a deep queue in front of it.
 
-What remains is arithmetic. At 84.4% the floor — the same work packed perfectly — is **433s**, so roughly
-80s is still recoverable by scheduling, and everything below that requires cutting the ~55,000 crop-seconds
-themselves. One 809-page scanned book is 67% of that total, which is why per-crop costs dominate every
+What remains is arithmetic, and scheduling is now spent. At 90.6% the idle is **41s**, of which 3s is the
+ramp before the first crop exists and 38s is the drain — the last document's last pages, which no ordering
+can fill. Everything below that requires cutting the work itself. One 809-page scanned book is 67% of that total, which is why per-crop costs dominate every
 other consideration and why the minimum-pixel floor (below) is the only lever that reaches all of it.
 
 ### Reading pages (ocr)
@@ -527,9 +545,10 @@ design intends.
   of this note claimed adding page supply anywhere "does nothing," which was measured on dense documents
   and wrongly generalized. A crop-sparse document could not put 128 crops in front of the model at all
   under a fixed page cap, and the model idled while every queue read zero. Crop-denominated admission
-  recovered 5.5 points of occupancy and 25 seconds. Occupancy now sits at 84.4%, so ~80s remains in
-  scheduling — the ramp before the first crop exists, and the tail — and everything past that requires
-  sending the model fewer or smaller crops (below), not feeding it faster.
+  recovered 5.5 points of occupancy, and proportional-share admission another 6. Occupancy now sits at
+  **90.6%**, and the 41s left is 3s of ramp before the first crop exists and 38s of drain — the last
+  document's last pages, which no ordering can fill. Scheduling is spent; everything past this requires
+  sending the model fewer crops (below), not feeding it faster.
 
 - **Every crop pays a fixed token toll, and most crops are a fraction of what that toll buys.** The
   recognition model's own image processor smart-resizes each crop into `[112896, 1003520]` pixels — the
@@ -544,11 +563,13 @@ design intends.
   tradeoff, for the same reason.
 
   What the padding measures is **packing headroom**. Eight regions that each cost 144 tokens alone still
-  cost 144 tokens merged, so the lever is crop *count*, never crop size. The 809-page scanned book carries
-  ~18 crops a page and 68% of all model work, which is exactly the shape that packs well. Two constraints
-  make it real work rather than a constant change: only adjacent regions sharing a task prompt may merge,
-  since the prompt is chosen per region type; and the returned text must be re-associated with its regions
-  to keep the content tree intact.
+  cost 144 tokens merged, so the lever is crop *count*, never crop size. Merging adjacent same-label prose
+  took 21,607 crops to 18,652, and that seam is now **exhausted**: instrumented over a full run, merges are
+  blocked by a **label change 81.1%** of the time and by the crop running out of room only 18.7%. The next
+  region is a formula, a heading, a list — not more prose. So composing crops more tightly recovers almost
+  nothing, and the remaining ~68% is reachable only by merging **non-adjacent** same-label regions, which
+  requires re-associating one returned text with several source regions. That is a fidelity-sensitive
+  change, not a tuning one, and it is the only remaining lever that moves the floor.
 
 - **Page furniture is re-recognized on born-digital pages.** Headers, footers and page numbers are cropped
   and sent to the recognition model even when the page has a text layer that already holds them exactly.
@@ -565,13 +586,12 @@ design intends.
   each disproved. The server's access log is now enabled so the next occurrence distinguishes "the request
   reached the application and was dropped" from "it died beneath it," which are different bugs.
 
-- **Documents are admitted strictly FIFO, so a large one blocks the queue behind it.** Render jobs enter one
-  ordered stream in the order documents are paginated, and a stream cannot be skipped — so an 800-page book
-  monopolizes every page slot until it drains. Measured on a 426-second run: a 13-page PDF waited **403
-  seconds** to be looked at, then took 6 seconds to read. It costs little wall time (total work is unchanged
-  by order) but it starves the tail, where the only work left comes from documents too small to fill the
-  model, and it makes small files finish last. Fair-share admission across documents is the fix; it has not
-  been built.
+- **Small documents still finish late, and that is now a deliberate trade rather than a defect.** Admission
+  shares each pass in proportion to the work a document still owes, which is what minimises makespan — every
+  document finishing at once. A 13-page file therefore trickles through beside an 809-page book rather than
+  being rushed ahead of it. Fair-share admission would make small files finish sooner and the *run* finish
+  later; it was built, measured at 478.0s against 454.6s, and reverted. If per-document latency ever matters
+  more than total runtime, that is a policy choice with a known price, not a missing feature.
 
 - **A memory bound that becomes the throughput constraint is invisible from the outside.** The failure
   looks identical to a slow GPU: the model idles, the queue drains, and every knob looks innocent. It is
