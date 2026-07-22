@@ -214,6 +214,71 @@ class _Admission:
         self.pending.discard((doc_id, page_idx))  # idempotent: charged normally, or released by the job's finally
 
 
+TIMELINE_BUCKET = 10.0  # seconds per reported point
+TIMELINE_TICK = 1.0
+STARVED = CROP_CONCURRENCY // 2  # below half the slots, the model is demonstrably not being fed
+
+
+@dataclass
+class _Timeline:
+    # WHERE the idle sits, not how much of it there is. occupancy gives the total; only a time series says whether it
+    # is the ramp, the tail, or a stall in between — and the crops ALIVE at the same instant say which: slots empty
+    # while crops are queued would be a dispatch fault, slots empty with nothing queued is starvation upstream
+    inflight: int = 0
+    started: float = 0.0
+    buckets: list[list[float]] = field(default_factory=list)  # [inflight_sum, alive_sum, samples]
+
+    def enter(self) -> None:
+        self.inflight += 1
+        if not self.started:
+            self.started = time.time()  # the clock starts at the FIRST crop, so the series is not padded by boot
+
+    def leave(self) -> None:
+        self.inflight -= 1
+
+    def sample(self, alive: int) -> None:
+        if not self.started:
+            return
+        index = int((time.time() - self.started) // TIMELINE_BUCKET)
+        while len(self.buckets) <= index:
+            self.buckets.append([0.0, 0.0, 0.0])
+        bucket = self.buckets[index]
+        bucket[0] += self.inflight
+        bucket[1] += alive
+        bucket[2] += 1
+
+
+@lru_cache
+def get_timeline() -> _Timeline:
+    return _Timeline()
+
+
+async def sample_timeline() -> None:
+    budget = get_crop_budget()
+    while True:
+        await asyncio.sleep(TIMELINE_TICK)
+        get_timeline().sample(budget.used)
+
+
+def log_timeline() -> None:
+    timeline = get_timeline()
+    points = [(flight / n, alive / n) for flight, alive, n in timeline.buckets if n]
+    if not points:
+        return
+    starved = [(flight, alive) for flight, alive in points if flight < STARVED]
+    logger.info(
+        "crop timeline %.0fs/pt limit=%d mean=%.0f starved=%d/%d pts (crops_alive_then=%.0f) | %s",
+        TIMELINE_BUCKET,
+        CROP_CONCURRENCY,
+        sum(flight for flight, _ in points) / len(points),
+        len(starved),
+        len(points),
+        sum(alive for _, alive in starved) / len(starved) if starved else 0.0,
+        " ".join(f"{flight:.0f}" for flight, _ in points),
+    )
+    get_timeline.cache_clear()
+
+
 @lru_cache
 def get_admission() -> _Admission:
     return _Admission(UNCHARGED_PAGES)
@@ -887,11 +952,16 @@ async def _read_crop(
     # and both are handed back the instant THIS crop returns — not when its slowest sibling does. the semaphore is
     # acquired HERE so the queue wait is charged to crop_wait and never to predict
     mark = time.time()
+    timeline = get_timeline()
     try:
         async with semaphore:
             spans.crop_wait += time.time() - mark
             mark = time.time()
-            text = await recognize(payload, prompt)
+            timeline.enter()
+            try:
+                text = await recognize(payload, prompt)
+            finally:
+                timeline.leave()
             spans.predict += time.time() - mark
             return text
     finally:

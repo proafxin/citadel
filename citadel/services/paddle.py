@@ -378,16 +378,12 @@ async def recognize(payload: bytes, prompt: str) -> str:
     # would have changed decoding for all eighteen thousand crops to repair eleven.
     if prompt == PROMPT_OCR:
         kept = salvage_prefix(content)
-        logger.warning(
-            "runaway generation on the plain read prompt, chars=%d — salvaged %d", len(content), len(kept)
-        )
+        logger.warning("runaway generation on the plain read prompt, chars=%d — salvaged %d", len(content), len(kept))
         return kept.strip()
     retry, retry_finish = await _ask(payload, PROMPT_OCR)
     if _ran_away(retry, retry_finish, PROMPT_OCR):
         kept = salvage_prefix(retry) or salvage_prefix(content)  # whichever attempt got further before degenerating
-        logger.warning(
-            "runaway generation prompt=%r, and the plain read looped too — salvaged %d", prompt, len(kept)
-        )
+        logger.warning("runaway generation prompt=%r, and the plain read looped too — salvaged %d", prompt, len(kept))
         return kept.strip()
     logger.info(
         "runaway generation prompt=%r chars=%d — recovered by plain read, chars=%d", prompt, len(content), len(retry)

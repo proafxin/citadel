@@ -35,10 +35,12 @@ from citadel.services.ingestion import (
     handle_render,
     handle_structure,
     handle_table_structure,
+    log_timeline,
     make_profile_pool,
     reap_orphan_blobs,
     release_idle,
     requeue_message,
+    sample_timeline,
     shutdown,
 )
 from citadel.services.paddle import log_crop_sizes
@@ -309,6 +311,7 @@ async def _release_if_drained() -> None:
             return
     await asyncio.to_thread(release_idle)
     log_crop_sizes()
+    log_timeline()
     logger.info("pipeline drained → released process pools")
 
 
@@ -442,7 +445,7 @@ async def _main() -> None:
         loop.add_signal_handler(sig, stop.set)
     stages = (normalize, paginate, render, ocr, structure, table_structure, merge)
     consumers = [asyncio.create_task(stage()) for stage in stages]
-    consumers.append(asyncio.create_task(read_replies()))
+    consumers.extend((asyncio.create_task(read_replies()), asyncio.create_task(sample_timeline())))
     stop_task = asyncio.create_task(stop.wait())
     try:
         await asyncio.wait([stop_task, *consumers], return_when=asyncio.FIRST_COMPLETED)
