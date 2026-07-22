@@ -10,8 +10,6 @@ from citadel.db import get_sessionmaker
 from citadel.llm import collect_slm, count_tokens, count_tokens_batch, emit_slm
 from citadel.models.batch import ContentBatch
 from citadel.models.content import ContentNode
-from citadel.models.document import Document
-from citadel.models.library import Library
 from citadel.models.table import Table
 from citadel.prompts import load_prompt
 
@@ -168,20 +166,12 @@ async def build_document_specs(session: AsyncSession, doc_id: int) -> list[Batch
     return pack_batches(doc_id, blocks)
 
 
-async def _is_tier_2(session: AsyncSession, doc_id: int) -> bool:
-    tier = await session.scalar(
-        select(Library.tier).join(Document, Document.library_id == Library.id).where(Document.id == doc_id)
-    )
-    return tier == "tier_2"
-
-
 async def emit_document_batches(doc_id: int) -> None:
     # called once a document is fully persisted (its blocks all exist). block ordinals and qwen token counts are
-    # assigned here, the document is packed into batches, and ONE job per batch is put on the batch stream. batching is
-    # a tier_2 retrieval artifact, so tier_1 documents are skipped
+    # assigned here, the document is packed into batches, and ONE job per batch is put on the batch stream. this runs
+    # during ingestion, before the tier is decided, so there is NO tier gate — batches are always built and the tier is
+    # only a query-time access gate
     async with get_sessionmaker()() as session, session.begin():
-        if not await _is_tier_2(session, doc_id):
-            return
         specs = await build_document_specs(session, doc_id)
         await session.execute(delete(ContentBatch).where(ContentBatch.document_id == doc_id))
     redis = get_redis()
