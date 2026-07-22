@@ -92,7 +92,11 @@ logger = logging.getLogger(__name__)
 GROUP = "citadel"
 STREAM_INGEST = "ingest"
 STREAM_NORMALIZED = "normalized"
-STREAM_RENDER = "render"  # per-page render jobs: one message per PDF page, drained by the bounded render consumer
+STREAM_RENDER = "render"  # per-page render jobs: one message per PDF page, drained by the bounded render consumer.
+# ONE stream, deliberately. per-document streams read round-robin were built and measured: they did fix the supply
+# stall (slot-idle 80.8s -> 33.8s, the model pinned at 128 for the whole run) and the run got 5s SLOWER, because the
+# dominant document is 69% of all crops and IS the critical path — sharing its slots out stretched it 27%. makespan
+# wants the longest job favoured, not equalised, and FIFO already does that by accident
 STREAM_PAGES = "pages"
 STREAM_STRUCTURE = "structure"  # ungated: prepare + route each doc as its ocr completes (no-table docs go on to merge)
 STREAM_TABLE_STRUCTURE = "table_structure"  # THE table stream: every table unit from every source — spreadsheet
@@ -625,9 +629,7 @@ async def handle_paginate(fields: dict[str, str]) -> None:
     pipe = redis.pipeline(transaction=False)
     for idx in range(count):
         pipe.xadd(STREAM_RENDER, {"doc_id": doc_id, "page_idx": idx, "dpi": dpi})
-    await (
-        pipe.execute()
-    )  # emit one render job per page → the bounded render consumer does the work, no in-handler fan-out
+    await pipe.execute()  # emit one render job per page → the bounded render consumer does the work
     await redis.hsetnx(f"doc:{doc_id}", "t_paginated", time.time())
     logger.info("paginate file=%s pages=%d", fields["filename"], count)
 

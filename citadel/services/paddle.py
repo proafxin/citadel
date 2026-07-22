@@ -18,22 +18,24 @@ logger = logging.getLogger(__name__)
 
 CROP_CONCURRENCY = 128  # the ONE bottleneck: a crop is the unit of VLM work, and this semaphore caps what is
 # outstanding at the model at all (Running + Waiting). it lives HERE, at the model boundary, and it IS the GPU's batch.
+# MUST equal paddle's --max-num-seqs in compose.yaml.
 #
-# 128 is the MEASURED optimum, probed in both directions on the same corpus. the curve is U-shaped, not monotone:
-#      64 -> 495.1s
-#     128 -> 480.3s   <- the knee (and exactly the server's --max-num-seqs)
-#     160 -> 492.9s
-#     192 -> 520.2s
+# 128 is the MEASURED optimum, and it has now been measured TWICE on two different work profiles. resweep after region
+# packing changed the shape of the work (21.6k small crops -> 18.7k larger ones, 6,374 -> 5,952 tok/s):
+#      96 -> 475.0s   39.3 crops/s
+#     128 -> 472.8s   39.5 crops/s   <- the knee (and exactly the server's --max-num-seqs)
+#     160 -> 491.0s   38.0 crops/s
+# the earlier curve on the pre-packing profile agreed: 64 -> 495.1s, 128 -> 480.3s, 160 -> 492.9s, 192 -> 520.2s.
+# 96 and 128 are inside run-to-run noise (0.9%) of each other; 160 is 3.8% worse, outside it.
 #
-# GOING UP does not feed the model — it starves it of nothing, because it was never starved. `Waiting` goes 0 -> 60 and
-# every sequence slot stays occupied, and GPU utilisation DOES NOT MOVE (90-95% either way). what does move is per-crop
-# latency (+64%) and throughput (-25%). the card is power-capped at 1837 of 3090 MHz, so its compute budget is fixed: a
-# deeper batch cannot buy throughput, it can only cost — attention over more sequences, memory-bandwidth contention,
-# chunked-prefill chunks diluting every decode step.
+# GOING UP does not feed the model, and at 160 the server says so directly: `Running: 92, Waiting: 63` at 19.7% KV.
+# it admitted 92 and queued the other 63 INSIDE the model, where each pins a decoded image and sends nothing. so the
+# excess is not batch, it is a second queue behind the one we already have. NOT a cache limit — zero preemptions, and
+# a crop emits ~70 tokens, so KV never came close. the card is power-capped at 1837 of 3090 MHz: its compute budget is
+# fixed, and a deeper batch can only cost — attention over more sequences, memory-bandwidth contention.
 #
-# GOING DOWN halves the latency and buys nothing, because throughput is concurrency/latency and both halve:
-#     128 / 2.489s = 51.4 crops/s      64 / 1.311s = 48.8 crops/s
-# so throughput is FLAT from 64 to 128 and degrades above it. 128 extracts the most work from a fixed power budget.
+# GOING DOWN buys nothing either, because throughput is concurrency/latency and both fall together. 96 delivers 39.3
+# crops/s against 128's 39.5. flat.
 #
 # utilisation is a TIME metric and on a power-limited card it is not actionable. do not tune against it.
 
