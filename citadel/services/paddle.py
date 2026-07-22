@@ -79,9 +79,19 @@ MIN_PIXELS = 112_896
 MAX_PIXELS = 1_003_520
 
 # born-digital pages take their characters from the PDF's own text layer instead of asking the model to re-recognize
-# text it can already read exactly. these are the prose regions that have real characters behind them
+# text it can already read exactly. these are the prose regions that have real characters behind them.
+# PAGE FURNITURE BELONGS HERE TOO, and its absence was costing both time and accuracy: a header and a page number were
+# cropped and sent on EVERY digital page to re-read characters the layer already held exactly. measured on a 491-page
+# technical book, 725 of its 1,101 crops were furniture — ~1.5 a page, and roughly 1,900 crops across the corpus.
+# the model reads prose at 98.1%; the layer is exact, so this is strictly more accurate as well as cheaper. a header
+# that genuinely has no characters behind it (a scanned letterhead on an otherwise digital page) comes back empty and
+# recover_fillin_blocks re-reads it with the model, which is the safety net that makes this safe to widen
 LAYER_LABELS = frozenset(
     {
+        "header",
+        "footer",
+        "number",
+        "aside_text",
         "text",
         "doc_title",
         "paragraph_title",
