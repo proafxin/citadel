@@ -23,19 +23,16 @@ from citadel.llm import (
     count_tokens_batch,
     emit_select,
     merge_evidence,
-    select_evidence,
     synthesize,
     write_queries,
 )
 from citadel.models.table import TableRow
 from citadel.services.retrieval import (
     BatchRef,
-    BlockText,
     TableCand,
     load_all_tables,
     load_block_texts,
     load_library_batches,
-    rank_scoped,
     scope_block_ids,
 )
 
@@ -43,14 +40,10 @@ logger = logging.getLogger(__name__)
 
 STATEMENT_TIMEOUT_MS = 3000
 
-# the two stages want opposite things from the window, so they no longer share a budget.
-#
-# FILTER_BUDGET caps how many candidates go into ONE filter call. the same candidates are read whichever way they split,
-# so total prefill is identical — batch size only trades round-trips against a longer single prompt. it is NOT a KV
-# concern: a request waiting for its turn allocates no cache (vLLM's scheduler reserves blocks only when it admits a
-# request to the running set, so a queued one holds just its token ids), so there is no thrash to size against.
-FILTER_CTX = 32768
-FILTER_BUDGET = FILTER_CTX - STRUCT_MAX_TOKENS - 2048
+# SELECT_BUDGET caps how many batch summaries go into ONE selection call. the summaries are read whichever way they
+# split, so total prefill is identical — batch size only trades round-trips against a longer single prompt.
+SELECT_CTX = 32768
+SELECT_BUDGET = SELECT_CTX - STRUCT_MAX_TOKENS - 2048
 
 # SYNTHESIS is ONE call, at the end, and its input budget is exactly what decides how much of the evidence reaches the
 # answer — the difference between an answer the corpus supports and a thinner one. a single request can afford the whole
@@ -59,8 +52,6 @@ SYNTH_CTX = (
     65536  # the server's whole window; it counts prompt and completion TOGETHER, so the answer comes out of this
 )
 SYNTH_BUDGET = SYNTH_CTX - SYNTH_MAX_TOKENS - 2048
-RESULTS_BUDGET = SYNTH_BUDGET // 2  # tabular results are exact: reserve up to half the window before reducing text
-EARLY_STOP_N = 3
 MERGE_INPUT_BUDGET = STRUCT_MAX_TOKENS // 2  # a merge call must fit its summary in STRUCT_MAX_TOKENS; keep input under
 # half that so even near-lossless (barely-compressed) output cannot overrun the cap and truncate the JSON
 SCHEMA_SAMPLES = 3
@@ -209,35 +200,6 @@ async def _aggregate(question: str, tables: list[TableCand]) -> list[SqlResult]:
     return results
 
 
-def _fit(counts: list[int], start: int, budget: int) -> int:
-    # how many items from `start` fit in `budget`, using token counts computed ONCE up front (no re-tokenization)
-    used = 0
-    for offset in range(start, len(counts)):
-        used += counts[offset]
-        if used > budget:
-            return offset - start
-    return len(counts) - start
-
-
-async def _filter(question: str, items: list[str]) -> list[tuple[int, int]]:
-    counts = await asyncio.to_thread(count_tokens_batch, items)
-    kept: list[tuple[int, int]] = []
-    start = 0
-    empty = 0
-    while start < len(items):
-        size = max(1, _fit(counts, start, FILTER_BUDGET))
-        chosen = await select_evidence(question, items[start : start + size])
-        if chosen:
-            kept.extend((start + index, score) for index, score in chosen)
-            empty = 0
-        else:
-            empty += 1
-            if empty >= EARLY_STOP_N:
-                break
-        start += size
-    return kept
-
-
 def _row_text(row: list) -> str:
     return " | ".join("" if value is None else str(value) for value in row)
 
@@ -347,9 +309,6 @@ async def _reduce(question: str, evidences: list[_Evidence], budget: int, level:
     return await _reduce(question, combined, budget, level + 1)
 
 
-SELECT_BUDGET = FILTER_BUDGET  # summaries packed into one selection call
-
-
 def _pack(counts: list[int], budget: int) -> list[list[int]]:
     groups: list[list[int]] = []
     current: list[int] = []
@@ -401,50 +360,20 @@ async def _reduce_summaries(question: str, batches: list[BatchRef], budget: int)
     return [evidence.text for evidence in await _reduce(question, evidences, budget, 0)]
 
 
-def _batch_of(block: BlockText, batches: list[BatchRef]) -> int | None:
-    for index, batch in enumerate(batches):
-        if block.document_id == batch.document_id and batch.start_block_ordinal <= block.block_ordinal <= batch.end_block_ordinal:
-            return index
-    return None
-
-
-async def _relevant_blocks(question: str, batches: list[BatchRef]) -> list[BlockText]:
-    # ONE pooled net over every block of the selected batches, then the SLM filter to drop RRF's false positives. the
-    # net is recall (looks connected); the filter is precision (is connected) — neither is trusted alone. `_filter`
-    # walks the ranking best-first and stops after a few empty batches, so how far down we read is the model's call,
-    # never a score cutoff or a fixed cap
-    pool = await scope_block_ids([(b.document_id, b.start_block_ordinal, b.end_block_ordinal) for b in batches])
-    ranked = await rank_scoped(question, pool)
-    texts = await load_block_texts(ranked)
-    ordered = [texts[cid] for cid in ranked if cid in texts]
-    kept = await _filter(question, [block.text for block in ordered])
-    return [ordered[index] for index in sorted(index for index, _ in kept)]
-
-
 async def render_text(question: str, batches: list[BatchRef], budget: int) -> list[str]:
-    # the summary is the baseline for every selected batch. a batch expands to its blocks ONLY when its relevant blocks
-    # come out more compact than its summary — which happens exactly when the query is focused on part of the section.
-    # a broad query keeps most of a section's blocks, so they exceed the summary and the batch stays summarized. this is
-    # a per-batch FOCUS test, independent of how large the budget is relative to the corpus
+    # affordability decides summary-vs-block. every batch stores content_tokens (the full size of its blocks), so
+    # whether the selected blocks fit is known up front, before any ranking. if they fit, show them ALL — there is no
+    # subset to pick, so no filter runs and nothing can overflow. if they do not fit, the query pulled in more content
+    # than the window holds (a broad question over a large corpus), so fall back to the summaries, which are the
+    # compressed form of exactly that content
     if not batches or budget <= 0:
         return []
-    summary_tokens = await asyncio.to_thread(count_tokens_batch, [f"[{b.filename}] {b.summary}" for b in batches])
-    relevant = await _relevant_blocks(question, batches)
-    by_batch: dict[int, list[BlockText]] = {}
-    for block in relevant:
-        index = _batch_of(block, batches)
-        if index is not None:
-            by_batch.setdefault(index, []).append(block)
-    covered: dict[int, list[str]] = {}
-    for index, blocks in by_batch.items():
-        block_tokens = sum(count_tokens(block.text) + 1 for block in blocks)
-        if block_tokens < summary_tokens[index]:  # relevant blocks are more compact than the summary → focused → expand
-            covered[index] = [block.text for block in blocks]
-    rest = [batch for index, batch in enumerate(batches) if index not in covered]
-    used = sum(count_tokens(text) for texts in covered.values() for text in texts)
-    out: list[str] = [text for index in sorted(covered) for text in covered[index]]
-    out.extend(await _reduce_summaries(question, rest, budget - used))  # summaries fit (blocks < their summaries)
-    return out
+    if sum(batch.content_tokens for batch in batches) > budget:
+        return await _reduce_summaries(question, batches, budget)
+    ranges = [(batch.document_id, batch.start_block_ordinal, batch.end_block_ordinal) for batch in batches]
+    texts = await load_block_texts(await scope_block_ids(ranges))
+    blocks = sorted(texts.values(), key=lambda block: (block.document_id, block.block_ordinal))
+    return [block.text for block in blocks]
 
 
 async def answer(question: str, library_id: int) -> AsyncIterator[str]:
