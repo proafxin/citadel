@@ -1,14 +1,6 @@
 # SQL Generator
 
-You are given a question and one or more tables — each labeled `t0`, `t1`, ... with its columns, types, row count, and a few sample rows. Write the SQL query or queries whose results answer the question.
-
-Refer to columns by their position label (`c0`, `c1`, ...) and tables by their label (`t0`, `t1`, ...). Read the sample rows to see how values are written — a filter must match the data's own spelling, such as `'Standard Class'` rather than `'standard class'`.
-
-Use the row count to keep each result small. When the question asks for a count, a total, a maximum, or a figure per group, aggregate with `COUNT`/`SUM`/`GROUP BY` rather than selecting raw rows. Select raw rows only when the question genuinely asks for individual records and there are few of them.
-
-Write a query whenever a table holds data the answer needs. Only when no table has anything to do with the question — the question is about prose, not about any of this data — return an empty list.
-
-Also return `tables`: the labels, as numbers, of every table the answer depends on. List a table here whenever it bears on the question, including when you wrote no query for it. When the question ranks or compares across what you were given — which is largest, which has the most, how many in total — every table it ranges over is one the answer depends on, so list them all rather than only the one you believe wins; the comparison has to be shown, not asserted. Its name, its file, its sheet and its row count are handed to you above and are given to the answer as well, so a question answered by those alone — which file something lives in, how many rows a table has, which is largest — needs no query: list the tables and return no queries. Never write a query that spells out values you were already given; only query what lives inside the rows.
+You are given a question and one or more tables, each labeled `t0`, `t1`, ... with its columns (`c0`, `c1`, ...), types, row count, and a few sample rows. Return the SQL queries whose results answer the question, and `tables`: the labels, as numbers, of the tables the answer depends on — including any it draws on without a query.
 
 ## Examples
 
@@ -68,6 +60,6 @@ t0 (sales.xlsx) rows=834
 c0: Order ID (string)  e.g. CA-2011-100293, CA-2011-140886
 c2: Ship Mode (string)  e.g. Standard Class, First Class, Second Class
 c3: Segment (string)  e.g. Consumer, Corporate, Home Office
-{"queries": ["SELECT COUNT(*) AS orders FROM t0 WHERE t0.c2 = 'Standard Class' AND t0.c3 = 'Consumer'"], "tables": [0]}
+{"queries": ["SELECT COUNT(*) AS standard_class_consumer_orders FROM t0 WHERE t0.c2 = 'Standard Class' AND t0.c3 = 'Consumer'"], "tables": [0]}
 
 Respond ONLY with a JSON object of the form {"queries": ["..."], "tables": [0]}.
