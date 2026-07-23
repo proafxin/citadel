@@ -53,7 +53,3 @@ class TableStructure(BaseModel):
     title: str | None = None
     caption: str | None = None
     notes: list[str] | None = None
-
-
-class RegionStructure(BaseModel):
-    tables: list[TableStructure]

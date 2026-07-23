@@ -1,14 +1,12 @@
 import asyncio
-import functools
 import logging
-import operator
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from itertools import starmap
 
 import torch
-from sqlalchemy import case, or_, select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from citadel.bus import get_redis
@@ -26,9 +24,6 @@ from config import get_embedder
 logger = logging.getLogger(__name__)
 
 EMBED_TTL = 86_400
-
-RRF_K = 60
-RETRIEVAL_CONCURRENCY = 8  # cap concurrent dense/sparse searches so a many-variant query can't exhaust the DB pool
 
 EMBED_VRAM_HEADROOM = 0.7  # of what is actually free — the floor, so a genuinely full card still yields a safe batch
 EMBED_VRAM_CAP = 2 * 1024**3  # ...but never more than this, whatever is lying around. the batch used to be sized on
@@ -49,14 +44,6 @@ UPSERT_COLS = 4
 UPSERT_CHUNK = 32767 // UPSERT_COLS
 
 _EMBED_LOCK = asyncio.Lock()
-
-
-def _max_tokens(texts: list[str]) -> int:
-    # true token length via the model's own tokenizer; only the longest-by-chars candidates hold the longest-by-tokens
-    tokenizer = get_embedder().tokenizer
-    candidates = sorted(texts, key=len, reverse=True)[:16]
-    encoded = tokenizer(candidates, add_special_tokens=True)["input_ids"]
-    return min(MODEL_MAX_TOKENS, max((len(ids) for ids in encoded), default=1))
 
 
 def available_vram() -> int:
@@ -128,36 +115,6 @@ class _PendingNode:
     search_text: str
     node_type: str
     token_len: int = 0
-
-
-def _terms(queries: list[str]) -> list[str]:
-    terms: list[str] = []
-    seen: set[str] = set()
-    for query in queries:
-        for token in query.split():
-            key = token.casefold()
-            if key and key not in seen:
-                seen.add(key)
-                terms.append(token)
-    return terms
-
-
-def _like(term: str) -> str:
-    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%{escaped}%"
-
-
-@functools.lru_cache
-def _search_semaphore() -> asyncio.Semaphore:
-    return asyncio.Semaphore(RETRIEVAL_CONCURRENCY)
-
-
-def _rrf(rankings: list[list[int]]) -> list[int]:
-    scores: dict[int, float] = {}
-    for ranking in rankings:
-        for rank, content_id in enumerate(ranking, start=1):
-            scores[content_id] = scores.get(content_id, 0.0) + 1.0 / (RRF_K + rank)
-    return sorted(scores, key=lambda content_id: scores[content_id], reverse=True)
 
 
 async def _pending_nodes(library_id: int) -> list[_PendingNode]:
@@ -315,47 +272,6 @@ async def load_all_tables(library_id: int) -> list[TableCand]:
     return list(starmap(_table_cand, rows))
 
 
-async def _scoped_dense(vector: list[float], content_ids: list[int]) -> list[int]:
-    stmt = (
-        select(Embedding.content_id)
-        .where(Embedding.content_id.in_(content_ids), Embedding.type != "table")
-        .order_by(Embedding.embedding.cosine_distance(vector))
-    )
-    async with _search_semaphore(), get_sessionmaker()() as session:
-        return list(await session.scalars(stmt))
-
-
-async def _scoped_sparse(terms: list[str], content_ids: list[int]) -> list[int]:
-    if not terms:
-        return []
-    conditions = [ContentNode.search_text.ilike(_like(term), escape="\\") for term in terms]
-    hits = functools.reduce(operator.add, (case((cond, 1), else_=0) for cond in conditions))
-    stmt = (
-        select(ContentNode.id)
-        .where(ContentNode.id.in_(content_ids), ContentNode.search_text.isnot(None), or_(*conditions))
-        .order_by(hits.desc())
-    )
-    async with _search_semaphore(), get_sessionmaker()() as session:
-        return list(await session.scalars(stmt))
-
-
-async def rank_blocks(vectors: list[list[float]], terms: list[str], content_ids: list[int]) -> list[int]:
-    # ONE pooled net over every block of every selected batch, so cross-batch relevance is on a single scale. dense and
-    # sparse fused by RRF; this is the corpus-wide net of before, now scoped to the batches the summaries selected
-    if not content_ids:
-        return []
-    searches = [_scoped_dense(vector, content_ids) for vector in vectors]
-    searches.append(_scoped_sparse(terms, content_ids))
-    return _rrf(await asyncio.gather(*searches))
-
-
-async def rank_scoped(question: str, content_ids: list[int]) -> list[int]:
-    if not content_ids:
-        return []
-    vectors = await embed_query([question])
-    return await rank_blocks(vectors, _terms([question]), content_ids)
-
-
 async def scope_block_ids(ranges: list[tuple[int, int, int]]) -> list[int]:
     # content ids of the blocks under the selected batches, addressed by (document_id, block_ordinal range). table
     # nodes are INCLUDED: a tabular document's content is its tables, rendered as schema + samples, and it must
@@ -402,10 +318,6 @@ async def load_block_texts(content_ids: list[int]) -> dict[int, BlockText]:
             page = f" p{node.page_no}" if node.page_no else ""
             out[node.id] = BlockText(node.id, node.document_id, node.block_ordinal or 0, f"[{filename}{page}] {body}")
     return out
-
-
-async def embed_query(queries: list[str]) -> list[list[float]]:
-    return await _embed(queries, _max_tokens(queries))
 
 
 @dataclass

@@ -1312,14 +1312,6 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     await _emit_page(doc_id, page_idx, blocks)
 
 
-def _dump_blocks(blocks: list[Block]) -> str:
-    return json.dumps([b.model_dump() for b in blocks])
-
-
-def _load_blocks(blob: str) -> list[Block]:
-    return [Block(**raw) for raw in json.loads(blob)]
-
-
 async def _emit_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
     await record_page(doc_id, page_idx, blocks)
 

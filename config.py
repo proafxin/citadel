@@ -10,7 +10,6 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 logger = logging.getLogger(__name__)
 
 CPU_THIRD = max((os.cpu_count() or 3) // 3, 1)
-CPU_QUARTER = max((os.cpu_count() or 4) // 4, 1)
 CPU_EIGHTH = max((os.cpu_count() or 8) // 8, 1)
 
 QWEN_MODEL = "qwen"

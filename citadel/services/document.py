@@ -562,14 +562,6 @@ def persist_document_blocks(doc_id: int, blocks: list[Block]) -> None:
     put_object(_blocks_key(doc_id), compress_blocks(blocks))
 
 
-def load_document_blocks(doc_id: int) -> list[Block] | None:
-    raw = get_object(_blocks_key(doc_id))
-    if raw is None:
-        return None
-    payload = json.loads(zstandard.ZstdDecompressor().decompress(raw))
-    return [Block.model_validate(item) for item in payload]
-
-
 def delete_document_blocks(doc_id: int) -> None:
     delete_object(_blocks_key(doc_id))
 

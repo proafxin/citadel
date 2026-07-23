@@ -159,43 +159,6 @@ async def _chat_stream(prompt: str) -> AsyncIterator[str]:
         yield delta
 
 
-MIN_SCORE = 1
-MAX_SCORE = 3
-
-_SELECT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "relevant": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"index": {"type": "integer"}, "score": {"type": "integer"}},
-                "required": ["index", "score"],
-            },
-        }
-    },
-    "required": ["relevant"],
-}
-
-
-async def select_evidence(query: str, items: list[str]) -> list[tuple[int, int]]:
-    if not items:
-        return []
-    listing = "\n\n".join(f"[{index}] {item}" for index, item in enumerate(items))
-    data = await call_slm(
-        f"{load_prompt('evidence_filter')}\nquestion: {query}\nevidence:\n{listing}", _SELECT_SCHEMA, interactive=True
-    )
-    out: list[tuple[int, int]] = []
-    for entry in data.get("relevant", []):
-        if not isinstance(entry, dict):
-            continue
-        index, score = entry.get("index"), entry.get("score")
-        if isinstance(index, int) and 0 <= index < len(items):
-            graded = score if isinstance(score, int) else MIN_SCORE
-            out.append((index, min(max(graded, MIN_SCORE), MAX_SCORE)))
-    return out
-
-
 _MERGE_SCHEMA = {
     "type": "object",
     "properties": {"summary": {"type": "string"}},

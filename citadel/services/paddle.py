@@ -240,10 +240,6 @@ def otsl_rows(otsl: str) -> list[tuple[list[str], bool]]:
     return [(cells, flag) for cells, flag in rows if any(cell for cell in cells)]
 
 
-def otsl_to_grid(otsl: str) -> list[list[str]]:
-    return [cells for cells, _ in otsl_rows(otsl)]
-
-
 def _row_html(cells: list[str], width: int, tag: str) -> str:
     body = "".join(f"<{tag}>{html.escape(cells[i]) if i < len(cells) else ''}</{tag}>" for i in range(width))
     return f"<tr>{body}</tr>"
