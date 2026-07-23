@@ -271,6 +271,20 @@ def _catalog_sources(columns: list[str], rows: list[list]) -> list[str]:
     return list(dict.fromkeys(labels))
 
 
+def _all_files(tables: list[TableCand]) -> list[str]:
+    return list(dict.fromkeys(table.filename for table in tables))
+
+
+def _result_sources(tables: list[TableCand], refs: list[int], columns: list[str], rows: list[list]) -> list[str]:
+    # what the result traces back to. a tN query sources from the tables it read. a catalog query has no tN refs (the
+    # guard guarantees empty refs ⟹ it read the catalog), so its origin is either the files its rows name, or — when it
+    # aggregates without naming any (how many tables, total rows across all) — every file the catalog was built from. a
+    # computed figure is never left origin-less
+    if refs:
+        return _sources(tables, refs)
+    return _catalog_sources(columns, rows) or _all_files(tables)
+
+
 async def _run_sql(session: AsyncSession, tables: list[TableCand], sql: str) -> tuple[list[str], list[list]]:
     cte = _cte(tables)
     await session.execute(text("SET TRANSACTION READ ONLY"))
@@ -292,7 +306,7 @@ async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
         logger.warning("sql failed sql=%s\n%s", sql, traceback.format_exc())
         return None
     refs = _refs(tables, sql)
-    sources = _sources(tables, refs) or _catalog_sources(columns, rows)
+    sources = _result_sources(tables, refs, columns, rows)
     logger.info("resolve sources=%s rows=%d sql=%s", sources, len(rows), sql)
     return SqlResult(
         ", ".join(sources) or "computed result", columns, rows, len(rows), refs, _readable_sql(tables, sql)

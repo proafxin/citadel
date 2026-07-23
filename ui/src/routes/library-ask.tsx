@@ -87,7 +87,7 @@ export function LibraryAskPage() {
             {messages.map((m, i) => (
               <div key={`m-${i}`} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
                 {m.role === "user" ? (
-                  <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-accent px-4 py-2 text-sm text-accent-ink">
+                  <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-accent px-4 py-2 text-sm text-accent-ink selection:bg-accent-ink selection:text-accent">
                     {m.content}
                   </div>
                 ) : (
