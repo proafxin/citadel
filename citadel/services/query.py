@@ -422,14 +422,13 @@ async def _relevant_blocks(question: str, batches: list[BatchRef]) -> list[Block
 
 
 async def render_text(question: str, batches: list[BatchRef], budget: int) -> list[str]:
-    # summaries are the coverage baseline; only leftover headroom funds expansion to blocks. a broad query selects many
-    # batches, so the baseline fills the budget and nothing expands — which is the correct answer for a broad question
+    # the summary is the baseline for every selected batch. a batch expands to its blocks ONLY when its relevant blocks
+    # come out more compact than its summary — which happens exactly when the query is focused on part of the section.
+    # a broad query keeps most of a section's blocks, so they exceed the summary and the batch stays summarized. this is
+    # a per-batch FOCUS test, independent of how large the budget is relative to the corpus
     if not batches or budget <= 0:
         return []
     summary_tokens = await asyncio.to_thread(count_tokens_batch, [f"[{b.filename}] {b.summary}" for b in batches])
-    headroom = budget - sum(summary_tokens)
-    if headroom <= 0:
-        return await _reduce_summaries(question, batches, budget)
     relevant = await _relevant_blocks(question, batches)
     by_batch: dict[int, list[BlockText]] = {}
     for block in relevant:
@@ -437,18 +436,14 @@ async def render_text(question: str, batches: list[BatchRef], budget: int) -> li
         if index is not None:
             by_batch.setdefault(index, []).append(block)
     covered: dict[int, list[str]] = {}
-    for index, _ in enumerate(batches):  # emission order: most relevant batches expand first
-        blocks = by_batch.get(index)
-        if not blocks:
-            continue
-        cost = sum(count_tokens(block.text) + 1 for block in blocks) - summary_tokens[index]
-        if cost <= headroom:
+    for index, blocks in by_batch.items():
+        block_tokens = sum(count_tokens(block.text) + 1 for block in blocks)
+        if block_tokens < summary_tokens[index]:  # relevant blocks are more compact than the summary → focused → expand
             covered[index] = [block.text for block in blocks]
-            headroom -= cost
     rest = [batch for index, batch in enumerate(batches) if index not in covered]
-    remaining = budget - sum(count_tokens(text) for texts in covered.values() for text in texts)
+    used = sum(count_tokens(text) for texts in covered.values() for text in texts)
     out: list[str] = [text for index in sorted(covered) for text in covered[index]]
-    out.extend(await _reduce_summaries(question, rest, remaining))
+    out.extend(await _reduce_summaries(question, rest, budget - used))  # summaries fit (blocks < their summaries)
     return out
 
 
