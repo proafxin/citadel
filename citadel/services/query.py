@@ -56,6 +56,7 @@ SYNTH_BUDGET = SYNTH_CTX - SYNTH_MAX_TOKENS - 2048
 MERGE_INPUT_BUDGET = STRUCT_MAX_TOKENS // 2  # a merge call must fit its summary in STRUCT_MAX_TOKENS; keep input under
 # half that so even near-lossless (barely-compressed) output cannot overrun the cap and truncate the JSON
 SCHEMA_SAMPLES = 3
+CATALOG = "tcat"  # the relation describing the tables themselves, queryable alongside the t0..tn content views
 SQL_ROW_CAP = 10_000  # hard ceiling on rows any generated query may return, so a broad SELECT can't pull a whole table
 _PG = postgresql.dialect()
 _REL_REF = re.compile(r"\b(?:from|join)\s+(\"?[A-Za-z_][A-Za-z0-9_$]*\"?)", re.IGNORECASE)
@@ -110,9 +111,10 @@ def _safe_sql(sql: str) -> bool:
 
 
 def _references_only_views(sql: str, n_tables: int) -> bool:
-    # every FROM/JOIN in the generated SQL (subqueries included) must target one of our per-request t0..tn views — never
-    # a base table (content, table_rows, documents, pg_*), so a prompt-injected query can't read another library's data
-    allowed = {f"t{index}" for index in range(n_tables)}
+    # every FROM/JOIN in the generated SQL (subqueries included) must target one of our per-request t0..tn views or the
+    # catalog — never a base table (content, table_rows, documents, pg_*), so a prompt-injected query can't read
+    # another library's data
+    allowed = {f"t{index}" for index in range(n_tables)} | {CATALOG}
     refs = [match.group(1).strip('"').lower() for match in _REL_REF.finditer(sql)]
     return bool(refs) and all(ref in allowed for ref in refs)
 
@@ -156,13 +158,54 @@ def _schema_block(index: int, table: TableCand) -> str:
     return f"t{index} ({table.filename}) rows={table.n_rows}\n{_schema(table.columns, table.sample_rows)}"
 
 
+def _sql_literal(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _catalog_cte(tables: list[TableCand]) -> str:
+    # the tables ABOUT the tables. every row count and filename is already in the model's prompt, but a question about
+    # the corpus ("which file has the most rows") has no legal way to be computed without a relation to query — the
+    # model's only alternative is to inline the numbers as literals, which the view guard must reject
+    rows = ", ".join(
+        "({}, {}, {}, {}, {})".format(
+            _sql_literal(f"t{index}"),
+            _sql_literal(table.filename),
+            _sql_literal(str(table.metadata.get("sheet") or "")),
+            table.n_rows,
+            len(table.columns),
+        )
+        for index, table in enumerate(tables)
+    )
+    return (
+        f"{CATALOG} AS (SELECT * FROM (VALUES {rows}) "
+        f"AS _c(table_label, filename, sheet, n_rows, n_columns))"
+    )
+
+
+def _catalog_block(tables: list[TableCand]) -> str:
+    return (
+        f"{CATALOG} (catalog: one row per table listed above) rows={len(tables)}\n"
+        "table_label (string)  e.g. t0, t1\n"
+        "filename (string)  the file the table came from\n"
+        "sheet (string)  the sheet or region, empty when not a spreadsheet\n"
+        "n_rows (integer)  the table's data row count\n"
+        "n_columns (integer)  the table's column count\n"
+        "note: this table's columns are named, not c0..cN. use it to answer questions ABOUT the tables "
+        "(how many rows, which file is largest, how many tables) rather than about their contents."
+    )
+
+
 def _cte(tables: list[TableCand]) -> str:
-    return "WITH " + ", ".join(starmap(_view_cte, enumerate(tables)))
+    views = list(starmap(_view_cte, enumerate(tables)))
+    return "WITH " + ", ".join([*views, _catalog_cte(tables)])
 
 
 def _sources(tables: list[TableCand], sql: str) -> list[str]:
     used = sorted({int(match) for match in _TABLE_REF.findall(sql)})
-    return list(dict.fromkeys(tables[index].filename for index in used if index < len(tables)))
+    names = list(dict.fromkeys(tables[index].filename for index in used if index < len(tables)))
+    if not names and CATALOG in sql.lower():  # a catalog-only query is about the corpus, not one file
+        return sorted({table.filename for table in tables})
+    return names
 
 
 async def _run_sql(session: AsyncSession, tables: list[TableCand], sql: str) -> tuple[list[str], list[list]]:
@@ -191,7 +234,7 @@ async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
 
 
 async def _aggregate(question: str, tables: list[TableCand]) -> list[SqlResult]:
-    blocks = list(starmap(_schema_block, enumerate(tables)))
+    blocks = [*starmap(_schema_block, enumerate(tables)), _catalog_block(tables)]
     sqls = await write_queries(question, blocks) if tables else []
     logger.info("aggregate tables=%d sqls=%d", len(tables), len(sqls))
     results: list[SqlResult] = []
