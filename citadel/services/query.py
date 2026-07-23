@@ -332,10 +332,14 @@ async def select_batches(question: str, library_id: int) -> list[BatchRef]:
         return []
     items = [f"{batch.filename}\n{batch.summary}" for batch in batches]
     counts = await asyncio.to_thread(count_tokens_batch, items)
-    jobs = [(pack, await emit_select(question, [items[i] for i in pack])) for pack in _pack(counts, SELECT_BUDGET)]
+    packs = _pack(counts, SELECT_BUDGET)
+    jobs = [(pack, await emit_select(question, [items[i] for i in pack])) for pack in packs]
     selected: list[BatchRef] = []
     for pack, job_id in jobs:
-        selected.extend(batches[pack[local]] for local in await collect_select(job_id, len(pack)))
+        chosen = await collect_select(job_id, len(pack))
+        logger.info("select pack=%d chose=%d/%d", len(selected) // max(len(pack), 1), len(chosen), len(pack))
+        selected.extend(batches[pack[local]] for local in chosen)
+    logger.info("select library=%d batches=%d packs=%d selected=%d", library_id, len(batches), len(packs), len(selected))
     return selected
 
 

@@ -19,7 +19,7 @@ from citadel.models.embedding import Embedding
 from citadel.models.library import Library
 from citadel.models.status import DocumentStatus
 from citadel.models.table import Table
-from citadel.services.batching import render_raw
+from citadel.services.batching import render_block
 from config import get_embedder
 
 logger = logging.getLogger(__name__)
@@ -352,7 +352,9 @@ async def rank_scoped(question: str, content_ids: list[int]) -> list[int]:
 
 
 async def scope_block_ids(ranges: list[tuple[int, int, int]]) -> list[int]:
-    # content ids of the non-table blocks under the selected batches, addressed by (document_id, block_ordinal range)
+    # content ids of the blocks under the selected batches, addressed by (document_id, block_ordinal range). table
+    # nodes are INCLUDED: a tabular document's content is its tables, rendered as schema + samples, and it must
+    # contribute to the answer exactly as a text document's prose does — the same content the batch already counted
     if not ranges:
         return []
     clauses = [
@@ -362,11 +364,7 @@ async def scope_block_ids(ranges: list[tuple[int, int, int]]) -> list[int]:
         for doc_id, start, end in ranges
     ]
     async with get_sessionmaker()() as session:
-        return list(
-            await session.scalars(
-                select(ContentNode.id).where(ContentNode.type != "table", or_(*clauses)).order_by(ContentNode.id)
-            )
-        )
+        return list(await session.scalars(select(ContentNode.id).where(or_(*clauses)).order_by(ContentNode.id)))
 
 
 @dataclass
@@ -381,26 +379,25 @@ async def load_block_texts(content_ids: list[int]) -> dict[int, BlockText]:
     if not content_ids:
         return {}
     async with get_sessionmaker()() as session:
-        rows = list(
+        nodes = list(
             await session.execute(
-                select(
-                    ContentNode.id,
-                    ContentNode.document_id,
-                    ContentNode.block_ordinal,
-                    ContentNode.page_no,
-                    ContentNode.raw,
-                    Document.filename,
-                )
+                select(ContentNode, Document.filename)
                 .join(Document, ContentNode.document_id == Document.id)
                 .where(ContentNode.id.in_(content_ids))
             )
         )
+        table_ids = [node.id for node, _ in nodes if node.type == "table"]
+        tables = (
+            {t.content_id: t for t in await session.scalars(select(Table).where(Table.content_id.in_(table_ids)))}
+            if table_ids
+            else {}
+        )
     out: dict[int, BlockText] = {}
-    for cid, doc_id, ordinal, page_no, raw, filename in rows:
-        body = render_raw(raw)
+    for node, filename in nodes:
+        body = render_block(node, tables.get(node.id))  # prose renders its raw; a table renders schema + samples
         if body.strip():
-            page = f" p{page_no}" if page_no else ""
-            out[cid] = BlockText(cid, doc_id, ordinal or 0, f"[{filename}{page}] {body}")
+            page = f" p{node.page_no}" if node.page_no else ""
+            out[node.id] = BlockText(node.id, node.document_id, node.block_ordinal or 0, f"[{filename}{page}] {body}")
     return out
 
 
