@@ -349,14 +349,28 @@ async def run_tables(question: str, library_id: int) -> list[SqlResult]:
     return await _aggregate(question, await load_all_tables(library_id))
 
 
+def _batch_cite(batch: BatchRef) -> str:
+    # a summary covers a page range, so it cites like a passage does — a page span, never any internal unit name. a
+    # tabular batch has no page (its content is sheets), so it cites by filename alone
+    if batch.start_page_no is None:
+        return batch.filename
+    if batch.end_page_no and batch.end_page_no != batch.start_page_no:
+        return f"{batch.filename} p{batch.start_page_no}-p{batch.end_page_no}"
+    return f"{batch.filename} p{batch.start_page_no}"
+
+
+def _summary_text(batch: BatchRef) -> str:
+    return f"[{_batch_cite(batch)}] {batch.summary}"
+
+
 def _summary_evidence(batch: BatchRef, rank: int, total: int, tokens: int) -> _Evidence:
-    return _Evidence(f"[{batch.filename}] {batch.summary}", [batch.id], tokens, total - rank, None, batch.document_id)
+    return _Evidence(_summary_text(batch), [batch.id], tokens, total - rank, None, batch.document_id)
 
 
 async def _reduce_summaries(question: str, batches: list[BatchRef], budget: int) -> list[str]:
     # summaries are already a reduction, so this only fires when even the SELECTED summaries overflow the budget — the
     # large-corpus / very-broad case. it reduces the least-relevant summaries first (emission order is relevance)
-    texts = [f"[{batch.filename}] {batch.summary}" for batch in batches]
+    texts = [_summary_text(batch) for batch in batches]
     counts = await asyncio.to_thread(count_tokens_batch, texts)
     if sum(counts) <= budget:
         return texts
@@ -372,12 +386,17 @@ async def render_text(question: str, batches: list[BatchRef], budget: int) -> li
     # compressed form of exactly that content
     if not batches or budget <= 0:
         return []
-    if sum(batch.content_tokens for batch in batches) > budget:
+    if sum(batch.content_tokens for batch in batches) > budget:  # fast reject before loading anything
         return await _reduce_summaries(question, batches, budget)
     ranges = [(batch.document_id, batch.start_block_ordinal, batch.end_block_ordinal) for batch in batches]
     texts = await load_block_texts(await scope_block_ids(ranges))
     blocks = sorted(texts.values(), key=lambda block: (block.document_id, block.block_ordinal))
-    return [block.text for block in blocks]
+    rendered = [block.text for block in blocks]
+    # content_tokens counts the block bodies; the rendered passages add a "[filename pN]" prefix each, so the real total
+    # runs larger. verify against the ACTUAL size and fall back to summaries if the prefixes tip it past the budget
+    if sum(await asyncio.to_thread(count_tokens_batch, rendered)) <= budget:
+        return rendered
+    return await _reduce_summaries(question, batches, budget)
 
 
 async def answer(question: str, library_id: int) -> AsyncIterator[str]:
