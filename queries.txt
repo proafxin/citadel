@@ -67,3 +67,12 @@ Cross-file (what a per-file script structurally cannot do)
 Query	Expected
 Which of these spreadsheets contain sales data, and which contain country-level indicators?	sales file vs FSI + World Bank
 Compare the number of countries in the Fragile States Index with the number of country rows in the World Bank data	179 vs 3,020 — needs two files in one answer
+
+On cross-file queries: yes, I gave two, but they were thin. Here's a proper set, with answers I've verified from the files:
+
+Query	Expected	Why it's architecturally hard
+Which of these spreadsheets has the most data rows, and how many?	World Bank main table, 3,020 (vs FSI 179, sales 822/834, Cola ~105)	Requires parsing four workbooks and comparing
+Compare the number of countries in the Fragile States Index with the number of indicators in the World Bank file	179 vs 1,510	Two files, two different tables, one answer
+What time period does each dataset cover?	FSI 2023; World Bank 1960–2025; Cola FY'09–FY'18; sales order dates in 2013–2014	Four files, and the period lives in a different place in each (a column, a header row, a date field)
+Which files contain financial figures, and in what units?	Cola — "in million USD" (a header-row annotation, not a column)	The unit is metadata buried in the sheet, not data
+Which of these files is about shipping and sales, and which about country risk?	sales workbook vs FSI	Requires knowing what each file is
