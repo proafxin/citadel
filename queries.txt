@@ -24,3 +24,46 @@ Breadth + multilingual
 Query	Expected	Why it's hard
 What are these documents about?	Overview covering all 35 (transcript, Kazakhstan permit decree, affidavit, calendar, sales data, math journal, …)	Broad → summaries; must cover all, including the tabular-only sales file
 What categories of people can obtain a residence permit under the Kazakhstan rules?	family reunification, employment, education, medical treatment, business immigration, trafficking victims, …	Cross-lingual (Russian source), retrieval over a 58-page doc
+
+FSI-2023-DOWNLOAD.xlsx — clean relational, 179 rows × 16 cols
+Baseline: if these fail, nothing else matters.
+
+Query	Expected
+How many countries are in the Fragile States Index?	179
+Which country has the highest total score, and what is it?	Somalia, 111.9 (rank 1st)
+Which country is the least fragile?	Norway, 14.5 (rank 179th)
+How many countries score above 100?	12
+What is the average total score?	65.83
+Cola.xlsx — the hardest real file: preamble + 3 stacked statements + banner rows
+Traps: header is at row 3 (a naive read_excel takes "Data provided by SimFin" as the header); three tables in one sheet; Assets/Liabilities/Something special are banner rows that are neither header nor data; NET OPERATING REVENUES is a top line that looks like a header.
+
+Query	Expected
+What were Coca-Cola's net operating revenues in FY'09?	30,990 million USD
+What was consolidated net income in FY'09?	6,906 million
+What were total assets in FY'10?	72,921 million
+What was cash and cash equivalents in FY'09?	7,021 million
+What financial statements does this file contain?	P&L, Balance Sheet, Cash Flow (3 separate tables)
+What was gross profit in FY'10?	22,426 million
+API_Download_DS2_en_excel_v2_22416.xls — World Bank, wide + preamble
+Traps: a Data Source | World Development Indicators preamble above the real header; 70 year-columns; multiple regions per sheet.
+
+Query	Expected
+How many indicators are listed with their source notes?	1,510 rows
+How many country-indicator rows does the main data table have?	3,020
+What year range does the data cover?	1960–2025
+What columns identify each row before the year columns?	Country Name, Country Code, Indicator Name, Indicator Code
+4.-Badly-Structured-Sales-Data-4.xlsx — the cross-tab
+Query	Expected
+How many standard-class consumer orders are there?	253 (clean sheet) / 254 (unpivoted dirty)
+How many orders are there per shipping mode?	4 groups, counts per mode
+What is total sales for Home Office orders shipped Second Class?	computable; must filter two value columns
+benjamin_rogers_000_1_1.pst.71.xls
+From logs: side-by-side tables — Inputs | Value and Call Parameters | Call Value | Put Parameters | Put Value.
+
+Query	Expected
+What are the call and put values in this option pricing sheet?	both, from the side-by-side table
+What inputs does the option model take?	the 5 Inputs rows
+Cross-file (what a per-file script structurally cannot do)
+Query	Expected
+Which of these spreadsheets contain sales data, and which contain country-level indicators?	sales file vs FSI + World Bank
+Compare the number of countries in the Fragile States Index with the number of country rows in the World Bank data	179 vs 3,020 — needs two files in one answer
