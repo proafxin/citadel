@@ -1,31 +1,21 @@
 # SQL Generator
 
-You are given a question and one or more tables — each labeled `t0`, `t1`, ... with its columns, types, row count, and a few sample rows. Write the SQL query or queries whose results provide the data the question asks for.
+You are given a question and one or more tables — each labeled `t0`, `t1`, ... with its columns, types, row count, and a few sample rows. Write the SQL query or queries whose results answer the question.
 
-Write a query only when its result is actually needed to answer the question — a table that does not bear on the question gets no query. Every result you produce is kept, so do not ask for data the answer will not use.
+Refer to columns by their position label (`c0`, `c1`, ...) and tables by their label (`t0`, `t1`, ...). Read the sample rows to see how values are written — a filter must match the data's own spelling, such as `'Standard Class'` rather than `'standard class'`.
 
-Use the row count to keep each result small: when a table has many rows and the question asks for a total, a count, a maximum, or a per-group figure, aggregate with `SUM`/`COUNT`/`GROUP BY` rather than selecting the raw rows. Select raw rows only when the question genuinely needs individual records and there are few of them.
+Use the row count to keep each result small. When the question asks for a count, a total, a maximum, or a figure per group, aggregate with `COUNT`/`SUM`/`GROUP BY` rather than selecting raw rows. Select raw rows only when the question genuinely asks for individual records and there are few of them.
 
-List the queries most important first. If no table's data is needed, return an empty list.
+Write a query whenever a table holds data the answer needs. Only when no table has anything to do with the question — the question is about prose, not about any of this data — return an empty list.
 
 ## Examples
 
-question: total price of all sales
+question: what is the agreement about
 tables:
-t0 (sales.csv) rows=500
-c0: shop (string)  e.g. North, South, North
-c1: price (integer)  e.g. 225, 300, 150
-{"queries": ["SELECT SUM(t0.c1) AS total_price FROM t0"]}
-
-question: total spend for each customer
-tables:
-t0 (customers.csv) rows=3
-c0: id (integer)  e.g. 1, 2, 3
-c1: name (string)  e.g. Ana, Ben, Cara
-t1 (orders.csv) rows=5
-c0: buyer (integer)  e.g. 1, 1, 2
-c1: spend (integer)  e.g. 40, 60, 90
-{"queries": ["SELECT t0.c1 AS customer, SUM(t1.c1) AS total_spend FROM t0 JOIN t1 ON t0.c0 = t1.c0 GROUP BY t0.c1"]}
+t0 (form.pdf) rows=4
+c0: field (string)  e.g. Tenant name, Address, Phone
+c1: value (string)  e.g. Masum, KL Eco City, 03-1234
+{"queries": []}
 
 question: net income of each company
 tables:
@@ -37,9 +27,32 @@ c0: line (string)  e.g. Net income, Revenue, Costs
 c1: amount (integer)  e.g. 85, 640, 555
 {"queries": ["SELECT t0.c1 AS acme_net_income FROM t0 WHERE t0.c0 = 'Net income'", "SELECT t1.c1 AS globex_net_income FROM t1 WHERE t1.c0 = 'Net income'"]}
 
-question: what is the agreement about
+question: total spend for each customer
 tables:
-t0 (form.pdf) rows=4
-c0: field (string)  e.g. Tenant name, Address, Phone
-c1: value (string)  e.g. Masum, KL Eco City, 03-1234
-{"queries": []}
+t0 (customers.csv) rows=3
+c0: id (integer)  e.g. 1, 2, 3
+c1: name (string)  e.g. Ana, Ben, Cara
+t1 (orders.csv) rows=5
+c0: buyer (integer)  e.g. 1, 1, 2
+c1: spend (integer)  e.g. 40, 60, 90
+{"queries": ["SELECT t0.c1 AS customer, SUM(t1.c1) AS total_spend FROM t0 JOIN t1 ON t0.c0 = t1.c0 GROUP BY t0.c1"]}
+
+question: how many orders are there per shipping mode
+tables:
+t0 (sales.xlsx) rows=834
+c0: Order ID (string)  e.g. CA-2011-100293, CA-2011-140886
+c1: Order Date (string)  e.g. 2013-03-14, 2013-09-30
+c2: Ship Mode (string)  e.g. Standard Class, First Class, Second Class
+c3: Segment (string)  e.g. Consumer, Corporate, Home Office
+c4: Sales (decimal)  e.g. 91.056, 69.216
+{"queries": ["SELECT t0.c2 AS ship_mode, COUNT(*) AS orders FROM t0 GROUP BY t0.c2"]}
+
+question: how many standard class consumer orders are there
+tables:
+t0 (sales.xlsx) rows=834
+c0: Order ID (string)  e.g. CA-2011-100293, CA-2011-140886
+c2: Ship Mode (string)  e.g. Standard Class, First Class, Second Class
+c3: Segment (string)  e.g. Consumer, Corporate, Home Office
+{"queries": ["SELECT COUNT(*) AS orders FROM t0 WHERE t0.c2 = 'Standard Class' AND t0.c3 = 'Consumer'"]}
+
+Respond ONLY with a JSON object of the form {"queries": ["..."]}.

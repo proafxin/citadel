@@ -253,6 +253,8 @@ async def write_queries(query: str, tables: list[str]) -> list[str]:
     logger.info("write_queries tables=%d prompt_tokens=%d queries=%d", len(tables), count_tokens(prompt), len(queries))
     for query in queries:
         logger.info("  sql: %s", query)
+    if not queries:  # zero SQL on a tabular question is a failure worth seeing the raw answer for
+        logger.warning("write_queries returned nothing raw=%s", data)
     return queries
 
 
