@@ -1,11 +1,8 @@
-import logging
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 
 from citadel.schemas.table import CellValue, Column, ColumnDType, Crosstab, TableStructure
-
-logger = logging.getLogger(__name__)
 
 SAMPLE_TABLE_ROWS = 10
 
@@ -144,13 +141,6 @@ def _materialize_crosstab(
     dtypes = [dtype_of([row[index] for row in out_rows]) for index in range(width)]
     columns = [Column(header=names[index], dtype=dtypes[index]) for index in range(width)]
     data_rows = [[cast_cell(row[index]) for index in range(width)] for row in out_rows]
-    logger.info(
-        "materialize crosstab unpivot value_cols=%d rows_in=%d rows_out=%d columns=%s",
-        end - start + 1,
-        structure.data_end - structure.data_start + 1,
-        len(data_rows),
-        [(column.header, column.dtype.value) for column in columns],
-    )
     return MaterializedTable(
         sheet_no=sheet_no,
         columns=columns,
@@ -209,12 +199,6 @@ def materialize(
     ]
     data_rows = [[cast_cell(raw[index]) for index in range(count)] for raw in collected]
     header_indices = list(range(len(header_cells)))
-    logger.info(
-        "materialize relational rows=%d columns=%s source=%s",
-        len(data_rows),
-        [(column.header, column.dtype.value) for column in columns],
-        "slm" if structure.columns else "stacked",
-    )
     return MaterializedTable(
         sheet_no=sheet_no,
         columns=columns,

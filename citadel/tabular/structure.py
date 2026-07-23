@@ -118,11 +118,13 @@ async def structure_grid(grid: list[list[str]]) -> list[TableStructure]:
     hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))
     tables = await structure_sheet(_payload_text(grid, indices, width), hint, height, width)
     structures = _derive(tables, grid, height, width)  # the model's answer, whatever it is — nothing is invented here
+    # the crosstab RECIPE is applied then discarded — it is not stored anywhere, unlike the materialized columns/rows
+    # which land in `tables`. so log only the recipe; the result is queryable from the db
     for structure in structures:
         if structure.crosstab is not None:
             crosstab = structure.crosstab
             logger.info(
-                "structure layout=crosstab rows=%d-%d keys=%s dims=%s value=%r valcols=%d-%d",
+                "crosstab data_rows=%d-%d keys=%s dims=%s value=%r valcols=%d-%d",
                 structure.data_start,
                 structure.data_end,
                 [(key.name, key.col) for key in crosstab.key_columns],
@@ -130,15 +132,5 @@ async def structure_grid(grid: list[list[str]]) -> list[TableStructure]:
                 crosstab.value_name,
                 crosstab.value_col_start,
                 crosstab.value_col_end,
-            )
-        else:
-            logger.info(
-                "structure layout=relational cols=%d-%d rows=%d-%d header_rows=%s columns=%s",
-                structure.col_start,
-                structure.col_end,
-                structure.data_start,
-                structure.data_end,
-                structure.header_rows,
-                structure.columns,
             )
     return structures
