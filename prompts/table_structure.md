@@ -24,7 +24,7 @@ A matrix: one measure spread across many columns labelled by one or more header 
   - **key_columns** — the columns that identify each row and are NOT part of the matrix (e.g. the order id and date columns), each as `{"name": ..., "col": ...}`.
   - **dimensions** — the header rows that label the matrix columns, each as `{"name": ..., "header_row": ...}`. A dimension value that visually spans several columns but sits only in the first still applies to all of them.
   - **value_name** — what a single matrix cell holds (e.g. "Sales").
-  - **value_col_start**, **value_col_end** — first and last column of the matrix.
+  - **value_col_start**, **value_col_end** — the FULL span of the matrix: the first and last column that the dimension header rows label. This is every column that is not a key column, from the first labelled one through the last — not only the columns where you happen to see values in the sample. The matrix is sparse: most cells in any one row are blank, because each row carries its value in just one of them. Judge the span from the header rows, which label all of it, never from where values appear.
 
 ## Both
 
