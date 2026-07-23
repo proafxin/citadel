@@ -86,13 +86,40 @@ _STRUCTURE_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
+                    "layout": {"type": "string", "enum": ["relational", "crosstab"]},
                     "header_rows": {"type": "array", "items": {"type": "integer"}},
                     "col_start": {"type": "integer"},
                     "col_end": {"type": "integer"},
+                    "columns": {"type": "array", "items": {"type": "string"}},
+                    "crosstab": {
+                        "type": "object",
+                        "properties": {
+                            "key_columns": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {"name": {"type": "string"}, "col": {"type": "integer"}},
+                                    "required": ["name", "col"],
+                                },
+                            },
+                            "dimensions": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {"name": {"type": "string"}, "header_row": {"type": "integer"}},
+                                    "required": ["name", "header_row"],
+                                },
+                            },
+                            "value_name": {"type": "string"},
+                            "value_col_start": {"type": "integer"},
+                            "value_col_end": {"type": "integer"},
+                        },
+                        "required": ["key_columns", "dimensions", "value_name", "value_col_start", "value_col_end"],
+                    },
                     "title": {"type": "string"},
                     "notes": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["header_rows", "col_start", "col_end", "title", "notes"],
+                "required": ["layout", "header_rows", "col_start", "col_end", "columns", "title", "notes"],
             },
         }
     },

@@ -297,8 +297,8 @@ def _table_cand(table: Table, filename: str) -> TableCand:
 
 
 async def load_all_tables(library_id: int) -> list[TableCand]:
-    # the table channel sees every table in the library — schema + samples + row count — and writes the queries. no
-    # retrieval prefilter: relevance is decided constructively by which tables the queries reference
+    # the table channel sees every table in the library — schema + samples + row count — and writes the queries.
+    # relevance is decided constructively by which tables the queries reference
     async with get_sessionmaker()() as session:
         rows = list(
             await session.execute(

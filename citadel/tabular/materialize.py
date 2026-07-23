@@ -1,8 +1,11 @@
+import logging
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
+from citadel.schemas.table import CellValue, Column, ColumnDType, Crosstab, TableStructure
+
+logger = logging.getLogger(__name__)
 
 SAMPLE_TABLE_ROWS = 10
 
@@ -99,6 +102,70 @@ def _sample(rows: list[list[CellValue]]) -> list[list[CellValue]]:
     return [rows[int(index * step)] for index in range(SAMPLE_TABLE_ROWS)]
 
 
+def _dimension_values(grid: list[list[str]], header_row: int, start: int, end: int) -> list[str]:
+    # a crosstab dimension value spans rightward across its columns even when the cells are blank — the source implied
+    # the span by layout. the SLM CONFIRMED the crosstab, so carrying the last value forward is the declared meaning,
+    # not a guess. returns the dimension value per value column, indexed from `start`
+    out: list[str] = []
+    last = ""
+    for col in range(start, end + 1):
+        cell = _grid_cell(grid, header_row, col).strip()
+        if cell:
+            last = cell
+        out.append(last)
+    return out
+
+
+def _materialize_crosstab(
+    grid: list[list[str]],
+    structure: TableStructure,
+    crosstab: Crosstab,
+    sheet_no: int,
+    formulas: list[str] | None,
+    extra_notes: list[str] | None,
+    anchors: dict | None,
+) -> "MaterializedTable":
+    # unpivot: one output row per NON-EMPTY value cell = the row's keys + that column's dimension values + the cell.
+    # every emitted cell is copied from the grid; nothing is generated. empty cells carry no data, so dropping them is
+    # lossless — the messy matrix becomes the same normalized relation a clean sheet would have produced
+    start, end = crosstab.value_col_start, crosstab.value_col_end
+    dim_values = [_dimension_values(grid, dim.header_row, start, end) for dim in crosstab.dimensions]
+    out_rows: list[list[str]] = []
+    for row in range(structure.data_start, structure.data_end + 1):
+        keys = [_grid_cell(grid, row, key.col) for key in crosstab.key_columns]
+        for col in range(start, end + 1):
+            cell = _grid_cell(grid, row, col)
+            if not cell.strip():
+                continue
+            dims = [dim_values[index][col - start] for index in range(len(crosstab.dimensions))]
+            out_rows.append([*keys, *dims, cell])
+    names = [key.name for key in crosstab.key_columns] + [dim.name for dim in crosstab.dimensions] + [crosstab.value_name]
+    width = len(names)
+    dtypes = [dtype_of([row[index] for row in out_rows]) for index in range(width)]
+    columns = [Column(header=names[index], dtype=dtypes[index]) for index in range(width)]
+    data_rows = [[cast_cell(row[index]) for index in range(width)] for row in out_rows]
+    logger.info(
+        "materialize crosstab unpivot value_cols=%d rows_in=%d rows_out=%d columns=%s",
+        end - start + 1,
+        structure.data_end - structure.data_start + 1,
+        len(data_rows),
+        [(column.header, column.dtype.value) for column in columns],
+    )
+    return MaterializedTable(
+        sheet_no=sheet_no,
+        columns=columns,
+        rows=data_rows,  # no header rows: the header carried dimensions, which are now real columns on every row
+        sample_rows=_sample(data_rows),
+        n_rows=len(data_rows),
+        title=structure.title,
+        caption=structure.caption,
+        notes=[*(structure.notes or []), *(extra_notes or [])],
+        anchors={**(anchors or {}), "header_rows": []},
+        formulas=formulas,
+        header_rows=[],
+    )
+
+
 def materialize(
     grid: list[list[str]],
     structure: TableStructure,
@@ -112,6 +179,8 @@ def materialize(
     # as a grid plus the structure the model returned, and leaves as a MaterializedTable. one implementation, so a
     # table's shape never depends on which file it came out of. source-specific extras (a sheet's formulas, cell
     # comments, its address range) ride in as metadata rather than forking the logic
+    if structure.layout == "crosstab" and structure.crosstab is not None:
+        return _materialize_crosstab(grid, structure, structure.crosstab, sheet_no, formulas, extra_notes, anchors)
     count = structure.col_end - structure.col_start + 1
     header_rows = _plausible_header_rows(grid, structure.header_rows or [])
     # a rejected header row is data the model ate — pull data_start back so those rows are kept as rows, not lost
@@ -124,7 +193,13 @@ def materialize(
             continue
         collected.append(raw)
     dtypes = [dtype_of([raw[index] for raw in collected]) for index in range(count)]
-    headers = [_grid_header(grid, header_rows, structure.col_start + index) for index in range(count)]
+    # SLM-resolved names win when present (it handles implied/merged/multi-row headers); else stack the header rows
+    if structure.columns:
+        headers: list[str | None] = [
+            structure.columns[index] if index < len(structure.columns) else None for index in range(count)
+        ]
+    else:
+        headers = [_grid_header(grid, header_rows, structure.col_start + index) for index in range(count)]
     columns = [Column(header=headers[index] or f"col{index}", dtype=dtypes[index]) for index in range(count)]
     # the header rows are kept as the first rows of the stored grid — verbatim, never dropped. a row the detector
     # wrongly promoted to header survives as a queryable row; header_rows records what is header, deletion never does
@@ -134,6 +209,12 @@ def materialize(
     ]
     data_rows = [[cast_cell(raw[index]) for index in range(count)] for raw in collected]
     header_indices = list(range(len(header_cells)))
+    logger.info(
+        "materialize relational rows=%d columns=%s source=%s",
+        len(data_rows),
+        [(column.header, column.dtype.value) for column in columns],
+        "slm" if structure.columns else "stacked",
+    )
     return MaterializedTable(
         sheet_no=sheet_no,
         columns=columns,
