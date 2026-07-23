@@ -418,16 +418,16 @@ miscount what fits.
 
 ```bash
 question ─┬─ text channel ───→ relevant batches ──→ fit into remaining budget ─┐
-          │   (model over batch summaries)          (summaries, or blocks)     ├─→ synthesize → answer
-          └─ table channel ──→ SQL queries ──→ execute ──→ fit tables FIRST ───┘        (model)
-              (model over schema + samples + row counts)   (all kept, rows reduced)
+          │   (model over batch summaries)          (all blocks, or summaries)  ├─→ synthesize → answer
+          └─ table channel ──→ marked tables + SQL ──→ execute ──→ fit FIRST ───┘        (model)
+              (model over schema + samples + row counts)   (descriptions + results)
 ```
 
 | Stage | Work |
 |---|---|
 | text channel | over every batch summary in the library, the model names the batches **mandatory** to answer, in relevance order |
-| table channel | over every table's schema, samples, and **row count**, the model writes the **mandatory** SQL; the database runs it |
-| fit | tables first (exact, minimal), then text into what remains |
+| table channel | over every table's schema, samples, and **row count**, the model **marks** the tables the answer depends on and writes the **mandatory** SQL; the database runs it |
+| fit | tables first — each relevant table's description, then its exact results — then text into what remains |
 | synthesize | one cited answer from the text evidence and the computed results |
 
 Both channels read the whole corpus, in a compressed representation — summaries for text, schema+samples for
@@ -471,15 +471,27 @@ mandatory to answer, in relevance order. Emission order *is* the ranking — no 
 summaries overflow one call, they split across parallel calls and the results union; the per-batch judgment
 is absolute, not comparative, so splitting is sound.
 
-**Tables.** Each table's schema, sample rows, and **row count** go to the model, which returns the SQL
-queries. The sample rows show how values are *encoded* — `2022-Q2` versus `Q2 2022`, `"007"` as a string —
-and a predicate written against a schema alone silently matches nothing. The row count is what lets the
-model aggregate a large table in SQL rather than asking for raw rows, so the result stays minimal.
+**Tables.** Each table's schema, sample rows, and **row count** go to the model, which returns two things:
+the SQL queries, and the labels of the tables the answer **depends on**. The sample rows show how values are
+*encoded* — `2022-Q2` versus `Q2 2022`, `"007"` as a string — and a predicate written against a schema alone
+silently matches nothing. The row count is what lets the model aggregate a large table in SQL rather than
+asking for raw rows, so the result stays minimal.
 
-Relevance here is **constructive**, which is why nothing needs ranking. A query names its own rows through
-its `WHERE`/`JOIN`/`GROUP BY`. A table is relevant precisely when some query references it, so an empty
-query list *is* the verdict that no table bears on the question — there is no separate table filter that a
-second stage could silently overrule.
+Relevance here is **constructive**, which is why nothing needs ranking: a query names its own rows through
+its `WHERE`/`JOIN`/`GROUP BY`, so a table matters exactly when it is queried. But a query is not the only way
+a table can matter. A question can be *about* a table without reading its rows — which file something lives
+in, how many rows it has, which of many is largest — and those are answered from metadata we already hold,
+not from a query. So the model marks a table relevant whenever the answer draws on it, with or without a
+query, and the union of the marked tables and the queried tables decides which tables the answer sees. A
+marked table contributes its **description** — file, sheet, row count — to synthesis; a queried table also
+contributes its **result**, under the same label, so the two read as one source. There is still no separate
+table filter a second stage could overrule; there is only what the writer names, by query or by mark.
+
+A relation `catalog(file, sheet, row_count)` — one row per table, built from metadata we hold, never model
+input — sits alongside the per-table views so a question *about* the tables is a real `SELECT` (`ORDER BY
+row_count`, `COUNT(*)`) rather than the model eyeballing a list of row counts. Its results are attributed to
+the files they name; an aggregate that names none is attributed to every file the catalog spans, so a
+computed figure is never origin-less.
 
 ### Why the wide net was removed
 
@@ -488,9 +500,11 @@ these documents" matches everything, so a corpus-wide net sweeps every passage i
 Under batch selection the same question selects every batch and stays at summary depth — the widest question
 becomes the *cheapest* path, not the most expensive.
 
-Similarity is not gone; it is demoted. Inside the *already-selected* batches, ranking the blocks against the
-question is how a section is deepened when there is budget to do so. Structure decides membership and
-coverage; similarity only proposes what to show within something already known to be relevant.
+Similarity is gone from the query path entirely. A selected batch is shown in full — every one of its blocks
+— or as its summary; there is no block-level ranking or filtering *within* a batch to deepen it selectively.
+Structure alone decides membership and coverage. (Within-batch similarity retrieval is parked, not
+load-bearing: it would recover page-level precision inside a batch shown at block depth, and can return
+without changing the fitting rule below.)
 
 ### Fitting — tables first, then text, membership never cut
 
@@ -507,24 +521,18 @@ answer. The genuine prevention is upstream — the model sees each row count and
 `SELECT *` would be huge, which is *why* results arrive minimal. This also handles "tables don't matter"
 symmetrically: no queries → zero table tokens → text gets the whole window.
 
-**Text into the remainder**, gated by headroom = `text_budget − Σ(selected summaries)`:
+**Text into the remainder**, decided by **affordability** — the one question of whether the selected blocks
+fit, measured directly rather than through a proxy. Sum the content tokens of the selected batches; if their
+full blocks fit the remaining budget, show them **all**, in document order — no subset to pick, so no ranking
+and nothing that can overflow. If they do not fit — a broad question that selected many or large batches —
+fall back to those batches' **summaries**, the compressed form of exactly that content; if even the summaries
+overflow, map-reduce them down (the only query-time text reduction, reached at large corpus scale).
 
-- **headroom ≤ 0** — the query selected many batches (it is broad), so their summaries fill the budget.
-  Show the summaries; if even they overflow, map-reduce the summaries down (the only query-time text
-  reduction, hit at large corpus scale). No ranking runs. This is the correct answer to "what are these
-  documents", and it is the cheap path.
-- **headroom > 0** — the query selected few batches (it is narrow), so there is room to deepen. Pool every
-  block of the selected batches into one net (dense + sparse, fused by RRF), then an SLM filter walks that
-  ranking best-first and stops after a few empty batches — recall from the net, precision from the filter,
-  neither trusted alone, no score threshold and no fixed cap. Each batch then expands only if its filtered
-  blocks fit: `cost = Σ(its blocks) − its summary`; if `cost ≤ headroom`, swap the summary for the blocks
-  and spend the cost, else keep the summary. Cheap, focused sections expand; a section whose relevant
-  content is nearly the whole thing keeps its summary.
-
-So breadth is **measured, never classified** — the count of batches the selection returned, converted to a
-number by headroom, decides summary-vs-block. The RRF score distribution is deliberately *not* used as that
-signal: ranking is recall-only and pollutable (a block can score high off a repeated minor signal), so it
-proposes candidates for the filter and never decides membership.
+So depth is **measured, never classified**: the real size of the selected blocks against the budget decides
+summary-vs-block, not a count or a score. Membership is never cut — a batch that cannot be shown in full is
+shown as its summary, never dropped — and because a summary still cites at block and page level, coverage is
+honest at either depth. "What are these documents" selects every batch, cannot afford their blocks, and
+answers from summaries: the widest question stays the cheapest path.
 
 ### Arithmetic stays in the database
 
@@ -533,6 +541,14 @@ reduced by re-aggregation. A join's cardinality is not predictable from its inpu
 blowup is discoverable only after execution and is usually a wrong key — worth logging as a correctness
 signal, not just a budget event. Whenever rows are dropped to fit, it is marked, so the answer says "the top
 50 of 500" rather than presenting a partial as a total.
+
+A single computed value carries no evidence of its own scope: `17582.254` under a model-chosen name reads the
+same whether it is a grand total or filtered to one segment and ship mode, and synthesis, seeing only the
+number, will disclaim or misattribute it. So each result is rendered with the **operation that produced it** —
+the executed query with its column references rewritten to header names, no internal position ids. This is
+provenance for synthesis to read, not for the reader to see: it states what a figure means so a filtered
+figure is never mistaken for the whole, and synthesis is told to state the figure plainly and never surface
+the operation.
 
 ### Citation is structural and free
 
@@ -569,9 +585,9 @@ evidence essential or supporting, and fit deterministically. Its properties were
 score threshold, no reranker, no arbitrary read cap — but it rested on similarity deciding *membership*,
 which is the assumption that fails on broad questions. Its table filter and SQL stage could also disagree:
 the filter could keep a table the SQL stage then silently declined to query, and the table would vanish with
-nothing detecting it. The current pipeline keeps that pipeline's good machinery — the RRF net and the
-early-stopping SLM filter — but scopes them to the batches selection already found, and lets constructive SQL
-replace the table filter entirely.
+nothing detecting it. The current pipeline replaces the wide net with batch selection and the table filter
+with the writer's own marks and queries; the old RRF net and early-stopping SLM filter are retired from the
+query path, kept only as the parked within-batch retrieval that could later deepen a block-depth batch.
 
 ## Models
 
