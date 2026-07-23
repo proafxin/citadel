@@ -235,6 +235,6 @@ async def summarize_batch(fields: dict[str, str]) -> None:
         await session.execute(
             insert_stmt.on_conflict_do_update(
                 index_elements=["document_id", "batch_no"],
-                set_={key: insert_stmt.excluded[key] for key in row if key not in ("document_id", "batch_no")},
+                set_={key: insert_stmt.excluded[key] for key in row if key not in {"document_id", "batch_no"}},
             )
         )

@@ -1,5 +1,6 @@
 import functools
 import json
+import logging
 from collections.abc import AsyncIterator
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -7,6 +8,8 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from citadel.prompts import load_prompt
 from citadel.services.slm import collect, collect_reply, emit, submit
 from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL
+
+logger = logging.getLogger(__name__)
 
 STRUCT_MAX_TOKENS = 4096  # structured calls emit short JSON (indices, a concise merge summary, SQL)
 SYNTH_MAX_TOKENS = 8192  # the streamed answer; the evidence budget reserves this much of the context window for it
@@ -217,10 +220,13 @@ async def write_queries(query: str, tables: list[str]) -> list[str]:
     if not tables:
         return []
     listing = "\n\n".join(tables)
-    data = await call_slm(
-        f"{load_prompt('text_to_sql')}\nquestion: {query}\ntables:\n{listing}", _QUERIES_SCHEMA, interactive=True
-    )
-    return [str(sql) for sql in data.get("queries", []) if str(sql).strip()]
+    prompt = f"{load_prompt('text_to_sql')}\nquestion: {query}\ntables:\n{listing}"
+    data = await call_slm(prompt, _QUERIES_SCHEMA, interactive=True)
+    queries = [str(sql) for sql in data.get("queries", []) if str(sql).strip()]
+    logger.info("write_queries tables=%d prompt_tokens=%d queries=%d", len(tables), count_tokens(prompt), len(queries))
+    for query in queries:
+        logger.info("  sql: %s", query)
+    return queries
 
 
 async def synthesize(query: str, passages: list[str], results: list[str]) -> AsyncIterator[str]:

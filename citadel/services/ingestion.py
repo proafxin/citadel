@@ -30,10 +30,10 @@ from sqlalchemy import select
 from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
 from citadel.models.document import Document
-from citadel.services.batching import emit_document_batches
 from citadel.models.status import DocumentStatus
 from citadel.schemas.content import Block
 from citadel.schemas.document import DocProgress, DocumentRead, IngestResponse
+from citadel.services.batching import emit_document_batches
 from citadel.services.detect import DetBlock, detect_layout
 from citadel.services.document import (
     begin_library_ingest,

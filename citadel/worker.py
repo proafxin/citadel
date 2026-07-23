@@ -9,6 +9,7 @@ from typing import Any, cast
 
 from citadel.bus import get_redis
 from citadel.db import get_engine
+from citadel.services.batching import STREAM_BATCH, summarize_batch
 from citadel.services.ingestion import (
     CROP_BOUND,
     DECODE_CONCURRENCY,
@@ -47,7 +48,6 @@ from citadel.services.ingestion import (
     sample_timeline,
     shutdown,
 )
-from citadel.services.batching import STREAM_BATCH, summarize_batch
 from citadel.services.paddle import log_crop_sizes
 from citadel.services.slm import read_replies
 from config import CPU_EIGHTH, CPU_THIRD, configure_logging, get_settings

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import time
 import traceback
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -176,6 +177,7 @@ async def _run_sql(session: AsyncSession, tables: list[TableCand], sql: str) -> 
 async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
     sql = sql.strip().rstrip(";").strip()
     if not _safe_sql(sql) or not _references_only_views(sql, len(tables)):
+        logger.warning("sql rejected (not a safe view-only SELECT) sql=%s", sql)
         return None
     try:
         async with get_sessionmaker()() as session, session.begin():
@@ -335,11 +337,18 @@ async def select_batches(question: str, library_id: int) -> list[BatchRef]:
     packs = _pack(counts, SELECT_BUDGET)
     jobs = [(pack, await emit_select(question, [items[i] for i in pack])) for pack in packs]
     selected: list[BatchRef] = []
-    for pack, job_id in jobs:
+    for index, (pack, job_id) in enumerate(jobs):
         chosen = await collect_select(job_id, len(pack))
-        logger.info("select pack=%d chose=%d/%d", len(selected) // max(len(pack), 1), len(chosen), len(pack))
+        logger.info("select pack=%d chose=%d/%d", index, len(chosen), len(pack))
         selected.extend(batches[pack[local]] for local in chosen)
-    logger.info("select library=%d batches=%d packs=%d selected=%d", library_id, len(batches), len(packs), len(selected))
+    logger.info(
+        "select library=%d batches=%d packs=%d selected=%d labels=%s",
+        library_id,
+        len(batches),
+        len(packs),
+        len(selected),
+        [_batch_cite(batch) for batch in selected],
+    )
     return selected
 
 
@@ -385,37 +394,122 @@ async def render_text(question: str, batches: list[BatchRef], budget: int) -> li
     # than the window holds (a broad question over a large corpus), so fall back to the summaries, which are the
     # compressed form of exactly that content
     if not batches or budget <= 0:
+        logger.info("text mode=empty batches=%d budget=%d", len(batches), budget)
         return []
-    if sum(batch.content_tokens for batch in batches) > budget:  # fast reject before loading anything
-        return await _reduce_summaries(question, batches, budget)
+    content = sum(batch.content_tokens for batch in batches)
+    if content > budget:  # fast reject before loading anything
+        summaries = await _reduce_summaries(question, batches, budget)
+        logger.info(
+            "text mode=summary reason=content batches=%d content=%d budget=%d out=%d",
+            len(batches),
+            content,
+            budget,
+            len(summaries),
+        )
+        return summaries
     ranges = [(batch.document_id, batch.start_block_ordinal, batch.end_block_ordinal) for batch in batches]
     texts = await load_block_texts(await scope_block_ids(ranges))
     blocks = sorted(texts.values(), key=lambda block: (block.document_id, block.block_ordinal))
     rendered = [block.text for block in blocks]
     # content_tokens counts the block bodies; the rendered passages add a "[filename pN]" prefix each, so the real total
     # runs larger. verify against the ACTUAL size and fall back to summaries if the prefixes tip it past the budget
-    if sum(await asyncio.to_thread(count_tokens_batch, rendered)) <= budget:
+    actual = sum(await asyncio.to_thread(count_tokens_batch, rendered))
+    if actual <= budget:
+        per_doc: dict[int, int] = {}
+        for block in blocks:
+            per_doc[block.document_id] = per_doc.get(block.document_id, 0) + 1
+        logger.info(
+            "text mode=blocks batches=%d blocks=%d content=%d actual=%d budget=%d per_doc=%s",
+            len(batches),
+            len(rendered),
+            content,
+            actual,
+            budget,
+            per_doc,
+        )
+        logger.debug("text blocks:\n%s", "\n".join(rendered))
         return rendered
-    return await _reduce_summaries(question, batches, budget)
+    summaries = await _reduce_summaries(question, batches, budget)
+    logger.info(
+        "text mode=summary reason=rendered batches=%d blocks=%d actual=%d budget=%d out=%d",
+        len(batches),
+        len(rendered),
+        actual,
+        budget,
+        len(summaries),
+    )
+    return summaries
+
+
+_CITE = re.compile(r"\[([^\]]+)\]")
+
+
+def _cite_file(label: str) -> str:
+    # strip the page span off a citation label so "sales.csv p3-p5" and "sales.csv" compare as the same source
+    return re.sub(r"\s+p\d.*$", "", label).strip()
+
+
+def _evidence_files(passages: list[str], results: list[str]) -> set[str]:
+    files: set[str] = set()
+    for text in passages:
+        match = _CITE.match(text)
+        if match:
+            files.add(_cite_file(match.group(1)))
+    for text in results:  # a result label is a comma-joined list of its source filenames
+        match = _CITE.match(text)
+        if match:
+            files.update(_cite_file(part) for part in match.group(1).split(", "))
+    return files
 
 
 async def answer(question: str, library_id: int) -> AsyncIterator[str]:
+    started = time.time()
+    logger.info("query start library=%d %r", library_id, question)
     async with asyncio.TaskGroup() as group:
         text_task = group.create_task(select_batches(question, library_id))
         table_task = group.create_task(run_tables(question, library_id))
     batches = text_task.result()
     results = table_task.result()
+    logger.info(
+        "channels text_batches=%d docs=%s | table_results=%d rows=%s",
+        len(batches),
+        sorted({batch.document_id for batch in batches}),
+        len(results),
+        [result.total for result in results],
+    )
     fitted_results = _fit_results(results, SYNTH_BUDGET)  # tables first: they are exact and minimal
     rendered = [_result_render(result) for result in fitted_results]
-    text_budget = max(SYNTH_BUDGET - sum(count_tokens(block) for block in rendered), 0)
+    table_tokens = sum(count_tokens(block) for block in rendered)
+    dropped_rows = sum(r.total for r in results) - sum(len(r.rows) for r in fitted_results)
+    text_budget = max(SYNTH_BUDGET - table_tokens, 0)
     passages = await render_text(question, batches, text_budget)
+    synth_tokens = table_tokens + sum(count_tokens(block) for block in passages)
+    evidence_files = _evidence_files(passages, rendered)
     logger.info(
-        "query %r batches=%d results=%d table_tokens=%d passages=%d",
+        "query done %r batches=%d results=%d/%d table_tokens=%d dropped_rows=%d passages=%d synth_tokens=%d/%d %.1fs",
         question[:80],
         len(batches),
         len(fitted_results),
-        sum(count_tokens(block) for block in rendered),
+        len(results),
+        table_tokens,
+        dropped_rows,
         len(passages),
+        synth_tokens,
+        SYNTH_BUDGET,
+        time.time() - started,
     )
+    logger.info("evidence files=%s", sorted(evidence_files))
+    logger.debug("synthesis input\npassages:\n%s\n\ntable results:\n%s", "\n".join(passages), "\n".join(rendered))
+    parts: list[str] = []
     async for token in synthesize(question, passages, rendered):
+        parts.append(token)
         yield token
+    # every citation in the answer must point at a document we actually gave the model. one that does not is a
+    # fabricated source — the clearest hallucination signal we can check automatically
+    response = "".join(parts)
+    cited = {_cite_file(label) for label in _CITE.findall(response)}
+    fabricated = sorted(cited - evidence_files)
+    if fabricated:
+        logger.error("HALLUCINATION cited sources not in evidence=%s | evidence=%s", fabricated, sorted(evidence_files))
+    logger.info("answer chars=%d cited_files=%d fabricated=%d", len(response), len(cited), len(fabricated))
+    logger.debug("answer:\n%s", response)

@@ -5,6 +5,7 @@ import operator
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import starmap
 
 import torch
 from sqlalchemy import case, or_, select, update
@@ -307,7 +308,7 @@ async def load_all_tables(library_id: int) -> list[TableCand]:
                 .order_by(Table.id)
             )
         )
-    return [_table_cand(table, filename) for table, filename in rows]
+    return list(starmap(_table_cand, rows))
 
 
 async def _scoped_dense(vector: list[float], content_ids: list[int]) -> list[int]:
@@ -358,9 +359,7 @@ async def scope_block_ids(ranges: list[tuple[int, int, int]]) -> list[int]:
     if not ranges:
         return []
     clauses = [
-        (ContentNode.document_id == doc_id)
-        & (ContentNode.block_ordinal >= start)
-        & (ContentNode.block_ordinal <= end)
+        (ContentNode.document_id == doc_id) & (ContentNode.block_ordinal >= start) & (ContentNode.block_ordinal <= end)
         for doc_id, start, end in ranges
     ]
     async with get_sessionmaker()() as session:

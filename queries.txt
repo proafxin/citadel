@@ -1,0 +1,26 @@
+Tabular precision (SQL correctness — the channel that's currently failing)
+
+Query	Expected	Why it's hard
+How many standard-class consumer orders are there?	253 (verified)	Predicate on two value columns (Ship Mode='Standard Class', Segment='Consumer') whose values aren't in the headers; must pick the clean table 2 over the pivot table 1
+What is the total sales for Home Office orders shipped Second Class?	computable, exact	Same two-column filter + SUM; a wrong header/value mapping gives a plausible-but-wrong number
+How many orders are there per shipping mode?	4 groups, exact counts	GROUP BY; must aggregate, not dump rows
+Absence / anti-hallucination (the most important — must say "not present," not invent)
+
+Query	Expected	Why it's hard
+What theorems did Gauss prove, according to these documents?	None — Gauss appears only via the "Gauss circle problem," no theorem authored by him	The corpus is full of theorems by others; the tempting failure is to attribute one to Gauss
+What is the revenue in the sales data?	Not present — the table has Sales per order, no "revenue" field	Near-synonym trap; must not fabricate a total labelled "revenue" or conflate it with Sales without saying so
+Targeted retrieval + exact citation (focused blocks, page-level grounding)
+
+Query	Expected	Why it's hard
+Who swore the affidavit of service, on what date, and to whom was the document delivered?	Masum Billal, 24 June 2026 (KL), emailed to Iconix Property Management on 30 Apr 2026	Single-block answer; every fact must cite affidavit_of_service_sworn.pdf p1
+What did Helmut Hasse prove in this collection?	His theorems on non-commutative algebras / Brauer group / Artin reciprocity	Must retrieve the specific Hasse blocks out of a huge theorem list, not summarize the whole journal
+Cross-document + disambiguation
+
+Query	Expected	Why it's hard
+Which documents concern Masum Billal?	The academic transcript and the affidavit	Cross-doc; must not sweep in unrelated docs
+What does "standard class" mean in these documents?	A shipping mode in the sales data (not an academic class)	Ambiguity trap — "class" also appears in academic/legal docs
+Breadth + multilingual
+
+Query	Expected	Why it's hard
+What are these documents about?	Overview covering all 35 (transcript, Kazakhstan permit decree, affidavit, calendar, sales data, math journal, …)	Broad → summaries; must cover all, including the tabular-only sales file
+What categories of people can obtain a residence permit under the Kazakhstan rules?	family reunification, employment, education, medical treatment, business immigration, trafficking victims, …	Cross-lingual (Russian source), retrieval over a 58-page doc
