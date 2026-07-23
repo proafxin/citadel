@@ -136,7 +136,9 @@ def _materialize_crosstab(
                 continue
             dims = [dim_values[index][col - start] for index in range(len(crosstab.dimensions))]
             out_rows.append([*keys, *dims, cell])
-    names = [key.name for key in crosstab.key_columns] + [dim.name for dim in crosstab.dimensions] + [crosstab.value_name]
+    names = (
+        [key.name for key in crosstab.key_columns] + [dim.name for dim in crosstab.dimensions] + [crosstab.value_name]
+    )
     width = len(names)
     dtypes = [dtype_of([row[index] for row in out_rows]) for index in range(width)]
     columns = [Column(header=names[index], dtype=dtypes[index]) for index in range(width)]

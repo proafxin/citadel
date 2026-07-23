@@ -215,8 +215,16 @@ async def summarize_batch(fields: dict[str, str]) -> None:
     content_tokens = int(fields["content_tokens"])
     async with get_sessionmaker()() as session:
         text_body = await _load_batch_text(session, doc_id, int(fields["start"]), int(fields["end"]))
-    instructions = load_prompt("batch_summary").replace("{summary_tokens}", str(summary_budget(content_tokens)))
-    job_id = await emit_slm(f"{instructions}\ntext:\n{text_body}", _SUMMARY_SCHEMA, interactive=False)
+    budget = summary_budget(content_tokens)
+    # the completion cap must sit ABOVE the summary we asked for — the ask is advisory (a model cannot count its own
+    # tokens) while the cap is hard, and overrunning it truncates the JSON mid-string. headroom covers the JSON
+    # wrapper, escaping, and the model running past what it was asked for
+    job_id = await emit_slm(
+        f"{load_prompt('batch_summary').replace('{summary_tokens}', str(budget))}\ntext:\n{text_body}",
+        _SUMMARY_SCHEMA,
+        interactive=False,
+        max_tokens=budget * 2 + 512,
+    )
     data = await collect_slm(job_id)
     summary = str(data.get("summary", "")).strip()
     row = {

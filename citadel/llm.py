@@ -36,12 +36,14 @@ def _extract_json(text: str) -> str:
     return text[start : end + 1] if start != -1 and end != -1 else text
 
 
-def _struct_payload(prompt: str, schema: dict) -> dict:
+def _struct_payload(prompt: str, schema: dict, max_tokens: int = STRUCT_MAX_TOKENS) -> dict:
+    # max_tokens is the HARD completion cap: overrunning it truncates the JSON mid-string and the whole reply fails to
+    # parse. a call that asks the model for a long field must raise this above what it asked for, never shrink the ask
     return {
         "model": QWEN_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
-        "max_tokens": STRUCT_MAX_TOKENS,
+        "max_tokens": max_tokens,
         "response_format": {"type": "json_schema", "json_schema": {"name": "output", "schema": schema}},
         "chat_template_kwargs": {"enable_thinking": False},
     }
@@ -65,13 +67,13 @@ def _inline_refs(schema: dict) -> dict:
     return resolved if isinstance(resolved, dict) else schema
 
 
-async def call_slm(prompt: str, schema: dict, interactive: bool) -> dict:
-    raw = await collect(_struct_payload(prompt, _inline_refs(schema)), interactive)
+async def call_slm(prompt: str, schema: dict, interactive: bool, max_tokens: int = STRUCT_MAX_TOKENS) -> dict:
+    raw = await collect(_struct_payload(prompt, _inline_refs(schema), max_tokens), interactive)
     return json.loads(_extract_json(raw))
 
 
-async def emit_slm(prompt: str, schema: dict, interactive: bool) -> str:
-    return await emit(_struct_payload(prompt, _inline_refs(schema)), interactive)
+async def emit_slm(prompt: str, schema: dict, interactive: bool, max_tokens: int = STRUCT_MAX_TOKENS) -> str:
+    return await emit(_struct_payload(prompt, _inline_refs(schema), max_tokens), interactive)
 
 
 async def collect_slm(job_id: str) -> dict:
