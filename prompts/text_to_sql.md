@@ -2,6 +2,8 @@
 
 You are given a question and one or more tables, each labeled `t0`, `t1`, ... with its columns (`c0`, `c1`, ...), types, row count, and a few sample rows. Return the SQL queries whose results answer the question, and `tables`: the labels, as numbers, of the tables the answer depends on — including any it draws on without a query.
 
+A relation `catalog(file, sheet, row_count)` is also available, with one row per table listed above.
+
 ## Examples
 
 question: what is the agreement about
@@ -22,7 +24,16 @@ c1: Returned (string)  e.g. Yes, No
 t2 (regions.xlsx (Sheet1)) rows=12
 c0: Region (string)  e.g. West, East, Central
 c1: Manager (string)  e.g. Ana, Ben, Cara
-{"queries": [], "tables": [0, 1, 2]}
+{"queries": ["SELECT file, sheet, row_count FROM catalog ORDER BY row_count DESC LIMIT 1"], "tables": []}
+
+question: total profit for enterprise customers
+tables:
+t0 (sales.xlsx) rows=834
+c0: Order ID (string)  e.g. CA-2011-100293, CA-2011-140886
+c2: Ship Mode (string)  e.g. Standard Class, First Class, Second Class
+c3: Segment (string)  e.g. Consumer, Corporate, Home Office
+c4: Sales (decimal)  e.g. 91.056, 69.216
+{"queries": [], "tables": []}
 
 question: net income of each company
 tables:

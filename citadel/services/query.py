@@ -75,6 +75,7 @@ _DTYPE_SA: dict[str, type[TypeEngine[Any]]] = {
     "string": Text,
 }
 _TABLE_REF = re.compile(r"\bt(\d+)\b")
+_COL_REF = re.compile(r"\bt(\d+)\.c(\d+)\b")  # a qualified column ref; rewritten to its header name for readable sql
 # stored cells are OCR/parse text; a numeric or date column routinely holds a "NULL" literal, a blank, or garbage.
 # casting that straight to bigint/date THROWS and the whole generated query is dropped — so guard every non-text cast:
 # cast only cells that match the type, else NULL. dates have no safe regex over OCR variance, so only their sentinels
@@ -110,6 +111,9 @@ class SqlResult:
     rows: list[list]
     total: int
     refs: list[int]  # the table indices this query read, so its source tables can be shown alongside the rows
+    query: str  # the executed query, column refs rewritten to header names — the result's provenance. a lone value
+    # under a model-chosen alias (measured: SUM filtered to two conditions, aliased `total_sales`) reads as a grand
+    # total; the query states what was actually computed, so a filtered figure can never be mistaken for the whole
 
 
 def _safe_sql(sql: str) -> bool:
@@ -117,9 +121,10 @@ def _safe_sql(sql: str) -> bool:
 
 
 def _references_only_views(sql: str, n_tables: int) -> bool:
-    # every FROM/JOIN in the generated SQL (subqueries included) must target one of our per-request t0..tn views — never
-    # a base table (content, table_rows, documents, pg_*), so a prompt-injected query can't read another library's data
-    allowed = {f"t{index}" for index in range(n_tables)}
+    # every FROM/JOIN in the generated SQL (subqueries included) must target one of our per-request t0..tn views or the
+    # catalog relation — never a base table (content, table_rows, documents, pg_*), so a prompt-injected query can't
+    # read another library's data
+    allowed = {"catalog"} | {f"t{index}" for index in range(n_tables)}
     refs = [match.group(1).strip('"').lower() for match in _REL_REF.finditer(sql)]
     return bool(refs) and all(ref in allowed for ref in refs)
 
@@ -202,12 +207,46 @@ def _fit_tables(tables: list[TableCand], relevant: list[int], budget: int) -> li
     return blocks
 
 
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+_CATALOG_SQL = "catalog AS (SELECT * FROM (VALUES %s) AS _cat(file, sheet, row_count))"
+
+
+def _catalog_cte(tables: list[TableCand]) -> str:
+    # the corpus's own shape as a QUERYABLE relation: one row per table, holding what a question about the tables
+    # themselves needs — which file and sheet, and how many rows. a ranking or count over the tables ("which is
+    # largest", "how many rows does X have", "how many tables") is then a real SELECT, not the model eyeballing a list
+    # of row counts across a hundred descriptions. built here from the loaded tables — filenames and integer counts we
+    # hold, never model input — with every string quote-escaped, so it carries no injection surface
+    values = ", ".join(
+        f"({_sql_literal(table.filename)}, {_sql_literal(str(table.metadata.get('sheet') or ''))}, {table.n_rows})"
+        for table in tables
+    )
+    return _CATALOG_SQL % values
+
+
 def _cte(tables: list[TableCand]) -> str:
-    return "WITH " + ", ".join(starmap(_view_cte, enumerate(tables)))
+    return "WITH " + ", ".join([_catalog_cte(tables), *starmap(_view_cte, enumerate(tables))])
 
 
 def _refs(tables: list[TableCand], sql: str) -> list[int]:
     return sorted({index for match in _TABLE_REF.findall(sql) if (index := int(match)) < len(tables)})
+
+
+def _col_name(tables: list[TableCand], table: int, col: int) -> str:
+    if table < len(tables) and col < len(tables[table].columns):
+        return str(tables[table].columns[col].get("header") or f"c{col}")
+    return f"c{col}"
+
+
+def _readable_sql(tables: list[TableCand], sql: str) -> str:
+    # rewrite the executed query into what a reader can follow: every `tN.cM` becomes its header name and every table
+    # reference becomes the table's own label. no internal position ids survive, and the WHERE that produced the value
+    # is now stated in the reader's own vocabulary — this is the provenance a lone aggregate value cannot carry itself
+    sql = _COL_REF.sub(lambda m: _col_name(tables, int(m[1]), int(m[2])), sql)
+    return _TABLE_REF.sub(lambda m: _table_label(tables[int(m[1])]) if int(m[1]) < len(tables) else m[0], sql)
 
 
 def _sources(tables: list[TableCand], refs: list[int]) -> list[str]:
@@ -237,7 +276,9 @@ async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
     refs = _refs(tables, sql)
     sources = _sources(tables, refs)
     logger.info("resolve sources=%s rows=%d sql=%s", sources, len(rows), sql)
-    return SqlResult(", ".join(sources) or "computed result", columns, rows, len(rows), refs)
+    return SqlResult(
+        ", ".join(sources) or "computed result", columns, rows, len(rows), refs, _readable_sql(tables, sql)
+    )
 
 
 async def _aggregate(question: str, tables: list[TableCand], library: str = "") -> tuple[list[SqlResult], list[int]]:
@@ -264,14 +305,19 @@ def _row_text(row: list) -> str:
 def _result_render(result: SqlResult) -> str:
     shown = len(result.rows)
     head = f"[{result.label}]" if shown >= result.total else f"[{result.label}] showing {shown} of {result.total} rows"
-    return "\n".join([head, " | ".join(result.columns), *(_row_text(row) for row in result.rows)])
+    return "\n".join(
+        [head, f"computed by: {result.query}", " | ".join(result.columns), *(_row_text(row) for row in result.rows)]
+    )
 
 
 def _fit_results(results: list[SqlResult], budget: int) -> list[SqlResult]:
     if not results or budget <= 0:
         return []
     kept: list[list[list]] = [[] for _ in results]
-    used = sum(count_tokens(f"[{result.label}]\n" + " | ".join(result.columns)) for result in results)
+    used = sum(
+        count_tokens(f"[{result.label}]\ncomputed by: {result.query}\n" + " | ".join(result.columns))
+        for result in results
+    )
     pointer = [0] * len(results)
     added = True
     while added:
@@ -287,7 +333,7 @@ def _fit_results(results: list[SqlResult], budget: int) -> list[SqlResult]:
             used += cost
             pointer[index] += 1
             added = True
-    return [SqlResult(r.label, r.columns, kept[i], r.total, r.refs) for i, r in enumerate(results) if kept[i]]
+    return [SqlResult(r.label, r.columns, kept[i], r.total, r.refs, r.query) for i, r in enumerate(results) if kept[i]]
 
 
 @dataclass
