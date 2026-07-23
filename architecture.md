@@ -405,9 +405,10 @@ while the embedder was down.
 
 ## Part II — Query
 
-**Designed, not yet built.** This replaces the wide-net pipeline that is currently in the code
-(reformulate → retrieve → filter → compute → unify → fit). That pipeline is described at the end of this
-part, together with the reason it is being replaced.
+**Built.** Two independent channels reduce scope over the corpus in compressed form, the database computes
+every figure, and one deterministic budget rule fits both kinds of evidence into a single answer. This
+replaced a wide-net pipeline (reformulate → retrieve → filter → compute → unify → fit) described, with the
+reason it failed, at the end of this part.
 
 The hard part is not finding candidates. It is deciding which of a large body of evidence actually bears
 on the question, fitting exactly that into one answer, and never letting the model invent a figure or
@@ -416,22 +417,23 @@ miscount what fits.
 ## Query pipeline
 
 ```bash
-question ─┬─ text channel ───→ relevant batches ─┐
-          │   (model over batch summaries)       ├─→ round-robin descent ──→ synthesize → cited answer
-          └─ table channel ──→ SQL queries ──────┘      (exact, depth only)      (model)
-              (model over schema + samples)         database runs the queries
+question ─┬─ text channel ───→ relevant batches ──→ fit into remaining budget ─┐
+          │   (model over batch summaries)          (summaries, or blocks)     ├─→ synthesize → answer
+          └─ table channel ──→ SQL queries ──→ execute ──→ fit tables FIRST ───┘        (model)
+              (model over schema + samples + row counts)   (all kept, rows reduced)
 ```
 
 | Stage | Work |
 |---|---|
-| text channel | over every document's batch summaries, the model names the batches that are **mandatory** to answer |
-| table channel | over every table's schema and sample rows, the model writes the SQL queries that are **mandatory** to answer |
-| descent | one round-robin over both channels' selections, deepening each item until the budget is spent |
-| synthesize | compose one cited answer from the text evidence and the computed results |
+| text channel | over every batch summary in the library, the model names the batches **mandatory** to answer, in relevance order |
+| table channel | over every table's schema, samples, and **row count**, the model writes the **mandatory** SQL; the database runs it |
+| fit | tables first (exact, minimal), then text into what remains |
+| synthesize | one cited answer from the text evidence and the computed results |
 
-Both channels read the whole corpus, in a compressed representation, and both may legitimately return
-nothing. There is **no query reformulation, no similarity search over the corpus, no relevance ranking,
-and no separate table filter** — the reasons are below.
+Both channels read the whole corpus, in a compressed representation — summaries for text, schema+samples for
+tables, never the full content — and both may legitimately return nothing. There is **no query
+reformulation, no corpus-wide similarity net, no separate table filter, and no cross-channel arbitration**.
+The reasons are below.
 
 ### Batches — the unit of text relevance, built at ingestion
 
@@ -448,113 +450,134 @@ compressed form — schema and sample rows, the table's own content uninterprete
 sampled paragraphs are not representative. This is the one place in the system where generated text is
 justified, and it is confined to ingestion.
 
-Each document is packed into **batches**: heading subtrees are added until a token limit is reached, and a
-subtree that alone exceeds the limit becomes its own batch. Each batch is summarized once, at ingestion.
-The batch stores its own **block and page range** at creation, so citation is a stored field rather than a
-traversal.
+Each document is packed into **batches**: content blocks in document order are accumulated until a token
+limit is reached (`BATCH_TOKENS = 32768`). Each batch is summarized once, at ingestion, by the batch stage —
+a streaming stage that emits one summary job per batch to the model stream as each document finishes,
+overlapping the rest of ingestion. The batch stores its own **block-ordinal and page range** at creation, so
+citation is a stored field. Summary length is bounded per batch (`min(10% of content tokens, 4096)`) so the
+summaries stay a true reduction. Batching is not tier-gated: it runs for every library during ingestion,
+before the tier is decided, so a tier upgrade is instant.
 
-This gives the hierarchy the query side needs — batch summary → heading subtree → block — and it means
-relevance is judged against content, not labels.
+This gives the hierarchy the query side needs — batch summary → block — and it means relevance is judged
+against content, not labels.
 
 ### Two channels, judged independently
 
-The channels never see each other's payload. Headings and summaries cannot help write a SQL predicate,
-and schemas cannot help pick a section, so mixing them would only cost context.
+The channels never see each other's payload. Summaries cannot help write a SQL predicate, and schemas cannot
+help pick a section, so mixing them would only cost context. They run concurrently.
 
-**Text.** Filenames and batch summaries for the whole corpus go to the model, which returns the batches
-that are mandatory to answer, in relevance order. Emission order is taken as the ordering — no scores are
-requested, since a score would cost output tokens and be used only for sorting.
+**Text.** Filenames and batch summaries for the whole library go to the model, which returns the batches
+mandatory to answer, in relevance order. Emission order *is* the ranking — no scores are requested. If the
+summaries overflow one call, they split across parallel calls and the results union; the per-batch judgment
+is absolute, not comparative, so splitting is sound.
 
-**Tables.** Each table's schema and sample rows go to the model, which returns the SQL queries needed. The
-sample rows are load-bearing: they are what show how values are *encoded* — `2022-Q2` versus `Q2 2022`,
-`"007"` as a string — and a predicate written against a schema alone silently matches nothing.
+**Tables.** Each table's schema, sample rows, and **row count** go to the model, which returns the SQL
+queries. The sample rows show how values are *encoded* — `2022-Q2` versus `Q2 2022`, `"007"` as a string —
+and a predicate written against a schema alone silently matches nothing. The row count is what lets the
+model aggregate a large table in SQL rather than asking for raw rows, so the result stays minimal.
 
 Relevance here is **constructive**, which is why nothing needs ranking. A query names its own rows through
-its `WHERE`/`JOIN`/`GROUP BY`; a batch names its own subtree. A table is relevant precisely when some query
-references it, so an empty query list *is* the verdict that no table bears on the question, and there is no
-second stage that can silently overrule the first.
+its `WHERE`/`JOIN`/`GROUP BY`. A table is relevant precisely when some query references it, so an empty
+query list *is* the verdict that no table bears on the question — there is no separate table filter that a
+second stage could silently overrule.
 
 ### Why the wide net was removed
 
 Similarity deciding *membership* over the whole corpus is what made broad questions pathological. "What are
 these documents" matches everything, so a corpus-wide net sweeps every passage in order to filter nothing.
-Under batch selection the same question selects every batch and renders each at summary depth — the widest
-question becomes the *cheapest* path, not the most expensive.
+Under batch selection the same question selects every batch and stays at summary depth — the widest question
+becomes the *cheapest* path, not the most expensive.
 
-Similarity is not gone; it is demoted. Inside an already-selected batch, ranking the blocks against the
-question is how a subtree is shortened when it cannot be shown whole. Structure decides membership and
-coverage; similarity decides what to show within something already known to be relevant.
+Similarity is not gone; it is demoted. Inside the *already-selected* batches, ranking the blocks against the
+question is how a section is deepened when there is budget to do so. Structure decides membership and
+coverage; similarity only proposes what to show within something already known to be relevant.
 
-### Descent — never cut membership, only depth
+### Fitting — tables first, then text, membership never cut
 
-Everything selected is represented. Under budget pressure the system reduces **depth**, never membership,
-because a dropped item is invisible in the answer while a shallow one is still present and still cited.
+Because the model was asked for **mandatory** evidence only, everything either channel returns must appear
+in the answer. Fitting therefore adjusts *depth*, never membership. The rule is deterministic — no
+cross-channel model call, no round-robin.
 
-Text descends: batch summary → the batch's heading subtrees → individual blocks.
-Tables descend: fewer rows, distributed round-robin so no table starves another.
+**Tables first.** Result tables are exact and already minimal (the query produced exactly the rows asked
+for), so they take budget before text, which is compressible. `_fit_results` keeps *every* result table and,
+only if they collectively overflow, reduces rows proportionally across them — round-robin so no table
+starves another — with an explicit "showing N of M rows" marker. Nothing is re-aggregated after execution:
+the query already decided the shape, and re-reducing would either be a no-op or would destroy the exact
+answer. The genuine prevention is upstream — the model sees each row count and aggregates in SQL when a raw
+`SELECT *` would be huge, which is *why* results arrive minimal. This also handles "tables don't matter"
+symmetrically: no queries → zero table tokens → text gets the whole window.
 
-Both channels enter **one round-robin in emission order**, each item taking a turn of descent until the
-window is full. The text/table ratio is never chosen — it *emerges*. A table-heavy question selects few
-batches, so text exhausts early and the remaining turns go to tables; a prose question emits no queries and
-text takes the whole window; a question that saturates both degrades uniformly, which is the honest outcome
-when everything is equally relevant.
+**Text into the remainder**, gated by headroom = `text_budget − Σ(selected summaries)`:
 
-Round-robin also sidesteps a problem that cannot be solved: the value of descending into an item is
-unobservable until you descend, since the summary that established relevance is also all you have to
-predict the payoff. Alternating means no item is starved on the basis of a guess that cannot be made.
+- **headroom ≤ 0** — the query selected many batches (it is broad), so their summaries fill the budget.
+  Show the summaries; if even they overflow, map-reduce the summaries down (the only query-time text
+  reduction, hit at large corpus scale). No ranking runs. This is the correct answer to "what are these
+  documents", and it is the cheap path.
+- **headroom > 0** — the query selected few batches (it is narrow), so there is room to deepen. Pool every
+  block of the selected batches into one net (dense + sparse, fused by RRF), then an SLM filter walks that
+  ranking best-first and stops after a few empty batches — recall from the net, precision from the filter,
+  neither trusted alone, no score threshold and no fixed cap. Each batch then expands only if its filtered
+  blocks fit: `cost = Σ(its blocks) − its summary`; if `cost ≤ headroom`, swap the summary for the blocks
+  and spend the cost, else keep the summary. Cheap, focused sections expand; a section whose relevant
+  content is nearly the whole thing keeps its summary.
+
+So breadth is **measured, never classified** — the count of batches the selection returned, converted to a
+number by headroom, decides summary-vs-block. The RRF score distribution is deliberately *not* used as that
+signal: ranking is recall-only and pollutable (a block can score high off a repeated minor signal), so it
+proposes candidates for the filter and never decides membership.
 
 ### Arithmetic stays in the database
 
-Text has no exact reduction operator, so it reduces by selection. Tables do, so they never reduce by
-selection: a `SUM` is computed by SQL, never by a model reading rows. When a result is too large, the
-repair is to aggregate in SQL — coarsening `GROUP BY` — not to truncate rows, because a truncated
-aggregate looks complete and is wrong.
-
-A join's cardinality is not predictable from its inputs, so overflow there is only discoverable after
-execution, and a join that multiplies its inputs is usually a wrong key rather than a legitimate result —
-worth logging as a correctness signal, not just a budget event.
-
-Whenever anything is reduced, it is marked as such, so the answer says "the top 50 of 500" rather than
-presenting a partial as a total.
+A `SUM` is computed by SQL, never by a model reading rows. The result tables are the answer; they are never
+reduced by re-aggregation. A join's cardinality is not predictable from its inputs, so a near-cartesian
+blowup is discoverable only after execution and is usually a wrong key — worth logging as a correctness
+signal, not just a budget event. Whenever rows are dropped to fit, it is marked, so the answer says "the top
+50 of 500" rather than presenting a partial as a total.
 
 ### Citation is structural and free
 
-Citations do not depend on depth. A batch selected at summary depth still cites at block and page level,
-because the batch stored its range when it was built. Ranges merge at synthesis, so a section cites as a
-span rather than as one entry per block.
-
-This is what makes shallow representation honest: an item that could not afford descent still contributes
-its real provenance, and "what are these documents" cites every block it summarizes.
+Citations do not depend on depth. A batch shown at summary depth still cites at block and page level, because
+the batch stored its range when it was built; a block shown directly carries its own filename and page. This
+is what makes summary depth honest: a section too broad to expand still contributes its real provenance, and
+"what are these documents" cites every block its summaries stand for.
 
 ### Synthesize
 
-One model call merges the text evidence, each carrying its document and page range, and the computed
-results, each carrying its table. Computed results are the authority for figures and totals; text supplies
-narrative and context; the model is where the two reconcile. If the evidence does not answer the question,
-it says so plainly.
+One model call merges the text evidence and the computed results. Computed results are the authority for
+figures and totals; text supplies narrative and context; the model is where the two reconcile. If the
+evidence does not answer the question, it says so plainly.
+
+### The one irreducible risk
+
+Summary quality. A summary is the only thing standing between the query and a whole section, so a bad
+summary cannot be compensated downstream — it can cause under-narrowing (over-selection, no room to reach
+blocks) that no ranking or filter recovers. The failure degrades safely (complete-but-coarse summaries, never
+a wrong answer), but summary quality is the lever to watch in evaluation, and it is set once, at ingestion.
 
 ### Open
 
-- **Turn granularity.** Whether one turn advances an item by one level (equalizing depth) or by a fixed
-  token quantum (equalizing space) is not settled.
-- **Corpus scale.** The text channel's payload is every document's batch summaries, so it grows with the
-  corpus. At the current corpus this is comfortable; at a few thousand documents scoping needs its own
-  retrieval step ahead of it.
+- **Corpus scale.** Both channel payloads — all summaries, all table reps — grow with the corpus. They split
+  across parallel model calls today; past a few thousand documents, scoping needs its own retrieval step
+  ahead of the channels. Same ceiling appears at synthesis, where selected summaries that overflow the budget
+  are map-reduced.
 
-### The pipeline this replaces
+### The pipeline this replaced
 
-The built pipeline reformulates the question, retrieves a wide net (`CANDIDATES=1000`, RRF over dense and
-lexical channels), filters it with a batched two-step model pass, writes SQL for the kept tables, marks
-evidence essential or supporting, and fits deterministically. Its properties were sound in isolation — no
-score threshold, no reranker, no arbitrary read cap, all fitting done by the system rather than the model —
-but it rests on similarity deciding membership, which is the assumption that fails on broad questions. Its
-table filter and SQL stage could also disagree: the filter could keep a table that the SQL stage then
-silently declined to query, and the table would vanish from the answer with nothing detecting it.
+The old pipeline reformulated the question, retrieved a wide net (`CANDIDATES=1000`, RRF over dense and
+lexical channels), filtered it with a batched two-step model pass, wrote SQL for the kept tables, marked
+evidence essential or supporting, and fit deterministically. Its properties were sound in isolation — no
+score threshold, no reranker, no arbitrary read cap — but it rested on similarity deciding *membership*,
+which is the assumption that fails on broad questions. Its table filter and SQL stage could also disagree:
+the filter could keep a table the SQL stage then silently declined to query, and the table would vanish with
+nothing detecting it. The current pipeline keeps that pipeline's good machinery — the RRF net and the
+early-stopping SLM filter — but scopes them to the batches selection already found, and lets constructive SQL
+replace the table filter entirely.
 
 ## Models
 
 One general model, run without a separate reasoning pass, performs every model step across ingestion and
-query — table structuring and description, reformulation, filtering, query writing, priority, and synthesis.
+query — table structuring, batch summarization, batch selection, block filtering, SQL writing, and
+synthesis.
 
 Reading a document that exists only as pixels takes **two** models, deliberately split:
 

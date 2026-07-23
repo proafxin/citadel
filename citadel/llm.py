@@ -126,25 +126,6 @@ async def _chat_stream(prompt: str) -> AsyncIterator[str]:
         yield delta
 
 
-_REFORMULATE_SCHEMA = {
-    "type": "object",
-    "properties": {"queries": {"type": "array", "items": {"type": "string"}}},
-    "required": ["queries"],
-}
-
-
-async def reformulate(query: str) -> list[str]:
-    data = await call_slm(f"{load_prompt('reformulate')}\nquestion: {query}", _REFORMULATE_SCHEMA, interactive=True)
-    out: list[str] = []
-    seen: set[str] = set()
-    for candidate in [query, *data.get("queries", [])]:
-        text = str(candidate).strip()
-        if text and text.casefold() not in seen:
-            seen.add(text.casefold())
-            out.append(text)
-    return out
-
-
 MIN_SCORE = 1
 MAX_SCORE = 3
 
@@ -202,6 +183,34 @@ _QUERIES_SCHEMA = {
     "properties": {"queries": {"type": "array", "items": {"type": "string"}}},
     "required": ["queries"],
 }
+
+
+_BATCH_SELECT_SCHEMA = {
+    "type": "object",
+    "properties": {"sections": {"type": "array", "items": {"type": "integer"}}},
+    "required": ["sections"],
+}
+
+
+def _select_prompt(query: str, items: list[str]) -> str:
+    listing = "\n\n".join(f"[{index}] {item}" for index, item in enumerate(items))
+    return f"{load_prompt('batch_select')}\nquestion: {query}\nsections:\n{listing}"
+
+
+def _select_indices(data: dict, count: int) -> list[int]:
+    seen: list[int] = []
+    for index in data.get("sections", []):
+        if isinstance(index, int) and 0 <= index < count and index not in seen:
+            seen.append(index)
+    return seen
+
+
+async def emit_select(query: str, items: list[str]) -> str:
+    return await emit_slm(_select_prompt(query, items), _BATCH_SELECT_SCHEMA, interactive=True)
+
+
+async def collect_select(job_id: str, count: int) -> list[int]:
+    return _select_indices(await collect_slm(job_id), count)
 
 
 async def write_queries(query: str, tables: list[str]) -> list[str]:

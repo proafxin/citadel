@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
+from citadel.models.batch import ContentBatch
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
 from citadel.models.embedding import Embedding
@@ -26,7 +27,6 @@ logger = logging.getLogger(__name__)
 EMBED_TTL = 86_400
 
 RRF_K = 60
-CANDIDATES = 1000
 RETRIEVAL_CONCURRENCY = 8  # cap concurrent dense/sparse searches so a many-variant query can't exhaust the DB pool
 
 EMBED_VRAM_HEADROOM = 0.7  # of what is actually free — the floor, so a genuinely full card still yields a safe batch
@@ -120,21 +120,6 @@ class TableCand:
 
 
 @dataclass
-class Retrieval:
-    text: list[int]
-    tables: list[int]
-
-
-@dataclass
-class Passage:
-    content_id: int
-    text: str
-    document_id: int
-    heading: str | None
-    score: int = 0
-
-
-@dataclass
 class _PendingNode:
     content_id: int
     search_text: str
@@ -164,51 +149,12 @@ def _search_semaphore() -> asyncio.Semaphore:
     return asyncio.Semaphore(RETRIEVAL_CONCURRENCY)
 
 
-async def _dense(is_table: bool, vector: list[float], library_id: int) -> list[int]:
-    # dense search runs entirely on the small embeddings table: library_id is denormalized there, so retrieval is
-    # library-scoped (no cross-library leak) with no join, and the HNSW/halfvec index does the ANN ordering
-    channel = (Embedding.type == "table") if is_table else (Embedding.type != "table")
-    stmt = (
-        select(Embedding.content_id)
-        .where(Embedding.library_id == library_id, channel)
-        .order_by(Embedding.embedding.cosine_distance(vector))
-        .limit(CANDIDATES)
-    )
-    async with _search_semaphore(), get_sessionmaker()() as session:
-        return list(await session.scalars(stmt))
-
-
-async def _sparse(is_table: bool, terms: list[str], library_id: int) -> list[int]:
-    if not terms:
-        return []
-    channel = (ContentNode.type == "table") if is_table else (ContentNode.type != "table")
-    conditions = [ContentNode.search_text.ilike(_like(term), escape="\\") for term in terms]
-    hits = functools.reduce(operator.add, (case((cond, 1), else_=0) for cond in conditions))
-    stmt = (
-        select(ContentNode.id)
-        .join(Document, ContentNode.document_id == Document.id)
-        .where(channel, Document.library_id == library_id, ContentNode.search_text.isnot(None), or_(*conditions))
-        .order_by(hits.desc())
-        .limit(CANDIDATES)
-    )
-    async with _search_semaphore(), get_sessionmaker()() as session:
-        return list(await session.scalars(stmt))
-
-
 def _rrf(rankings: list[list[int]]) -> list[int]:
     scores: dict[int, float] = {}
     for ranking in rankings:
         for rank, content_id in enumerate(ranking, start=1):
             scores[content_id] = scores.get(content_id, 0.0) + 1.0 / (RRF_K + rank)
     return sorted(scores, key=lambda content_id: scores[content_id], reverse=True)
-
-
-async def _channel(is_table: bool, vectors: list[list[float]], terms: list[str], library_id: int) -> list[int]:
-    # every dense (one per query variant) and the sparse search run concurrently, each on its own session, bounded by
-    # the shared search semaphore — one question fans out into a single concurrent batch instead of serial round-trips
-    searches = [_dense(is_table, vector, library_id) for vector in vectors]
-    searches.append(_sparse(is_table, terms, library_id))
-    return _rrf(await asyncio.gather(*searches))
 
 
 async def _pending_nodes(library_id: int) -> list[_PendingNode]:
@@ -336,27 +282,112 @@ async def pending_libraries() -> list[int]:
         )
 
 
-async def retrieve(queries: list[str], library_id: int) -> Retrieval:
-    vectors = await _embed(queries, _max_tokens(queries))
-    terms = _terms(queries)
-    text, tables = await asyncio.gather(
-        _channel(is_table=False, vectors=vectors, terms=terms, library_id=library_id),
-        _channel(is_table=True, vectors=vectors, terms=terms, library_id=library_id),
+def _table_cand(table: Table, filename: str) -> TableCand:
+    return TableCand(
+        table.content_id,
+        table.id,
+        filename,
+        table.n_rows,
+        table.columns,
+        table.table_metadata,
+        table.sample_rows,
+        (table.anchors or {}).get("header_rows", []),
     )
-    return Retrieval(text=text[:CANDIDATES], tables=tables[:CANDIDATES])
 
 
-async def load_passages(content_ids: list[int]) -> list[Passage]:
+async def load_all_tables(library_id: int) -> list[TableCand]:
+    # the table channel sees every table in the library — schema + samples + row count — and writes the queries. no
+    # retrieval prefilter: relevance is decided constructively by which tables the queries reference
+    async with get_sessionmaker()() as session:
+        rows = list(
+            await session.execute(
+                select(Table, Document.filename)
+                .join(Document, Table.document_id == Document.id)
+                .where(Document.library_id == library_id)
+                .order_by(Table.id)
+            )
+        )
+    return [_table_cand(table, filename) for table, filename in rows]
+
+
+async def _scoped_dense(vector: list[float], content_ids: list[int]) -> list[int]:
+    stmt = (
+        select(Embedding.content_id)
+        .where(Embedding.content_id.in_(content_ids), Embedding.type != "table")
+        .order_by(Embedding.embedding.cosine_distance(vector))
+    )
+    async with _search_semaphore(), get_sessionmaker()() as session:
+        return list(await session.scalars(stmt))
+
+
+async def _scoped_sparse(terms: list[str], content_ids: list[int]) -> list[int]:
+    if not terms:
+        return []
+    conditions = [ContentNode.search_text.ilike(_like(term), escape="\\") for term in terms]
+    hits = functools.reduce(operator.add, (case((cond, 1), else_=0) for cond in conditions))
+    stmt = (
+        select(ContentNode.id)
+        .where(ContentNode.id.in_(content_ids), ContentNode.search_text.isnot(None), or_(*conditions))
+        .order_by(hits.desc())
+    )
+    async with _search_semaphore(), get_sessionmaker()() as session:
+        return list(await session.scalars(stmt))
+
+
+async def rank_blocks(vectors: list[list[float]], terms: list[str], content_ids: list[int]) -> list[int]:
+    # ONE pooled net over every block of every selected batch, so cross-batch relevance is on a single scale. dense and
+    # sparse fused by RRF; this is the corpus-wide net of before, now scoped to the batches the summaries selected
     if not content_ids:
         return []
+    searches = [_scoped_dense(vector, content_ids) for vector in vectors]
+    searches.append(_scoped_sparse(terms, content_ids))
+    return _rrf(await asyncio.gather(*searches))
+
+
+async def rank_scoped(question: str, content_ids: list[int]) -> list[int]:
+    if not content_ids:
+        return []
+    vectors = await embed_query([question])
+    return await rank_blocks(vectors, _terms([question]), content_ids)
+
+
+async def scope_block_ids(ranges: list[tuple[int, int, int]]) -> list[int]:
+    # content ids of the non-table blocks under the selected batches, addressed by (document_id, block_ordinal range)
+    if not ranges:
+        return []
+    clauses = [
+        (ContentNode.document_id == doc_id)
+        & (ContentNode.block_ordinal >= start)
+        & (ContentNode.block_ordinal <= end)
+        for doc_id, start, end in ranges
+    ]
+    async with get_sessionmaker()() as session:
+        return list(
+            await session.scalars(
+                select(ContentNode.id).where(ContentNode.type != "table", or_(*clauses)).order_by(ContentNode.id)
+            )
+        )
+
+
+@dataclass
+class BlockText:
+    content_id: int
+    document_id: int
+    block_ordinal: int
+    text: str
+
+
+async def load_block_texts(content_ids: list[int]) -> dict[int, BlockText]:
+    if not content_ids:
+        return {}
     async with get_sessionmaker()() as session:
         rows = list(
             await session.execute(
                 select(
                     ContentNode.id,
                     ContentNode.document_id,
+                    ContentNode.block_ordinal,
                     ContentNode.page_no,
-                    ContentNode.heading,
                     ContentNode.raw,
                     Document.filename,
                 )
@@ -364,46 +395,57 @@ async def load_passages(content_ids: list[int]) -> list[Passage]:
                 .where(ContentNode.id.in_(content_ids))
             )
         )
-    lookup = {row.id: row for row in rows}
-    passages: list[Passage] = []
-    for content_id in content_ids:
-        row = lookup.get(content_id)
-        # the evidence a model reads is the block's own content, never its search_text — that string exists to be
-        # matched, and its normalization would put mangled code and flattened lists into the answer
-        body = render_raw(row.raw) if row is not None else ""
+    out: dict[int, BlockText] = {}
+    for cid, doc_id, ordinal, page_no, raw, filename in rows:
+        body = render_raw(raw)
         if body.strip():
-            page = f" p{row.page_no}" if row.page_no else ""
-            passages.append(Passage(content_id, f"[{row.filename}{page}] {body}", row.document_id, row.heading))
-    return passages
+            page = f" p{page_no}" if page_no else ""
+            out[cid] = BlockText(cid, doc_id, ordinal or 0, f"[{filename}{page}] {body}")
+    return out
 
 
-async def load_tables(content_ids: list[int]) -> list[TableCand]:
-    if not content_ids:
-        return []
+async def embed_query(queries: list[str]) -> list[list[float]]:
+    return await _embed(queries, _max_tokens(queries))
+
+
+@dataclass
+class BatchRef:
+    id: int
+    document_id: int
+    filename: str
+    summary: str
+    summary_tokens: int
+    start_block_ordinal: int
+    end_block_ordinal: int
+    start_page_no: int | None
+    end_page_no: int | None
+    content_tokens: int
+
+
+async def load_library_batches(library_id: int) -> list[BatchRef]:
+    # every batch summary in the library, in a stable order (document, then batch). this is the text channel's whole
+    # input — the corpus in its compressed form
     async with get_sessionmaker()() as session:
         rows = list(
             await session.execute(
-                select(Table, Document.filename)
-                .join(Document, Table.document_id == Document.id)
-                .where(Table.content_id.in_(content_ids))
+                select(ContentBatch, Document.filename)
+                .join(Document, ContentBatch.document_id == Document.id)
+                .where(Document.library_id == library_id)
+                .order_by(ContentBatch.document_id, ContentBatch.batch_no)
             )
         )
-    lookup = {table.content_id: (table, filename) for table, filename in rows}
-    out: list[TableCand] = []
-    for content_id in content_ids:
-        found = lookup.get(content_id)
-        if found is not None:
-            table, filename = found
-            out.append(
-                TableCand(
-                    content_id,
-                    table.id,
-                    filename,
-                    table.n_rows,
-                    table.columns,
-                    table.table_metadata,
-                    table.sample_rows,
-                    (table.anchors or {}).get("header_rows", []),
-                )
-            )
-    return out
+    return [
+        BatchRef(
+            batch.id,
+            batch.document_id,
+            filename,
+            batch.summary,
+            batch.summary_tokens,
+            batch.start_block_ordinal,
+            batch.end_block_ordinal,
+            batch.start_page_no,
+            batch.end_page_no,
+            batch.content_tokens,
+        )
+        for batch, filename in rows
+    ]

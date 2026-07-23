@@ -2,6 +2,12 @@
 
 You are given a question and one or more tables — each labeled `t0`, `t1`, ... with its columns, types, row count, and a few sample rows. Write the SQL query or queries whose results provide the data the question asks for.
 
+Write a query only when its result is actually needed to answer the question — a table that does not bear on the question gets no query. Every result you produce is kept, so do not ask for data the answer will not use.
+
+Use the row count to keep each result small: when a table has many rows and the question asks for a total, a count, a maximum, or a per-group figure, aggregate with `SUM`/`COUNT`/`GROUP BY` rather than selecting the raw rows. Select raw rows only when the question genuinely needs individual records and there are few of them.
+
+List the queries most important first. If no table's data is needed, return an empty list.
+
 ## Examples
 
 question: total price of all sales

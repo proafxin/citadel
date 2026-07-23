@@ -3,7 +3,7 @@ import logging
 import re
 import traceback
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from itertools import starmap
 from typing import Any
 
@@ -18,16 +18,26 @@ from citadel.db import get_sessionmaker
 from citadel.llm import (
     STRUCT_MAX_TOKENS,
     SYNTH_MAX_TOKENS,
+    collect_select,
     count_tokens,
     count_tokens_batch,
+    emit_select,
     merge_evidence,
-    reformulate,
     select_evidence,
     synthesize,
     write_queries,
 )
 from citadel.models.table import TableRow
-from citadel.services.retrieval import Passage, TableCand, load_passages, load_tables, retrieve
+from citadel.services.retrieval import (
+    BatchRef,
+    BlockText,
+    TableCand,
+    load_all_tables,
+    load_block_texts,
+    load_library_batches,
+    rank_scoped,
+    scope_block_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -337,66 +347,128 @@ async def _reduce(question: str, evidences: list[_Evidence], budget: int, level:
     return await _reduce(question, combined, budget, level + 1)
 
 
-async def _reduce_passages(question: str, passages: list[Passage], budget: int) -> list[_Evidence]:
-    if not passages:
+SELECT_BUDGET = FILTER_BUDGET  # summaries packed into one selection call
+
+
+def _pack(counts: list[int], budget: int) -> list[list[int]]:
+    groups: list[list[int]] = []
+    current: list[int] = []
+    used = 0
+    for index, cost in enumerate(counts):
+        if current and used + cost > budget:
+            groups.append(current)
+            current, used = [], 0
+        current.append(index)
+        used += cost
+    if current:
+        groups.append(current)
+    return groups
+
+
+async def select_batches(question: str, library_id: int) -> list[BatchRef]:
+    # the text channel: the SLM reads every batch summary in the library (split across calls only if they overflow one)
+    # and returns the batches mandatory to answer, in relevance order. this is the whole scope-reduction for text
+    batches = await load_library_batches(library_id)
+    if not batches:
         return []
-    counts = await asyncio.to_thread(count_tokens_batch, [passage.text for passage in passages])
-    evidences = [
-        _Evidence(
-            passage.text,
-            [passage.content_id],
-            counts[index],
-            passage.score,
-            passage.heading,
-            passage.document_id,
-        )
-        for index, passage in enumerate(passages)
-    ]
-    return await _reduce(question, evidences, budget, 0)
+    items = [f"{batch.filename}\n{batch.summary}" for batch in batches]
+    counts = await asyncio.to_thread(count_tokens_batch, items)
+    jobs = [(pack, await emit_select(question, [items[i] for i in pack])) for pack in _pack(counts, SELECT_BUDGET)]
+    selected: list[BatchRef] = []
+    for pack, job_id in jobs:
+        selected.extend(batches[pack[local]] for local in await collect_select(job_id, len(pack)))
+    return selected
+
+
+async def run_tables(question: str, library_id: int) -> list[SqlResult]:
+    # the table channel: the SLM sees every table's schema, samples, and ROW COUNT and writes the mandatory queries;
+    # relevance is constructive (a table matters iff a query names it), so there is no separate table filter
+    return await _aggregate(question, await load_all_tables(library_id))
+
+
+def _summary_evidence(batch: BatchRef, rank: int, total: int, tokens: int) -> _Evidence:
+    return _Evidence(f"[{batch.filename}] {batch.summary}", [batch.id], tokens, total - rank, None, batch.document_id)
+
+
+async def _reduce_summaries(question: str, batches: list[BatchRef], budget: int) -> list[str]:
+    # summaries are already a reduction, so this only fires when even the SELECTED summaries overflow the budget — the
+    # large-corpus / very-broad case. it reduces the least-relevant summaries first (emission order is relevance)
+    texts = [f"[{batch.filename}] {batch.summary}" for batch in batches]
+    counts = await asyncio.to_thread(count_tokens_batch, texts)
+    if sum(counts) <= budget:
+        return texts
+    evidences = [_summary_evidence(batch, rank, len(batches), counts[rank]) for rank, batch in enumerate(batches)]
+    return [evidence.text for evidence in await _reduce(question, evidences, budget, 0)]
+
+
+def _batch_of(block: BlockText, batches: list[BatchRef]) -> int | None:
+    for index, batch in enumerate(batches):
+        if block.document_id == batch.document_id and batch.start_block_ordinal <= block.block_ordinal <= batch.end_block_ordinal:
+            return index
+    return None
+
+
+async def _relevant_blocks(question: str, batches: list[BatchRef]) -> list[BlockText]:
+    # ONE pooled net over every block of the selected batches, then the SLM filter to drop RRF's false positives. the
+    # net is recall (looks connected); the filter is precision (is connected) — neither is trusted alone. `_filter`
+    # walks the ranking best-first and stops after a few empty batches, so how far down we read is the model's call,
+    # never a score cutoff or a fixed cap
+    pool = await scope_block_ids([(b.document_id, b.start_block_ordinal, b.end_block_ordinal) for b in batches])
+    ranked = await rank_scoped(question, pool)
+    texts = await load_block_texts(ranked)
+    ordered = [texts[cid] for cid in ranked if cid in texts]
+    kept = await _filter(question, [block.text for block in ordered])
+    return [ordered[index] for index in sorted(index for index, _ in kept)]
+
+
+async def render_text(question: str, batches: list[BatchRef], budget: int) -> list[str]:
+    # summaries are the coverage baseline; only leftover headroom funds expansion to blocks. a broad query selects many
+    # batches, so the baseline fills the budget and nothing expands — which is the correct answer for a broad question
+    if not batches or budget <= 0:
+        return []
+    summary_tokens = await asyncio.to_thread(count_tokens_batch, [f"[{b.filename}] {b.summary}" for b in batches])
+    headroom = budget - sum(summary_tokens)
+    if headroom <= 0:
+        return await _reduce_summaries(question, batches, budget)
+    relevant = await _relevant_blocks(question, batches)
+    by_batch: dict[int, list[BlockText]] = {}
+    for block in relevant:
+        index = _batch_of(block, batches)
+        if index is not None:
+            by_batch.setdefault(index, []).append(block)
+    covered: dict[int, list[str]] = {}
+    for index, _ in enumerate(batches):  # emission order: most relevant batches expand first
+        blocks = by_batch.get(index)
+        if not blocks:
+            continue
+        cost = sum(count_tokens(block.text) + 1 for block in blocks) - summary_tokens[index]
+        if cost <= headroom:
+            covered[index] = [block.text for block in blocks]
+            headroom -= cost
+    rest = [batch for index, batch in enumerate(batches) if index not in covered]
+    remaining = budget - sum(count_tokens(text) for texts in covered.values() for text in texts)
+    out: list[str] = [text for index in sorted(covered) for text in covered[index]]
+    out.extend(await _reduce_summaries(question, rest, remaining))
+    return out
 
 
 async def answer(question: str, library_id: int) -> AsyncIterator[str]:
-    queries = await reformulate(question)
-    logger.info("reformulate %r -> %s", question[:80], queries)
-    hits = await retrieve(queries, library_id)
-    passages = await load_passages(hits.text)
-    candidates = await load_tables(hits.tables)
     async with asyncio.TaskGroup() as group:
-        passage_filter = group.create_task(_filter(question, [passage.text for passage in passages]))
-        table_filter = group.create_task(_filter(question, [_table_rep(table) for table in candidates]))
-    kept_passages = [replace(passages[index], score=score) for index, score in passage_filter.result()]
-    kept_tables = [candidates[index] for index, _ in table_filter.result()]
-    results = await _aggregate(question, kept_tables)
-    logger.info(
-        "query %r variants=%d text_hits=%d table_hits=%d kept_passages=%d kept_tables=%d results=%d",
-        question[:80],
-        len(queries),
-        len(hits.text),
-        len(hits.tables),
-        len(kept_passages),
-        len(kept_tables),
-        len(results),
-    )
-    logger.info(
-        "kept passage_ids=%s table_ids=%s",
-        [passage.content_id for passage in kept_passages],
-        [table.content_id for table in kept_tables],
-    )
-    fitted_results = _fit_results(results, RESULTS_BUDGET)
+        text_task = group.create_task(select_batches(question, library_id))
+        table_task = group.create_task(run_tables(question, library_id))
+    batches = text_task.result()
+    results = table_task.result()
+    fitted_results = _fit_results(results, SYNTH_BUDGET)  # tables first: they are exact and minimal
     rendered = [_result_render(result) for result in fitted_results]
-    passage_budget = max(SYNTH_BUDGET - sum(count_tokens(block) for block in rendered), 0)
-    evidences = await _reduce_passages(question, kept_passages, passage_budget)
-    covered = {source for evidence in evidences for source in evidence.sources}
-    uncovered = [passage.content_id for passage in kept_passages if passage.content_id not in covered]
-    if uncovered:
-        logger.error("reduction dropped sources uncovered=%d ids=%s", len(uncovered), uncovered)
+    text_budget = max(SYNTH_BUDGET - sum(count_tokens(block) for block in rendered), 0)
+    passages = await render_text(question, batches, text_budget)
     logger.info(
-        "synthesis evidences=%d results=%d merged=%d source_count=%d uncovered=%d",
-        len(evidences),
+        "query %r batches=%d results=%d table_tokens=%d passages=%d",
+        question[:80],
+        len(batches),
         len(fitted_results),
-        sum(1 for evidence in evidences if len(evidence.sources) > 1),
-        len(covered),
-        len(uncovered),
+        sum(count_tokens(block) for block in rendered),
+        len(passages),
     )
-    async for token in synthesize(question, [evidence.text for evidence in evidences], rendered):
+    async for token in synthesize(question, passages, rendered):
         yield token
