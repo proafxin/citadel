@@ -28,6 +28,7 @@ from citadel.llm import (
     write_queries,
 )
 from citadel.models.table import TableRow
+from citadel.schemas.query import QueryPlan
 from citadel.services.retrieval import (
     BatchRef,
     TableCand,
@@ -174,32 +175,30 @@ def _table_label(table: TableCand) -> str:
 
 
 def _table_render(table: TableCand) -> str:
-    # a table's own description — what it is, how big, what its columns hold. attached as evidence independently of what
-    # SQL was written, so the corpus's shape is always visible: a question the queries answered only partly, or missed,
-    # can still be answered from the tables themselves rather than from nothing
+    # a table's description as the ANSWER needs it, and no more: which file it came from, where in it, what it is, how
+    # big. no schema, no samples, no dtypes — nothing here writes SQL any more, the columns that matter already arrive
+    # as the result's own header row, and a sample value would just be a concrete-looking number beside the real result,
+    # quotable as if it were one. what this adds is only what a bare result lacks: attribution and the scale behind it
     meta = table.metadata
-    named = " | ".join(str(meta[key]) for key in ("title", "caption") if meta.get(key))
+    described = [str(meta[key]) for key in ("title", "caption") if meta.get(key)]
+    described.extend(str(note) for note in meta.get("notes") or [])
     head = f"[{_table_label(table)}] rows={table.n_rows}"
-    return f"{head}{' ' + named if named else ''}\n{_schema(table.columns, table.sample_rows)}"
+    return f"{head} {' | '.join(described)}" if described else head
 
 
-def _table_order(tables: list[TableCand], results: list[SqlResult]) -> list[int]:
-    # tables a query actually read come first — those are the ones whose rows are in evidence and need describing. the
-    # rest follow in corpus order and are included while the budget allows
-    used = list(dict.fromkeys(index for result in results for index in result.refs))
-    return used + [index for index in range(len(tables)) if index not in set(used)]
-
-
-def _fit_tables(tables: list[TableCand], results: list[SqlResult], budget: int) -> list[str]:
+def _fit_tables(tables: list[TableCand], relevant: list[int], budget: int) -> list[str]:
+    # ONLY the tables named relevant for this question. the query-writing call already saw every table in the library —
+    # that is how relevance gets decided at all — so by now it is decided, and describing the rest would pay a second
+    # time for tables that bear on nothing
     blocks: list[str] = []
-    used = 0
-    for index in _table_order(tables, results):
+    spent = 0
+    for index in relevant:
         block = _table_render(tables[index])
         cost = count_tokens(block) + 1
-        if used + cost > budget:
+        if spent + cost > budget:
             continue
         blocks.append(block)
-        used += cost
+        spent += cost
     return blocks
 
 
@@ -241,16 +240,21 @@ async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
     return SqlResult(", ".join(sources) or "computed result", columns, rows, len(rows), refs)
 
 
-async def _aggregate(question: str, tables: list[TableCand], library: str = "") -> list[SqlResult]:
+async def _aggregate(question: str, tables: list[TableCand], library: str = "") -> tuple[list[SqlResult], list[int]]:
     blocks = list(starmap(_schema_block, enumerate(tables)))
-    sqls = await write_queries(question, blocks, library) if tables else []
-    logger.info("aggregate tables=%d sqls=%d", len(tables), len(sqls))
+    plan = await write_queries(question, blocks, library) if tables else QueryPlan()
     results: list[SqlResult] = []
-    for sql in sqls:
+    for sql in plan.queries:
         resolved = await _execute(tables, sql)
         if resolved is not None:
             results.append(resolved)
-    return results
+    # a table is described if it was NAMED relevant or if a query actually read it. the union matters: a query can name
+    # a table the model forgot to mark, and a rejected or failed query must not take its table's metadata down with it
+    relevant = list(dict.fromkeys([*plan.tables, *(index for result in results for index in result.refs)]))
+    logger.info(
+        "aggregate tables=%d sqls=%d ran=%d relevant=%s", len(tables), len(plan.queries), len(results), relevant
+    )
+    return results, relevant
 
 
 def _row_text(row: list) -> str:
@@ -293,15 +297,15 @@ class _TableChannel:
     described: int
 
 
-def _table_channel(results: list[SqlResult], tables: list[TableCand]) -> _TableChannel:
-    # the table channel's whole evidence: every table's description, then the rows the queries computed. rows are fitted
-    # first because they are the exact answer and must not lose ground to a description, and the descriptions are then
-    # laid in ahead of them — what a table IS has to be readable before what was pulled out of it, and both carry the
-    # same label, so a result and its source table are one name in one place
+def _table_channel(results: list[SqlResult], tables: list[TableCand], relevant: list[int]) -> _TableChannel:
+    # the table channel's whole evidence: the relevant tables' descriptions, then the rows the queries computed. rows
+    # are fitted first because they are the exact answer and must not lose ground to a description, and the descriptions
+    # are then laid in ahead of them — what a table IS has to be readable before what was pulled out of it, and both
+    # carry the same label, so a result and its source table are one name in one place
     fitted = _fit_results(results, SYNTH_BUDGET - TABLE_REP_BUDGET)
     result_blocks = [_result_render(result) for result in fitted]
     spent = sum(count_tokens(block) for block in result_blocks)
-    describe = _fit_tables(tables, fitted, min(TABLE_REP_BUDGET, SYNTH_BUDGET - spent))
+    describe = _fit_tables(tables, relevant, min(TABLE_REP_BUDGET, SYNTH_BUDGET - spent))
     return _TableChannel([*describe, *result_blocks], fitted, len(describe))
 
 
@@ -422,12 +426,15 @@ async def select_batches(question: str, library_id: int, library: str = "") -> l
     return selected
 
 
-async def run_tables(question: str, library_id: int, library: str) -> tuple[list[SqlResult], list[TableCand]]:
-    # the table channel: the SLM sees every table's schema, samples, and ROW COUNT and writes the mandatory queries;
-    # relevance is constructive (a table matters iff a query names it), so there is no separate table filter. the
-    # tables come back too — their metadata is ours to attach, never something to spend a query retrieving
+async def run_tables(
+    question: str, library_id: int, library: str
+) -> tuple[list[SqlResult], list[TableCand], list[int]]:
+    # the table channel: the SLM sees every table's schema, samples and ROW COUNT, then names the tables the question
+    # bears on and writes the queries for whatever must be computed from their rows. the tables come back too — their
+    # metadata is ours to attach, never something to spend a query retrieving
     tables = await load_all_tables(library_id)
-    return await _aggregate(question, tables, library), tables
+    results, relevant = await _aggregate(question, tables, library)
+    return results, tables, relevant
 
 
 def _batch_cite(batch: BatchRef) -> str:
@@ -585,15 +592,16 @@ async def answer(question: str, library_id: int) -> AsyncIterator[str]:
         text_task = group.create_task(select_batches(question, library_id, library))
         table_task = group.create_task(run_tables(question, library_id, library))
     batches = text_task.result()
-    results, tables = table_task.result()
+    results, tables, relevant = table_task.result()
     logger.info(
-        "channels text_batches=%d docs=%s | table_results=%d rows=%s",
+        "channels text_batches=%d docs=%s | table_results=%d rows=%s relevant_tables=%d",
         len(batches),
         sorted({batch.document_id for batch in batches}),
         len(results),
         [result.total for result in results],
+        len(relevant),
     )
-    channel = _table_channel(results, tables)
+    channel = _table_channel(results, tables, relevant)
     rendered = channel.blocks
     table_tokens = sum(count_tokens(block) for block in rendered)
     passages = await render_text(question, batches, max(SYNTH_BUDGET - table_tokens, 0))

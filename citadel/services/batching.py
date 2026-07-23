@@ -67,11 +67,13 @@ async def assign_block_ordinals(session: AsyncSession, doc_id: int) -> None:
 
 
 def _table_text(table: Table) -> str:
+    # the row count leads, and the rows are declared a SAMPLE. without that a reader sees three rows and no statement of
+    # size, and the only available reading is that the table HAS three rows — measured: answers claiming a 834-row sheet
+    # "displays 3 rows". how big the table is cannot be inferred from an excerpt, so it is stated
     headers = [str(column.get("header") or "") for column in table.columns]
-    lines = [" | ".join(headers)]
-    lines.extend(
-        " | ".join("" if value is None else str(value) for value in row) for row in table.sample_rows[:SAMPLE_ROWS]
-    )
+    shown = table.sample_rows[:SAMPLE_ROWS]
+    lines = [f"table with {table.n_rows} rows, {len(shown)} shown as a sample:", " | ".join(headers)]
+    lines.extend(" | ".join("" if value is None else str(value) for value in row) for row in shown)
     return "\n".join(lines)
 
 

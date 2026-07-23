@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from citadel.prompts import load_prompt
+from citadel.schemas.query import QueryPlan
 from citadel.services.slm import collect, collect_reply, emit, submit
 from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL
 
@@ -212,8 +213,11 @@ async def merge_evidence(query: str, items: list[str]) -> str:
 
 _QUERIES_SCHEMA = {
     "type": "object",
-    "properties": {"queries": {"type": "array", "items": {"type": "string"}}},
-    "required": ["queries"],
+    "properties": {
+        "queries": {"type": "array", "items": {"type": "string"}},
+        "tables": {"type": "array", "items": {"type": "integer"}},
+    },
+    "required": ["queries", "tables"],
 }
 
 
@@ -245,19 +249,27 @@ async def collect_select(job_id: str, count: int) -> list[int]:
     return _select_indices(await collect_slm(job_id), count)
 
 
-async def write_queries(query: str, tables: list[str], library: str = "") -> list[str]:
+async def write_queries(query: str, tables: list[str], library: str = "") -> QueryPlan:
     if not tables:
-        return []
+        return QueryPlan()
     listing = "\n\n".join(tables)
     prompt = f"{load_prompt('text_to_sql')}\nlibrary: {library}\nquestion: {query}\ntables:\n{listing}"
     data = await call_slm(prompt, _QUERIES_SCHEMA, interactive=True)
     queries = [str(sql) for sql in data.get("queries", []) if str(sql).strip()]
-    logger.info("write_queries tables=%d prompt_tokens=%d queries=%d", len(tables), count_tokens(prompt), len(queries))
-    for query in queries:
-        logger.info("  sql: %s", query)
-    if not queries:  # zero SQL on a tabular question is a failure worth seeing the raw answer for
+    marked = [index for index in data.get("tables", []) if isinstance(index, int) and 0 <= index < len(tables)]
+    plan = QueryPlan(queries=queries, tables=marked)
+    logger.info(
+        "write_queries tables=%d prompt_tokens=%d queries=%d marked=%s",
+        len(tables),
+        count_tokens(prompt),
+        len(queries),
+        marked,
+    )
+    for sql in queries:
+        logger.info("  sql: %s", sql)
+    if not queries and not marked:  # nothing named and nothing asked is a real miss on a tabular question
         logger.warning("write_queries returned nothing raw=%s", data)
-    return queries
+    return plan
 
 
 async def synthesize(query: str, passages: list[str], results: list[str]) -> AsyncIterator[str]:
