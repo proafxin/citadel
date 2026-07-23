@@ -253,6 +253,24 @@ def _sources(tables: list[TableCand], refs: list[int]) -> list[str]:
     return list(dict.fromkeys(_table_label(tables[index]) for index in refs))
 
 
+def _catalog_sources(columns: list[str], rows: list[list]) -> list[str]:
+    # a catalog query names no tN view, so it has no refs to source from — but its RESULT rows carry the `file` (and,
+    # when present, `sheet`) of the tables it picked out. those are the real subject of the answer ("the largest is
+    # sales_test.csv"), so the label is built from them rather than left as an anonymous "computed result"
+    if "file" not in columns:
+        return []
+    file_at = columns.index("file")
+    sheet_at = columns.index("sheet") if "sheet" in columns else None
+    labels: list[str] = []
+    for row in rows:
+        name = row[file_at]
+        if name is None:
+            continue
+        sheet = str(row[sheet_at]) if sheet_at is not None and row[sheet_at] else ""
+        labels.append(f"{name} ({sheet})" if sheet else str(name))
+    return list(dict.fromkeys(labels))
+
+
 async def _run_sql(session: AsyncSession, tables: list[TableCand], sql: str) -> tuple[list[str], list[list]]:
     cte = _cte(tables)
     await session.execute(text("SET TRANSACTION READ ONLY"))
@@ -274,7 +292,7 @@ async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
         logger.warning("sql failed sql=%s\n%s", sql, traceback.format_exc())
         return None
     refs = _refs(tables, sql)
-    sources = _sources(tables, refs)
+    sources = _sources(tables, refs) or _catalog_sources(columns, rows)
     logger.info("resolve sources=%s rows=%d sql=%s", sources, len(rows), sql)
     return SqlResult(
         ", ".join(sources) or "computed result", columns, rows, len(rows), refs, _readable_sql(tables, sql)
