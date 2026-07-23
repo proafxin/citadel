@@ -34,6 +34,7 @@ from citadel.services.retrieval import (
     load_all_tables,
     load_block_texts,
     load_library_batches,
+    load_library_name,
     scope_block_ids,
 )
 
@@ -56,7 +57,10 @@ SYNTH_BUDGET = SYNTH_CTX - SYNTH_MAX_TOKENS - 2048
 MERGE_INPUT_BUDGET = STRUCT_MAX_TOKENS // 2  # a merge call must fit its summary in STRUCT_MAX_TOKENS; keep input under
 # half that so even near-lossless (barely-compressed) output cannot overrun the cap and truncate the JSON
 SCHEMA_SAMPLES = 3
-CATALOG = "tcat"  # the relation describing the tables themselves, queryable alongside the t0..tn content views
+# what the table descriptions (file, row count, schema) may take of the synthesis budget. they are attached for every
+# table, not just the queried ones, so the answer always knows what data exists — but they are DESCRIPTIONS, and must
+# never crowd out the rows themselves or the passages, hence a bounded share rather than the whole remainder
+TABLE_REP_BUDGET = 8192
 SQL_ROW_CAP = 10_000  # hard ceiling on rows any generated query may return, so a broad SELECT can't pull a whole table
 _PG = postgresql.dialect()
 _REL_REF = re.compile(r"\b(?:from|join)\s+(\"?[A-Za-z_][A-Za-z0-9_$]*\"?)", re.IGNORECASE)
@@ -104,6 +108,7 @@ class SqlResult:
     columns: list[str]
     rows: list[list]
     total: int
+    refs: list[int]  # the table indices this query read, so its source tables can be shown alongside the rows
 
 
 def _safe_sql(sql: str) -> bool:
@@ -111,10 +116,9 @@ def _safe_sql(sql: str) -> bool:
 
 
 def _references_only_views(sql: str, n_tables: int) -> bool:
-    # every FROM/JOIN in the generated SQL (subqueries included) must target one of our per-request t0..tn views or the
-    # catalog — never a base table (content, table_rows, documents, pg_*), so a prompt-injected query can't read
-    # another library's data
-    allowed = {f"t{index}" for index in range(n_tables)} | {CATALOG}
+    # every FROM/JOIN in the generated SQL (subqueries included) must target one of our per-request t0..tn views — never
+    # a base table (content, table_rows, documents, pg_*), so a prompt-injected query can't read another library's data
+    allowed = {f"t{index}" for index in range(n_tables)}
     refs = [match.group(1).strip('"').lower() for match in _REL_REF.finditer(sql)]
     return bool(refs) and all(ref in allowed for ref in refs)
 
@@ -147,65 +151,68 @@ def _schema(columns: list[dict], sample_rows: list[list]) -> str:
     return "\n".join(lines)
 
 
-def _table_rep(table: TableCand) -> str:
-    meta = table.metadata
-    head = " | ".join(f"{key}: {meta[key]}" for key in ("title", "caption", "sheet") if meta.get(key))
-    header = table.filename + (f" ({head})" if head else "")
-    return f"{header}\n{_schema(table.columns, table.sample_rows)}"
-
-
 def _schema_block(index: int, table: TableCand) -> str:
-    return f"t{index} ({table.filename}) rows={table.n_rows}\n{_schema(table.columns, table.sample_rows)}"
+    return f"t{index} ({_table_label(table)}) rows={table.n_rows}\n{_schema(table.columns, table.sample_rows)}"
 
 
-def _sql_literal(value: str) -> str:
-    return "'" + str(value).replace("'", "''") + "'"
+def _table_locator(table: TableCand) -> str:
+    # a table is located by whatever its source actually has: a spreadsheet by sheet, a table inside a document by page,
+    # a plain tabular file by nothing — the file IS the table. this is the same granularity the answer cites at
+    sheet = table.metadata.get("sheet")
+    if sheet:
+        return str(sheet)
+    return f"p{table.page_no}" if table.page_no is not None else ""
 
 
-def _catalog_cte(tables: list[TableCand]) -> str:
-    # the tables ABOUT the tables. every row count and filename is already in the model's prompt, but a question about
-    # the corpus ("which file has the most rows") has no legal way to be computed without a relation to query — the
-    # model's only alternative is to inline the numbers as literals, which the view guard must reject
-    rows = ", ".join(
-        "({}, {}, {}, {}, {})".format(
-            _sql_literal(f"t{index}"),
-            _sql_literal(table.filename),
-            _sql_literal(str(table.metadata.get("sheet") or "")),
-            table.n_rows,
-            len(table.columns),
-        )
-        for index, table in enumerate(tables)
-    )
-    return (
-        f"{CATALOG} AS (SELECT * FROM (VALUES {rows}) "
-        f"AS _c(table_label, filename, sheet, n_rows, n_columns))"
-    )
+def _table_label(table: TableCand) -> str:
+    # the ONE name a table answers to, on both its description and any result computed from it. it is built from real
+    # source identity rather than the per-request t0..tn labels, because the answer cites these labels back and a
+    # request-local index means nothing to a reader. it stays file + locator and nothing else: a label is parsed back
+    # out of the answer to check citations, so anything with a comma in it would break that read
+    locator = _table_locator(table)
+    return f"{table.filename} ({locator})" if locator else table.filename
 
 
-def _catalog_block(tables: list[TableCand]) -> str:
-    return (
-        f"{CATALOG} (catalog: one row per table listed above) rows={len(tables)}\n"
-        "table_label (string)  e.g. t0, t1\n"
-        "filename (string)  the file the table came from\n"
-        "sheet (string)  the sheet or region, empty when not a spreadsheet\n"
-        "n_rows (integer)  the table's data row count\n"
-        "n_columns (integer)  the table's column count\n"
-        "note: this table's columns are named, not c0..cN. use it to answer questions ABOUT the tables "
-        "(how many rows, which file is largest, how many tables) rather than about their contents."
-    )
+def _table_render(table: TableCand) -> str:
+    # a table's own description — what it is, how big, what its columns hold. attached as evidence independently of what
+    # SQL was written, so the corpus's shape is always visible: a question the queries answered only partly, or missed,
+    # can still be answered from the tables themselves rather than from nothing
+    meta = table.metadata
+    named = " | ".join(str(meta[key]) for key in ("title", "caption") if meta.get(key))
+    head = f"[{_table_label(table)}] rows={table.n_rows}"
+    return f"{head}{' ' + named if named else ''}\n{_schema(table.columns, table.sample_rows)}"
+
+
+def _table_order(tables: list[TableCand], results: list[SqlResult]) -> list[int]:
+    # tables a query actually read come first — those are the ones whose rows are in evidence and need describing. the
+    # rest follow in corpus order and are included while the budget allows
+    used = list(dict.fromkeys(index for result in results for index in result.refs))
+    return used + [index for index in range(len(tables)) if index not in set(used)]
+
+
+def _fit_tables(tables: list[TableCand], results: list[SqlResult], budget: int) -> list[str]:
+    blocks: list[str] = []
+    used = 0
+    for index in _table_order(tables, results):
+        block = _table_render(tables[index])
+        cost = count_tokens(block) + 1
+        if used + cost > budget:
+            continue
+        blocks.append(block)
+        used += cost
+    return blocks
 
 
 def _cte(tables: list[TableCand]) -> str:
-    views = list(starmap(_view_cte, enumerate(tables)))
-    return "WITH " + ", ".join([*views, _catalog_cte(tables)])
+    return "WITH " + ", ".join(starmap(_view_cte, enumerate(tables)))
 
 
-def _sources(tables: list[TableCand], sql: str) -> list[str]:
-    used = sorted({int(match) for match in _TABLE_REF.findall(sql)})
-    names = list(dict.fromkeys(tables[index].filename for index in used if index < len(tables)))
-    if not names and CATALOG in sql.lower():  # a catalog-only query is about the corpus, not one file
-        return sorted({table.filename for table in tables})
-    return names
+def _refs(tables: list[TableCand], sql: str) -> list[int]:
+    return sorted({index for match in _TABLE_REF.findall(sql) if (index := int(match)) < len(tables)})
+
+
+def _sources(tables: list[TableCand], refs: list[int]) -> list[str]:
+    return list(dict.fromkeys(_table_label(tables[index]) for index in refs))
 
 
 async def _run_sql(session: AsyncSession, tables: list[TableCand], sql: str) -> tuple[list[str], list[list]]:
@@ -228,14 +235,15 @@ async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
     except SQLAlchemyError:
         logger.warning("sql failed sql=%s\n%s", sql, traceback.format_exc())
         return None
-    sources = _sources(tables, sql)
+    refs = _refs(tables, sql)
+    sources = _sources(tables, refs)
     logger.info("resolve sources=%s rows=%d sql=%s", sources, len(rows), sql)
-    return SqlResult(", ".join(sources) or "computed result", columns, rows, len(rows))
+    return SqlResult(", ".join(sources) or "computed result", columns, rows, len(rows), refs)
 
 
-async def _aggregate(question: str, tables: list[TableCand]) -> list[SqlResult]:
-    blocks = [*starmap(_schema_block, enumerate(tables)), _catalog_block(tables)]
-    sqls = await write_queries(question, blocks) if tables else []
+async def _aggregate(question: str, tables: list[TableCand], library: str = "") -> list[SqlResult]:
+    blocks = list(starmap(_schema_block, enumerate(tables)))
+    sqls = await write_queries(question, blocks, library) if tables else []
     logger.info("aggregate tables=%d sqls=%d", len(tables), len(sqls))
     results: list[SqlResult] = []
     for sql in sqls:
@@ -275,7 +283,26 @@ def _fit_results(results: list[SqlResult], budget: int) -> list[SqlResult]:
             used += cost
             pointer[index] += 1
             added = True
-    return [SqlResult(r.label, r.columns, kept[index], r.total) for index, r in enumerate(results) if kept[index]]
+    return [SqlResult(r.label, r.columns, kept[i], r.total, r.refs) for i, r in enumerate(results) if kept[i]]
+
+
+@dataclass
+class _TableChannel:
+    blocks: list[str]
+    fitted: list[SqlResult]
+    described: int
+
+
+def _table_channel(results: list[SqlResult], tables: list[TableCand]) -> _TableChannel:
+    # the table channel's whole evidence: every table's description, then the rows the queries computed. rows are fitted
+    # first because they are the exact answer and must not lose ground to a description, and the descriptions are then
+    # laid in ahead of them — what a table IS has to be readable before what was pulled out of it, and both carry the
+    # same label, so a result and its source table are one name in one place
+    fitted = _fit_results(results, SYNTH_BUDGET - TABLE_REP_BUDGET)
+    result_blocks = [_result_render(result) for result in fitted]
+    spent = sum(count_tokens(block) for block in result_blocks)
+    describe = _fit_tables(tables, fitted, min(TABLE_REP_BUDGET, SYNTH_BUDGET - spent))
+    return _TableChannel([*describe, *result_blocks], fitted, len(describe))
 
 
 @dataclass
@@ -369,7 +396,7 @@ def _pack(counts: list[int], budget: int) -> list[list[int]]:
     return groups
 
 
-async def select_batches(question: str, library_id: int) -> list[BatchRef]:
+async def select_batches(question: str, library_id: int, library: str = "") -> list[BatchRef]:
     # the text channel: the SLM reads every batch summary in the library (split across calls only if they overflow one)
     # and returns the batches mandatory to answer, in relevance order. this is the whole scope-reduction for text
     batches = await load_library_batches(library_id)
@@ -378,7 +405,7 @@ async def select_batches(question: str, library_id: int) -> list[BatchRef]:
     items = [f"{batch.filename}\n{batch.summary}" for batch in batches]
     counts = await asyncio.to_thread(count_tokens_batch, items)
     packs = _pack(counts, SELECT_BUDGET)
-    jobs = [(pack, await emit_select(question, [items[i] for i in pack])) for pack in packs]
+    jobs = [(pack, await emit_select(question, [items[i] for i in pack], library)) for pack in packs]
     selected: list[BatchRef] = []
     for index, (pack, job_id) in enumerate(jobs):
         chosen = await collect_select(job_id, len(pack))
@@ -395,10 +422,12 @@ async def select_batches(question: str, library_id: int) -> list[BatchRef]:
     return selected
 
 
-async def run_tables(question: str, library_id: int) -> list[SqlResult]:
+async def run_tables(question: str, library_id: int, library: str) -> tuple[list[SqlResult], list[TableCand]]:
     # the table channel: the SLM sees every table's schema, samples, and ROW COUNT and writes the mandatory queries;
-    # relevance is constructive (a table matters iff a query names it), so there is no separate table filter
-    return await _aggregate(question, await load_all_tables(library_id))
+    # relevance is constructive (a table matters iff a query names it), so there is no separate table filter. the
+    # tables come back too — their metadata is ours to attach, never something to spend a query retrieving
+    tables = await load_all_tables(library_id)
+    return await _aggregate(question, tables, library), tables
 
 
 def _batch_cite(batch: BatchRef) -> str:
@@ -488,8 +517,9 @@ _CITE = re.compile(r"\[([^\]]+)\]")
 
 
 def _cite_file(label: str) -> str:
-    # strip the page span off a citation label so "sales.csv p3-p5" and "sales.csv" compare as the same source
-    return re.sub(r"\s+p\d.*$", "", label).strip()
+    # strip the locator off a citation label so "sales.csv p3-p5", "sales.xlsx (Sheet1)" and the bare filename all
+    # compare as the same source — the check is whether the FILE was in evidence, not which part of it
+    return re.sub(r"\s+p\d.*$", "", re.sub(r"\s*\([^)]*\)\s*$", "", label)).strip()
 
 
 def _evidence_files(passages: list[str], results: list[str]) -> set[str]:
@@ -505,14 +535,57 @@ def _evidence_files(passages: list[str], results: list[str]) -> set[str]:
     return files
 
 
+def _check_citations(response: str, evidence_files: set[str]) -> None:
+    # every citation in the answer must point at a document we actually gave the model. one that does not is a
+    # fabricated source — the clearest hallucination signal we can check automatically
+    cited = {_cite_file(label) for label in _CITE.findall(response)}
+    fabricated = sorted(cited - evidence_files)
+    if fabricated:
+        logger.error("HALLUCINATION cited sources not in evidence=%s | evidence=%s", fabricated, sorted(evidence_files))
+    logger.info("answer chars=%d cited_files=%d fabricated=%d", len(response), len(cited), len(fabricated))
+    logger.debug("answer:\n%s", response)
+
+
+def _log_evidence(
+    question: str,
+    started: float,
+    batches: list[BatchRef],
+    passages: list[str],
+    results: list[SqlResult],
+    tables: list[TableCand],
+    channel: _TableChannel,
+) -> None:
+    table_tokens = sum(count_tokens(block) for block in channel.blocks)
+    logger.info(
+        "query done %r batches=%d results=%d/%d described=%d/%d table_tokens=%d dropped_rows=%d "
+        "passages=%d synth_tokens=%d/%d %.1fs",
+        question[:80],
+        len(batches),
+        len(channel.fitted),
+        len(results),
+        channel.described,
+        len(tables),
+        table_tokens,
+        sum(r.total for r in results) - sum(len(r.rows) for r in channel.fitted),
+        len(passages),
+        table_tokens + sum(count_tokens(block) for block in passages),
+        SYNTH_BUDGET,
+        time.time() - started,
+    )
+    logger.debug(
+        "synthesis input\npassages:\n%s\n\ntable evidence:\n%s", "\n".join(passages), "\n".join(channel.blocks)
+    )
+
+
 async def answer(question: str, library_id: int) -> AsyncIterator[str]:
     started = time.time()
     logger.info("query start library=%d %r", library_id, question)
+    library = await load_library_name(library_id)
     async with asyncio.TaskGroup() as group:
-        text_task = group.create_task(select_batches(question, library_id))
-        table_task = group.create_task(run_tables(question, library_id))
+        text_task = group.create_task(select_batches(question, library_id, library))
+        table_task = group.create_task(run_tables(question, library_id, library))
     batches = text_task.result()
-    results = table_task.result()
+    results, tables = table_task.result()
     logger.info(
         "channels text_batches=%d docs=%s | table_results=%d rows=%s",
         len(batches),
@@ -520,39 +593,14 @@ async def answer(question: str, library_id: int) -> AsyncIterator[str]:
         len(results),
         [result.total for result in results],
     )
-    fitted_results = _fit_results(results, SYNTH_BUDGET)  # tables first: they are exact and minimal
-    rendered = [_result_render(result) for result in fitted_results]
+    channel = _table_channel(results, tables)
+    rendered = channel.blocks
     table_tokens = sum(count_tokens(block) for block in rendered)
-    dropped_rows = sum(r.total for r in results) - sum(len(r.rows) for r in fitted_results)
-    text_budget = max(SYNTH_BUDGET - table_tokens, 0)
-    passages = await render_text(question, batches, text_budget)
-    synth_tokens = table_tokens + sum(count_tokens(block) for block in passages)
+    passages = await render_text(question, batches, max(SYNTH_BUDGET - table_tokens, 0))
     evidence_files = _evidence_files(passages, rendered)
-    logger.info(
-        "query done %r batches=%d results=%d/%d table_tokens=%d dropped_rows=%d passages=%d synth_tokens=%d/%d %.1fs",
-        question[:80],
-        len(batches),
-        len(fitted_results),
-        len(results),
-        table_tokens,
-        dropped_rows,
-        len(passages),
-        synth_tokens,
-        SYNTH_BUDGET,
-        time.time() - started,
-    )
-    logger.info("evidence files=%s", sorted(evidence_files))
-    logger.debug("synthesis input\npassages:\n%s\n\ntable results:\n%s", "\n".join(passages), "\n".join(rendered))
+    _log_evidence(question, started, batches, passages, results, tables, channel)
     parts: list[str] = []
     async for token in synthesize(question, passages, rendered):
         parts.append(token)
         yield token
-    # every citation in the answer must point at a document we actually gave the model. one that does not is a
-    # fabricated source — the clearest hallucination signal we can check automatically
-    response = "".join(parts)
-    cited = {_cite_file(label) for label in _CITE.findall(response)}
-    fabricated = sorted(cited - evidence_files)
-    if fabricated:
-        logger.error("HALLUCINATION cited sources not in evidence=%s | evidence=%s", fabricated, sorted(evidence_files))
-    logger.info("answer chars=%d cited_files=%d fabricated=%d", len(response), len(cited), len(fabricated))
-    logger.debug("answer:\n%s", response)
+    _check_citations("".join(parts), evidence_files)

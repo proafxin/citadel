@@ -118,6 +118,8 @@ class TableCand:
     metadata: dict
     sample_rows: list[list]
     header_rows: list[int]  # row_idx values in table_rows that are header, not data — the query projection skips them
+    page_no: int | None  # where a table inside a document sits. a spreadsheet locates by sheet instead, a csv by
+    # nothing at all — the file is the table — so this is the document-only half of a table's identity
 
 
 @dataclass
@@ -283,7 +285,7 @@ async def pending_libraries() -> list[int]:
         )
 
 
-def _table_cand(table: Table, filename: str) -> TableCand:
+def _table_cand(table: Table, filename: str, page_no: int | None) -> TableCand:
     return TableCand(
         table.content_id,
         table.id,
@@ -293,6 +295,7 @@ def _table_cand(table: Table, filename: str) -> TableCand:
         table.table_metadata,
         table.sample_rows,
         (table.anchors or {}).get("header_rows", []),
+        page_no,
     )
 
 
@@ -302,8 +305,9 @@ async def load_all_tables(library_id: int) -> list[TableCand]:
     async with get_sessionmaker()() as session:
         rows = list(
             await session.execute(
-                select(Table, Document.filename)
+                select(Table, Document.filename, ContentNode.page_no)
                 .join(Document, Table.document_id == Document.id)
+                .join(ContentNode, Table.content_id == ContentNode.id)
                 .where(Document.library_id == library_id)
                 .order_by(Table.id)
             )
@@ -416,6 +420,11 @@ class BatchRef:
     start_page_no: int | None
     end_page_no: int | None
     content_tokens: int
+
+
+async def load_library_name(library_id: int) -> str:
+    async with get_sessionmaker()() as session:
+        return await session.scalar(select(Library.name).where(Library.id == library_id)) or ""
 
 
 async def load_library_batches(library_id: int) -> list[BatchRef]:

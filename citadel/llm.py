@@ -224,9 +224,9 @@ _BATCH_SELECT_SCHEMA = {
 }
 
 
-def _select_prompt(query: str, items: list[str]) -> str:
+def _select_prompt(query: str, items: list[str], library: str) -> str:
     listing = "\n\n".join(f"[{index}] {item}" for index, item in enumerate(items))
-    return f"{load_prompt('batch_select')}\nquestion: {query}\nsections:\n{listing}"
+    return f"{load_prompt('batch_select')}\nlibrary: {library}\nquestion: {query}\nsections:\n{listing}"
 
 
 def _select_indices(data: dict, count: int) -> list[int]:
@@ -237,19 +237,19 @@ def _select_indices(data: dict, count: int) -> list[int]:
     return seen
 
 
-async def emit_select(query: str, items: list[str]) -> str:
-    return await emit_slm(_select_prompt(query, items), _BATCH_SELECT_SCHEMA, interactive=True)
+async def emit_select(query: str, items: list[str], library: str = "") -> str:
+    return await emit_slm(_select_prompt(query, items, library), _BATCH_SELECT_SCHEMA, interactive=True)
 
 
 async def collect_select(job_id: str, count: int) -> list[int]:
     return _select_indices(await collect_slm(job_id), count)
 
 
-async def write_queries(query: str, tables: list[str]) -> list[str]:
+async def write_queries(query: str, tables: list[str], library: str = "") -> list[str]:
     if not tables:
         return []
     listing = "\n\n".join(tables)
-    prompt = f"{load_prompt('text_to_sql')}\nquestion: {query}\ntables:\n{listing}"
+    prompt = f"{load_prompt('text_to_sql')}\nlibrary: {library}\nquestion: {query}\ntables:\n{listing}"
     data = await call_slm(prompt, _QUERIES_SCHEMA, interactive=True)
     queries = [str(sql) for sql in data.get("queries", []) if str(sql).strip()]
     logger.info("write_queries tables=%d prompt_tokens=%d queries=%d", len(tables), count_tokens(prompt), len(queries))
