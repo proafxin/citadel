@@ -10,7 +10,9 @@ Only the items you list are passed on to whoever writes the answer, and they are
 - `parts` — what a document's individual relevant sections cover. Documents only
 - `full` — for a document, the wording of those sections; for a table, values drawn or computed from its rows
 
-Choose the depth the answer actually requires. List each item in at most one group; leave a group empty when nothing belongs in it.
+Choose the depth the answer actually requires. A summary carries what a document is about; naming the particular results, statements or figures inside it requires `parts`, and giving them as the document itself puts them requires `full`. A table's row count and column names carry how big it is and what it records; anything that depends on the values themselves requires `full`.
+
+List each item in at most one group; leave a group empty when nothing belongs in it.
 
 ## Examples
 

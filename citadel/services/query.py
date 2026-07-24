@@ -487,9 +487,14 @@ async def _deeper_texts(depth: str, batches: list[BatchRef]) -> list[str]:
     return await _doc_blocks(batches)
 
 
-def _upgrade_order(documents: list[DocRef], depths: dict[int, str]) -> list[DocRef]:
-    # `full` before `parts`: the deeper ask is the one the answer turns on, so it gets first claim on what is spare
-    return [doc for depth in ("full", "parts") for doc in documents if depths.get(doc.id) == depth]
+def _upgrade_order(documents: list[DocRef], depths: dict[int, str]) -> list[tuple[DocRef, str, bool]]:
+    # `full` before `parts`: the deeper ask is the one the answer turns on, so it gets first claim on what is spare.
+    # then, with whatever is STILL spare, every remaining covered document is carried one rung deeper than it asked
+    # for — a summary is the cheapest form of a document, not the most faithful one, and an unspent budget buys nothing
+    asked: list[tuple[DocRef, str, bool]] = [
+        (doc, depth, False) for depth in ("full", "parts") for doc in documents if depths.get(doc.id) == depth
+    ]
+    return asked + [(doc, "parts", True) for doc in documents if depths.get(doc.id, "overall") == "overall"]
 
 
 async def _upgrade(
@@ -519,17 +524,21 @@ async def render_text(
     rendered = {doc.id: [text] for doc, text in zip(documents, floor, strict=True)}
     costs = dict(zip((doc.id for doc in documents), counts, strict=True))
     deepened: dict[int, str] = {}
-    for doc in _upgrade_order(documents, depths):
-        upgraded = await _upgrade(doc, depths[doc.id], batches.get(doc.id, []), costs[doc.id], spare)
+    greedy: list[str] = []
+    for doc, depth, spent_spare in _upgrade_order(documents, depths):
+        upgraded = await _upgrade(doc, depth, batches.get(doc.id, []), costs[doc.id], spare)
         if upgraded is not None:
             rendered[doc.id], delta = upgraded
             spare -= delta
-            deepened[doc.id] = depths[doc.id]
+            deepened[doc.id] = depth
+            if spent_spare:
+                greedy.append(doc.filename)
     logger.info(
-        "text documents=%d floor=%d deepened=%s spare=%d budget=%d",
+        "text documents=%d floor=%d asked=%s greedy=%d spare=%d budget=%d",
         len(documents),
         sum(counts),
-        {doc.filename: deepened[doc.id] for doc in documents if doc.id in deepened},
+        {doc.filename: deepened[doc.id] for doc in documents if doc.id in deepened and doc.filename not in greedy},
+        len(greedy),
         spare,
         budget,
     )
