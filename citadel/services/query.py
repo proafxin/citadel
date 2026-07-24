@@ -19,11 +19,10 @@ from citadel.db import get_sessionmaker
 from citadel.llm import (
     STRUCT_MAX_TOKENS,
     SYNTH_MAX_TOKENS,
-    collect_select,
     count_tokens,
     count_tokens_batch,
-    emit_select,
     merge_evidence,
+    resolve_query,
     synthesize,
     write_queries,
 )
@@ -31,10 +30,12 @@ from citadel.models.table import TableRow
 from citadel.schemas.query import QueryPlan
 from citadel.services.retrieval import (
     BatchRef,
+    DocRef,
     TableCand,
     load_all_tables,
     load_block_texts,
     load_library_batches,
+    load_library_documents,
     load_library_name,
     scope_block_ids,
 )
@@ -42,11 +43,6 @@ from citadel.services.retrieval import (
 logger = logging.getLogger(__name__)
 
 STATEMENT_TIMEOUT_MS = 3000
-
-# SELECT_BUDGET caps how many batch summaries go into ONE selection call. the summaries are read whichever way they
-# split, so total prefill is identical — batch size only trades round-trips against a longer single prompt.
-SELECT_CTX = 32768
-SELECT_BUDGET = SELECT_CTX - STRUCT_MAX_TOKENS - 2048
 
 # SYNTHESIS is ONE call, at the end, and its input budget is exactly what decides how much of the evidence reaches the
 # answer — the difference between an answer the corpus supports and a thinner one. a single request can afford the whole
@@ -58,13 +54,7 @@ SYNTH_BUDGET = SYNTH_CTX - SYNTH_MAX_TOKENS - 2048
 MERGE_INPUT_BUDGET = STRUCT_MAX_TOKENS // 2  # a merge call must fit its summary in STRUCT_MAX_TOKENS; keep input under
 # half that so even near-lossless (barely-compressed) output cannot overrun the cap and truncate the JSON
 SCHEMA_SAMPLES = 3
-# what the table descriptions (file, row count, schema) may take of the synthesis budget. they are attached for every
-# table, not just the queried ones, so the answer always knows what data exists — but they are DESCRIPTIONS, and must
-# never crowd out the rows themselves or the passages, hence a bounded share rather than the whole remainder
-TABLE_REP_BUDGET = 8192
-SQL_ROW_CAP = 10_000  # hard ceiling on rows any generated query may return, so a broad SELECT can't pull a whole table
 _PG = postgresql.dialect()
-_REL_REF = re.compile(r"\b(?:from|join)\s+(\"?[A-Za-z_][A-Za-z0-9_$]*\"?)", re.IGNORECASE)
 _DTYPE_SA: dict[str, type[TypeEngine[Any]]] = {
     "integer": BigInteger,
     "float": DOUBLE_PRECISION,
@@ -114,19 +104,6 @@ class SqlResult:
     query: str  # the executed query, column refs rewritten to header names — the result's provenance. a lone value
     # under a model-chosen alias (measured: SUM filtered to two conditions, aliased `total_sales`) reads as a grand
     # total; the query states what was actually computed, so a filtered figure can never be mistaken for the whole
-
-
-def _safe_sql(sql: str) -> bool:
-    return sql.strip().lower().startswith("select")
-
-
-def _references_only_views(sql: str, n_tables: int) -> bool:
-    # every FROM/JOIN in the generated SQL (subqueries included) must target one of our per-request t0..tn views or the
-    # catalog relation — never a base table (content, table_rows, documents, pg_*), so a prompt-injected query can't
-    # read another library's data
-    allowed = {"catalog"} | {f"t{index}" for index in range(n_tables)}
-    refs = [match.group(1).strip('"').lower() for match in _REL_REF.finditer(sql)]
-    return bool(refs) and all(ref in allowed for ref in refs)
 
 
 def _view_select(table: TableCand) -> Select[Any]:
@@ -191,44 +168,8 @@ def _table_render(table: TableCand) -> str:
     return f"{head} {' | '.join(described)}" if described else head
 
 
-def _fit_tables(tables: list[TableCand], relevant: list[int], budget: int) -> list[str]:
-    # ONLY the tables named relevant for this question. the query-writing call already saw every table in the library —
-    # that is how relevance gets decided at all — so by now it is decided, and describing the rest would pay a second
-    # time for tables that bear on nothing
-    blocks: list[str] = []
-    spent = 0
-    for index in relevant:
-        block = _table_render(tables[index])
-        cost = count_tokens(block) + 1
-        if spent + cost > budget:
-            continue
-        blocks.append(block)
-        spent += cost
-    return blocks
-
-
-def _sql_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-_CATALOG_SQL = "catalog AS (SELECT * FROM (VALUES %s) AS _cat(file, sheet, row_count))"
-
-
-def _catalog_cte(tables: list[TableCand]) -> str:
-    # the corpus's own shape as a QUERYABLE relation: one row per table, holding what a question about the tables
-    # themselves needs — which file and sheet, and how many rows. a ranking or count over the tables ("which is
-    # largest", "how many rows does X have", "how many tables") is then a real SELECT, not the model eyeballing a list
-    # of row counts across a hundred descriptions. built here from the loaded tables — filenames and integer counts we
-    # hold, never model input — with every string quote-escaped, so it carries no injection surface
-    values = ", ".join(
-        f"({_sql_literal(table.filename)}, {_sql_literal(str(table.metadata.get('sheet') or ''))}, {table.n_rows})"
-        for table in tables
-    )
-    return _CATALOG_SQL % values
-
-
 def _cte(tables: list[TableCand]) -> str:
-    return "WITH " + ", ".join([_catalog_cte(tables), *starmap(_view_cte, enumerate(tables))])
+    return "WITH " + ", ".join(starmap(_view_cte, enumerate(tables)))
 
 
 def _refs(tables: list[TableCand], sql: str) -> list[int]:
@@ -253,10 +194,10 @@ def _sources(tables: list[TableCand], refs: list[int]) -> list[str]:
     return list(dict.fromkeys(_table_label(tables[index]) for index in refs))
 
 
-def _catalog_sources(columns: list[str], rows: list[list]) -> list[str]:
-    # a catalog query names no tN view, so it has no refs to source from — but its RESULT rows carry the `file` (and,
-    # when present, `sheet`) of the tables it picked out. those are the real subject of the answer ("the largest is
-    # sales_test.csv"), so the label is built from them rather than left as an anonymous "computed result"
+def _row_file_sources(columns: list[str], rows: list[list]) -> list[str]:
+    # a query that names no tN view has no refs to source from — but when its RESULT rows carry a `file` (and, when
+    # present, `sheet`), those are the real subject of the answer ("the largest is sales_test.csv"), so the label is
+    # built from them rather than left as an anonymous "computed result"
     if "file" not in columns:
         return []
     file_at = columns.index("file")
@@ -276,13 +217,12 @@ def _all_files(tables: list[TableCand]) -> list[str]:
 
 
 def _result_sources(tables: list[TableCand], refs: list[int], columns: list[str], rows: list[list]) -> list[str]:
-    # what the result traces back to. a tN query sources from the tables it read. a catalog query has no tN refs (the
-    # guard guarantees empty refs ⟹ it read the catalog), so its origin is either the files its rows name, or — when it
-    # aggregates without naming any (how many tables, total rows across all) — every file the catalog was built from. a
-    # computed figure is never left origin-less
+    # what the result traces back to. a tN query sources from the tables it read. a query that reads no tN takes its
+    # origin from the files its rows name, or — when it names none — every file this request was built from. a computed
+    # figure is never left origin-less
     if refs:
         return _sources(tables, refs)
-    return _catalog_sources(columns, rows) or _all_files(tables)
+    return _row_file_sources(columns, rows) or _all_files(tables)
 
 
 async def _run_sql(session: AsyncSession, tables: list[TableCand], sql: str) -> tuple[list[str], list[list]]:
@@ -290,15 +230,12 @@ async def _run_sql(session: AsyncSession, tables: list[TableCand], sql: str) -> 
     await session.execute(text("SET TRANSACTION READ ONLY"))
     await session.execute(text("SELECT set_config('statement_timeout', :ms, true)"), {"ms": str(STATEMENT_TIMEOUT_MS)})
     connection = await session.connection()
-    result = await connection.exec_driver_sql(f"{cte} SELECT * FROM ({sql}) AS _capped LIMIT {SQL_ROW_CAP}")
+    result = await connection.exec_driver_sql(f"{cte} {sql}")
     return list(result.keys()), [list(row) for row in result.fetchall()]
 
 
 async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
     sql = sql.strip().rstrip(";").strip()
-    if not _safe_sql(sql) or not _references_only_views(sql, len(tables)):
-        logger.warning("sql rejected (not a safe view-only SELECT) sql=%s", sql)
-        return None
     try:
         async with get_sessionmaker()() as session, session.begin():
             columns, rows = await _run_sql(session, tables, sql)
@@ -313,7 +250,7 @@ async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
     )
 
 
-async def _aggregate(question: str, tables: list[TableCand], library: str = "") -> tuple[list[SqlResult], list[int]]:
+async def _aggregate(question: str, tables: list[TableCand], library: str = "") -> list[SqlResult]:
     blocks = list(starmap(_schema_block, enumerate(tables)))
     plan = await write_queries(question, blocks, library) if tables else QueryPlan()
     results: list[SqlResult] = []
@@ -321,13 +258,8 @@ async def _aggregate(question: str, tables: list[TableCand], library: str = "") 
         resolved = await _execute(tables, sql)
         if resolved is not None:
             results.append(resolved)
-    # a table is described if it was NAMED relevant or if a query actually read it. the union matters: a query can name
-    # a table the model forgot to mark, and a rejected or failed query must not take its table's metadata down with it
-    relevant = list(dict.fromkeys([*plan.tables, *(index for result in results for index in result.refs)]))
-    logger.info(
-        "aggregate tables=%d sqls=%d ran=%d relevant=%s", len(tables), len(plan.queries), len(results), relevant
-    )
-    return results, relevant
+    logger.info("aggregate tables=%d sqls=%d ran=%d", len(tables), len(plan.queries), len(results))
+    return results
 
 
 def _row_text(row: list) -> str:
@@ -375,16 +307,12 @@ class _TableChannel:
     described: int
 
 
-def _table_channel(results: list[SqlResult], tables: list[TableCand], relevant: list[int]) -> _TableChannel:
-    # the table channel's whole evidence: the relevant tables' descriptions, then the rows the queries computed. rows
-    # are fitted first because they are the exact answer and must not lose ground to a description, and the descriptions
-    # are then laid in ahead of them — what a table IS has to be readable before what was pulled out of it, and both
-    # carry the same label, so a result and its source table are one name in one place
-    fitted = _fit_results(results, SYNTH_BUDGET - TABLE_REP_BUDGET)
-    result_blocks = [_result_render(result) for result in fitted]
-    spent = sum(count_tokens(block) for block in result_blocks)
-    describe = _fit_tables(tables, relevant, min(TABLE_REP_BUDGET, SYNTH_BUDGET - spent))
-    return _TableChannel([*describe, *result_blocks], fitted, len(describe))
+def _table_channel(results: list[SqlResult], describe: list[str], rows_budget: int) -> _TableChannel:
+    # every covered table is described — that is the floor, and it is laid in FIRST, so a table can never lose its place
+    # in the answer to another table's rows. computed rows are then fitted into what the whole floor left, both this
+    # channel's and the text channel's: rows are an answer, and an answer may not crowd out what must be accounted for
+    fitted = _fit_results(results, rows_budget)
+    return _TableChannel([*describe, *(_result_render(result) for result in fitted)], fitted, len(describe))
 
 
 @dataclass
@@ -463,58 +391,54 @@ async def _reduce(question: str, evidences: list[_Evidence], budget: int, level:
     return await _reduce(question, combined, budget, level + 1)
 
 
-def _pack(counts: list[int], budget: int) -> list[list[int]]:
-    groups: list[list[int]] = []
-    current: list[int] = []
-    used = 0
-    for index, cost in enumerate(counts):
-        if current and used + cost > budget:
-            groups.append(current)
-            current, used = [], 0
-        current.append(index)
-        used += cost
-    if current:
-        groups.append(current)
-    return groups
+def _doc_item(doc: DocRef) -> str:
+    return f"document — {doc.filename}: {doc.summary}"
 
 
-async def select_batches(question: str, library_id: int, library: str = "") -> list[BatchRef]:
-    # the text channel: the SLM reads every batch summary in the library (split across calls only if they overflow one)
-    # and returns the batches mandatory to answer, in relevance order. this is the whole scope-reduction for text
-    batches = await load_library_batches(library_id)
-    if not batches:
+def _table_item(table: TableCand) -> str:
+    # a table's identity, and nothing that would take its width: where it sits, what it is called, what its columns are
+    # named. no dtypes, no sample values, no row count — this view exists to decide whether the table bears on the
+    # question at all, and the full schema is bought later for the few that do
+    locator = _table_locator(table)
+    named = [str(table.metadata[key]) for key in ("title", "caption") if table.metadata.get(key)]
+    columns = ", ".join(str(column.get("header") or "?") for column in table.columns)
+    head = f"table — {table.filename}{f' ({locator})' if locator else ''}"
+    return f"{head}: {' | '.join(named)}. columns {columns}" if named else f"{head}: columns {columns}"
+
+
+@dataclass
+class _Coverage:
+    documents: dict[int, str]  # index into the library's documents -> depth
+    tables: dict[int, str]  # index into the library's tables -> depth
+
+
+def _split_coverage(coverage: dict[int, str], n_docs: int) -> _Coverage:
+    # the inventory is documents then tables in one numbering, so an item's kind is decided by where its number falls.
+    # `parts` is a document depth; a table named there asked for detail inside it, which for a table means its rows
+    documents = {index: depth for index, depth in coverage.items() if index < n_docs}
+    tables: dict[int, str] = {}
+    for index, depth in coverage.items():
+        if index >= n_docs:
+            if depth == "parts":
+                logger.warning("resolve named a table at parts item=%d — taking its rows", index)
+            tables[index - n_docs] = "full" if depth == "parts" else depth
+    return _Coverage(documents, tables)
+
+
+async def resolve(question: str, documents: list[DocRef], tables: list[TableCand], library: str) -> _Coverage:
+    items = [_doc_item(doc) for doc in documents] + [_table_item(table) for table in tables]
+    if not items:
+        return _Coverage({}, {})
+    return _split_coverage(await resolve_query(question, items, library), len(documents))
+
+
+async def run_tables(question: str, tables: list[TableCand], depths: dict[int, str], library: str) -> list[SqlResult]:
+    # the table channel now runs over the tables the question was resolved as needing values FROM, and only those: they
+    # arrive with full schema and samples, which is the view worth paying for once the set is small
+    queried = [tables[index] for index in sorted(depths) if depths[index] == "full"]
+    if not queried:
         return []
-    items = [f"{batch.filename}\n{batch.summary}" for batch in batches]
-    counts = await asyncio.to_thread(count_tokens_batch, items)
-    packs = _pack(counts, SELECT_BUDGET)
-    started = time.time()
-    jobs = [(pack, await emit_select(question, [items[i] for i in pack], library)) for pack in packs]
-    selected: list[BatchRef] = []
-    for index, (pack, job_id) in enumerate(jobs):
-        chosen = await collect_select(job_id, len(pack))
-        logger.info("select pack=%d chose=%d/%d", index, len(chosen), len(pack))
-        selected.extend(batches[pack[local]] for local in chosen)
-    logger.info(
-        "select library=%d batches=%d packs=%d selected=%d %.1fs labels=%s",
-        library_id,
-        len(batches),
-        len(packs),
-        len(selected),
-        time.time() - started,
-        [_batch_cite(batch) for batch in selected],
-    )
-    return selected
-
-
-async def run_tables(
-    question: str, library_id: int, library: str
-) -> tuple[list[SqlResult], list[TableCand], list[int]]:
-    # the table channel: the SLM sees every table's schema, samples and ROW COUNT, then names the tables the question
-    # bears on and writes the queries for whatever must be computed from their rows. the tables come back too — their
-    # metadata is ours to attach, never something to spend a query retrieving
-    tables = await load_all_tables(library_id)
-    results, relevant = await _aggregate(question, tables, library)
-    return results, tables, relevant
+    return await _aggregate(question, queried, library)
 
 
 def _batch_cite(batch: BatchRef) -> str:
@@ -531,73 +455,85 @@ def _summary_text(batch: BatchRef) -> str:
     return f"[{_batch_cite(batch)}] {batch.summary}"
 
 
-def _summary_evidence(batch: BatchRef, rank: int, total: int, tokens: int) -> _Evidence:
-    return _Evidence(_summary_text(batch), [batch.id], tokens, total - rank, None, batch.document_id)
+def _doc_summary_text(doc: DocRef) -> str:
+    return f"[{doc.filename}] {doc.summary}"
 
 
-async def _reduce_summaries(question: str, batches: list[BatchRef], budget: int) -> list[str]:
-    # summaries are already a reduction, so this only fires when even the SELECTED summaries overflow the budget — the
-    # large-corpus / very-broad case. it reduces the least-relevant summaries first (emission order is relevance)
-    texts = [_summary_text(batch) for batch in batches]
-    counts = await asyncio.to_thread(count_tokens_batch, texts)
-    if sum(counts) <= budget:
-        return texts
-    evidences = [_summary_evidence(batch, rank, len(batches), counts[rank]) for rank, batch in enumerate(batches)]
-    return [evidence.text for evidence in await _reduce(question, evidences, budget, 0)]
+def _doc_evidence(doc: DocRef, tokens: int) -> _Evidence:
+    return _Evidence(_doc_summary_text(doc), [doc.id], tokens, 0, None, doc.id)
 
 
-async def render_text(question: str, batches: list[BatchRef], budget: int) -> list[str]:
-    # affordability decides summary-vs-block. every batch stores content_tokens (the full size of its blocks), so
-    # whether the selected blocks fit is known up front, before any ranking. if they fit, show them ALL — there is no
-    # subset to pick, so no filter runs and nothing can overflow. if they do not fit, the query pulled in more content
-    # than the window holds (a broad question over a large corpus), so fall back to the summaries, which are the
-    # compressed form of exactly that content
-    if not batches or budget <= 0:
-        logger.info("text mode=empty batches=%d budget=%d", len(batches), budget)
-        return []
-    content = sum(batch.content_tokens for batch in batches)
-    if content > budget:  # fast reject before loading anything
-        summaries = await _reduce_summaries(question, batches, budget)
-        logger.info(
-            "text mode=summary reason=content batches=%d content=%d budget=%d out=%d",
-            len(batches),
-            content,
-            budget,
-            len(summaries),
-        )
-        return summaries
+async def _reduce_floor(question: str, documents: list[DocRef], counts: list[int], budget: int) -> list[str]:
+    # the floor itself does not fit: the covered documents' own summaries are already the shortest form each has, so
+    # what is left is to merge them — never to drop one. `_reduce` merges within a document first and only widens the
+    # grain when that did not free enough, so a document leaves the answer as a whole only when nothing else remains
+    evidences = [_doc_evidence(doc, counts[index]) for index, doc in enumerate(documents)]
+    reduced = await _reduce(question, evidences, budget, 0)
+    logger.info("text floor reduced documents=%d out=%d budget=%d", len(documents), len(reduced), budget)
+    return [evidence.text for evidence in reduced]
+
+
+async def _doc_blocks(batches: list[BatchRef]) -> list[str]:
     ranges = [(batch.document_id, batch.start_block_ordinal, batch.end_block_ordinal) for batch in batches]
     texts = await load_block_texts(await scope_block_ids(ranges))
     blocks = sorted(texts.values(), key=lambda block: (block.document_id, block.block_ordinal))
-    rendered = [block.text for block in blocks]
-    # content_tokens counts the block bodies; the rendered passages add a "[filename pN]" prefix each, so the real total
-    # runs larger. verify against the ACTUAL size and fall back to summaries if the prefixes tip it past the budget
-    actual = sum(await asyncio.to_thread(count_tokens_batch, rendered))
-    if actual <= budget:
-        per_doc: dict[int, int] = {}
-        for block in blocks:
-            per_doc[block.document_id] = per_doc.get(block.document_id, 0) + 1
-        logger.info(
-            "text mode=blocks batches=%d blocks=%d content=%d actual=%d budget=%d per_doc=%s",
-            len(batches),
-            len(rendered),
-            content,
-            actual,
-            budget,
-            per_doc,
-        )
-        logger.debug("text blocks:\n%s", "\n".join(rendered))
-        return rendered
-    summaries = await _reduce_summaries(question, batches, budget)
+    return [block.text for block in blocks]
+
+
+async def _deeper_texts(depth: str, batches: list[BatchRef]) -> list[str]:
+    # what a document reads as one rung below its summary: the summaries of its own parts, or their wording
+    if depth == "parts":
+        return [_summary_text(batch) for batch in batches]
+    return await _doc_blocks(batches)
+
+
+def _upgrade_order(documents: list[DocRef], depths: dict[int, str]) -> list[DocRef]:
+    # `full` before `parts`: the deeper ask is the one the answer turns on, so it gets first claim on what is spare
+    return [doc for depth in ("full", "parts") for doc in documents if depths.get(doc.id) == depth]
+
+
+async def _upgrade(
+    doc: DocRef, depth: str, batches: list[BatchRef], floor_cost: int, spare: int
+) -> tuple[list[str], int] | None:
+    texts = await _deeper_texts(depth, batches)
+    if not texts:
+        return None
+    cost = sum(await asyncio.to_thread(count_tokens_batch, texts))
+    return (texts, cost - floor_cost) if cost - floor_cost <= spare else None
+
+
+async def render_text(
+    question: str, documents: list[DocRef], depths: dict[int, str], batches: dict[int, list[BatchRef]], budget: int
+) -> list[str]:
+    # every covered document is present at its summary before anything is deepened — that is the floor, and it is what
+    # keeps coverage a property of the output rather than an outcome of the budget. whatever the floor leaves is then
+    # spent deepening the documents that asked for depth, each one all-or-nothing against what is still spare
+    if not documents or budget <= 0:
+        logger.info("text floor documents=%d budget=%d", len(documents), budget)
+        return []
+    floor = [_doc_summary_text(doc) for doc in documents]
+    counts = await asyncio.to_thread(count_tokens_batch, floor)
+    if sum(counts) > budget:
+        return await _reduce_floor(question, documents, counts, budget)
+    spare = budget - sum(counts)
+    rendered = {doc.id: [text] for doc, text in zip(documents, floor, strict=True)}
+    costs = dict(zip((doc.id for doc in documents), counts, strict=True))
+    deepened: dict[int, str] = {}
+    for doc in _upgrade_order(documents, depths):
+        upgraded = await _upgrade(doc, depths[doc.id], batches.get(doc.id, []), costs[doc.id], spare)
+        if upgraded is not None:
+            rendered[doc.id], delta = upgraded
+            spare -= delta
+            deepened[doc.id] = depths[doc.id]
     logger.info(
-        "text mode=summary reason=rendered batches=%d blocks=%d actual=%d budget=%d out=%d",
-        len(batches),
-        len(rendered),
-        actual,
+        "text documents=%d floor=%d deepened=%s spare=%d budget=%d",
+        len(documents),
+        sum(counts),
+        {doc.filename: deepened[doc.id] for doc in documents if doc.id in deepened},
+        spare,
         budget,
-        len(summaries),
     )
-    return summaries
+    return [text for doc in documents for text in rendered[doc.id]]
 
 
 _CITE = re.compile(r"\[([^\]]+)\]")
@@ -633,25 +569,27 @@ def _check_citations(response: str, evidence_files: set[str]) -> None:
     logger.debug("answer:\n%s", response)
 
 
+@dataclass
+class _Assembled:
+    passages: list[str]
+    rendered: list[str]
+    channel: _TableChannel
+
+
 def _log_evidence(
     question: str,
     started: float,
-    batches: list[BatchRef],
     passages: list[str],
     results: list[SqlResult],
-    tables: list[TableCand],
     channel: _TableChannel,
 ) -> None:
     table_tokens = sum(count_tokens(block) for block in channel.blocks)
     logger.info(
-        "query done %r batches=%d results=%d/%d described=%d/%d table_tokens=%d dropped_rows=%d "
-        "passages=%d synth_tokens=%d/%d %.1fs",
+        "query done %r results=%d/%d described=%d table_tokens=%d dropped_rows=%d passages=%d synth_tokens=%d/%d %.1fs",
         question[:80],
-        len(batches),
         len(channel.fitted),
         len(results),
         channel.described,
-        len(tables),
         table_tokens,
         sum(r.total for r in results) - sum(len(r.rows) for r in channel.fitted),
         len(passages),
@@ -664,31 +602,58 @@ def _log_evidence(
     )
 
 
+def _batches_by_document(batches: list[BatchRef]) -> dict[int, list[BatchRef]]:
+    grouped: dict[int, list[BatchRef]] = {}
+    for batch in batches:
+        grouped.setdefault(batch.document_id, []).append(batch)
+    return grouped
+
+
+async def _assemble(
+    question: str,
+    library_id: int,
+    documents: list[DocRef],
+    tables: list[TableCand],
+    depths: dict[int, str],
+    results: list[SqlResult],
+) -> _Assembled:
+    # the floor of BOTH channels is priced before a single row is fitted: every covered table's description and every
+    # covered document's summary. what is left over is what computed rows may take, and what they leave is depth
+    describe = [_table_render(table) for table in tables]
+    floor = [_doc_summary_text(doc) for doc in documents]
+    reserved = sum(count_tokens(block) for block in describe) + sum(await asyncio.to_thread(count_tokens_batch, floor))
+    channel = _table_channel(results, describe, max(SYNTH_BUDGET - reserved, 0))
+    table_tokens = sum(count_tokens(block) for block in channel.blocks)
+    batches = _batches_by_document(await load_library_batches(library_id)) if documents else {}
+    passages = await render_text(question, documents, depths, batches, max(SYNTH_BUDGET - table_tokens, 0))
+    return _Assembled(passages, channel.blocks, channel)
+
+
 async def answer(question: str, library_id: int) -> AsyncIterator[str]:
     started = time.time()
     logger.info("query start library=%d %r", library_id, question)
     library = await load_library_name(library_id)
-    async with asyncio.TaskGroup() as group:
-        text_task = group.create_task(select_batches(question, library_id, library))
-        table_task = group.create_task(run_tables(question, library_id, library))
-    batches = text_task.result()
-    results, tables, relevant = table_task.result()
+    documents = await load_library_documents(library_id)
+    tables = await load_all_tables(library_id)
+    coverage = await resolve(question, documents, tables, library)
+    covered_docs = [documents[index] for index in sorted(coverage.documents)]
+    covered_tables = [tables[index] for index in sorted(coverage.tables)]
+    depths = {documents[index].id: depth for index, depth in coverage.documents.items()}
+    results = await run_tables(question, tables, coverage.tables, library)
     logger.info(
-        "channels text_batches=%d docs=%s | table_results=%d rows=%s relevant_tables=%d",
-        len(batches),
-        sorted({batch.document_id for batch in batches}),
+        "coverage documents=%d/%d tables=%d/%d results=%d rows=%s",
+        len(covered_docs),
+        len(documents),
+        len(covered_tables),
+        len(tables),
         len(results),
         [result.total for result in results],
-        len(relevant),
     )
-    channel = _table_channel(results, tables, relevant)
-    rendered = channel.blocks
-    table_tokens = sum(count_tokens(block) for block in rendered)
-    passages = await render_text(question, batches, max(SYNTH_BUDGET - table_tokens, 0))
-    evidence_files = _evidence_files(passages, rendered)
-    _log_evidence(question, started, batches, passages, results, tables, channel)
+    built = await _assemble(question, library_id, covered_docs, covered_tables, depths, results)
+    evidence_files = _evidence_files(built.passages, built.rendered)
+    _log_evidence(question, started, built.passages, results, built.channel)
     parts: list[str] = []
-    async for token in synthesize(question, passages, rendered):
+    async for token in synthesize(question, built.passages, built.rendered):
         parts.append(token)
         yield token
     _check_citations("".join(parts), evidence_files)

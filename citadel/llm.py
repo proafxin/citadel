@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 STRUCT_MAX_TOKENS = 4096  # structured calls emit short JSON (indices, a concise merge summary, SQL)
 SYNTH_MAX_TOKENS = 8192  # the streamed answer; the evidence budget reserves this much of the context window for it
 SLM_MODEL_LEN = 65536  # qwen --max-model-len: prompt and completion share this one window
+# resolution is ONE call over the WHOLE library — splitting it would put the breadth judgment back inside a slice, each
+# call weighing the question against a different part of the collection. so this is not a packing budget: it is the
+# corpus size past which the design no longer holds, and it is worth saying so before the server says it
+RESOLVE_BUDGET = SLM_MODEL_LEN - STRUCT_MAX_TOKENS - 2048
 
 
 @functools.lru_cache
@@ -199,40 +203,59 @@ async def merge_evidence(query: str, items: list[str]) -> str:
 
 _QUERIES_SCHEMA = {
     "type": "object",
-    "properties": {
-        "queries": {"type": "array", "items": {"type": "string"}},
-        "tables": {"type": "array", "items": {"type": "integer"}},
-    },
-    "required": ["queries", "tables"],
+    "properties": {"queries": {"type": "array", "items": {"type": "string"}}},
+    "required": ["queries"],
 }
 
 
-_BATCH_SELECT_SCHEMA = {
+_RESOLVE_SCHEMA = {
     "type": "object",
-    "properties": {"sections": {"type": "array", "items": {"type": "integer"}}},
-    "required": ["sections"],
+    "properties": {
+        "overall": {"type": "array", "items": {"type": "integer"}},
+        "parts": {"type": "array", "items": {"type": "integer"}},
+        "full": {"type": "array", "items": {"type": "integer"}},
+    },
+    "required": ["overall", "parts", "full"],
 }
 
+_DEPTHS = ("full", "parts", "overall")  # deepest first: an item named twice is taken at the deepest naming
 
-def _select_prompt(query: str, items: list[str], library: str) -> str:
+
+def _depth_indices(data: dict, key: str, count: int) -> list[int]:
+    return [index for index in data.get(key, []) if isinstance(index, int) and 0 <= index < count]
+
+
+def _coverage(data: dict, count: int) -> dict[int, str]:
+    coverage: dict[int, str] = {}
+    for depth in _DEPTHS:
+        for index in _depth_indices(data, depth, count):
+            coverage.setdefault(index, depth)
+    return coverage
+
+
+async def resolve_query(query: str, items: list[str], library: str = "") -> dict[int, str]:
+    # the whole library at one grain — every document by its summary, every table by its identity and columns — read
+    # against the question in ONE call. what comes back is which items the answer must account for and how deeply each
+    # has to be read; everything downstream executes that, and nothing downstream decides membership again
     listing = "\n\n".join(f"[{index}] {item}" for index, item in enumerate(items))
-    return f"{load_prompt('batch_select')}\nlibrary: {library}\nquestion: {query}\nsections:\n{listing}"
-
-
-def _select_indices(data: dict, count: int) -> list[int]:
-    seen: list[int] = []
-    for index in data.get("sections", []):
-        if isinstance(index, int) and 0 <= index < count and index not in seen:
-            seen.append(index)
-    return seen
-
-
-async def emit_select(query: str, items: list[str], library: str = "") -> str:
-    return await emit_slm(_select_prompt(query, items, library), _BATCH_SELECT_SCHEMA, interactive=True)
-
-
-async def collect_select(job_id: str, count: int) -> list[int]:
-    return _select_indices(await collect_slm(job_id), count)
+    prompt = f"{load_prompt('resolve_query')}\nlibrary: {library}\nquestion: {query}\ninventory:\n{listing}"
+    tokens = count_tokens(prompt)
+    if tokens > RESOLVE_BUDGET:
+        logger.warning("resolve inventory does not fit one call tokens=%d budget=%d", tokens, RESOLVE_BUDGET)
+    started = time.time()
+    data = await call_slm(prompt, _RESOLVE_SCHEMA, interactive=True)
+    coverage = _coverage(data, len(items))
+    logger.info(
+        "resolve items=%d prompt_tokens=%d covered=%d %s %.1fs",
+        len(items),
+        tokens,
+        len(coverage),
+        {depth: sum(1 for value in coverage.values() if value == depth) for depth in _DEPTHS},
+        time.time() - started,
+    )
+    if not coverage:
+        logger.warning("resolve covered nothing raw=%s", data)
+    return coverage
 
 
 async def write_queries(query: str, tables: list[str], library: str = "") -> QueryPlan:
@@ -243,19 +266,17 @@ async def write_queries(query: str, tables: list[str], library: str = "") -> Que
     started = time.time()
     data = await call_slm(prompt, _QUERIES_SCHEMA, interactive=True)
     queries = [str(sql) for sql in data.get("queries", []) if str(sql).strip()]
-    marked = [index for index in data.get("tables", []) if isinstance(index, int) and 0 <= index < len(tables)]
-    plan = QueryPlan(queries=queries, tables=marked)
+    plan = QueryPlan(queries=queries)
     logger.info(
-        "write_queries tables=%d prompt_tokens=%d queries=%d marked=%s %.1fs",
+        "write_queries tables=%d prompt_tokens=%d queries=%d %.1fs",
         len(tables),
         count_tokens(prompt),
         len(queries),
-        marked,
         time.time() - started,
     )
     for sql in queries:
         logger.info("  sql: %s", sql)
-    if not queries and not marked:  # nothing named and nothing asked is a real miss on a tabular question
+    if not queries:  # every table here was resolved as needing values from its rows, so nothing asked is a real miss
         logger.warning("write_queries returned nothing raw=%s", data)
     return plan
 

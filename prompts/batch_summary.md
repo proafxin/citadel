@@ -11,4 +11,4 @@ Rules:
 - Describe what the excerpt says, not that it is an excerpt or what kind of text it is.
 - Do not add anything that is not in the excerpt.
 
-Respond ONLY with a JSON object: {"summary": "..."}.
+Respond with the summary itself and nothing else.

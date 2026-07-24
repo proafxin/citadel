@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from itertools import starmap
 
 import torch
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from citadel.bus import get_redis
@@ -332,6 +332,36 @@ class BatchRef:
     start_page_no: int | None
     end_page_no: int | None
     content_tokens: int
+
+
+@dataclass
+class DocRef:
+    id: int
+    filename: str
+    summary: str
+    content_tokens: int
+
+
+async def load_library_documents(library_id: int) -> list[DocRef]:
+    # every document in the library by its own summary — the document half of the inventory a question is resolved
+    # against. content_tokens is the document's full size, summed from its batches, so whether its blocks can be
+    # afforded is known before any of them are loaded
+    async with get_sessionmaker()() as session:
+        rows = list(
+            await session.execute(
+                select(
+                    Document.id,
+                    Document.filename,
+                    Document.summary,
+                    func.coalesce(func.sum(ContentBatch.content_tokens), 0),
+                )
+                .join(ContentBatch, ContentBatch.document_id == Document.id)
+                .where(Document.library_id == library_id, Document.summary.is_not(None))
+                .group_by(Document.id, Document.filename, Document.summary)
+                .order_by(Document.id)
+            )
+        )
+    return [DocRef(doc_id, filename, summary, int(tokens)) for doc_id, filename, summary, tokens in rows]
 
 
 async def load_library_name(library_id: int) -> str:

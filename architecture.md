@@ -575,7 +575,10 @@ a wrong answer), but summary quality is the lever to watch in evaluation, and it
 - **Corpus scale.** Both channel payloads — all summaries, all table reps — grow with the corpus. They split
   across parallel model calls today; past a few thousand documents, scoping needs its own retrieval step
   ahead of the channels. Same ceiling appears at synthesis, where selected summaries that overflow the budget
-  are map-reduced.
+  are map-reduced. Splitting also fragments the breadth judgment itself: each parallel selection call weighs
+  how much of the collection an answer must account for against the slice it was given, never the whole, so
+  the same broad question is judged against a different denominator in every call and the union of their
+  choices is bounded by nothing. One library fits one call today, so this is deferred, not solved.
 
 ### The pipeline this replaced
 

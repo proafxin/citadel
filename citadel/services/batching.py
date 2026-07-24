@@ -24,6 +24,9 @@ BATCH_TOKENS = 32768
 SAMPLE_ROWS = 3
 SUMMARY_RATIO = 0.1
 SUMMARY_TOKENS_MAX = 4096
+# a document's entry in the inventory the query is resolved against. every document AND every table in the library must
+# fit that one call, so this is a per-document ceiling, not a ratio of the document's length
+DOCUMENT_SUMMARY_TOKENS = 500
 
 _BLOCK_ORDINALS = text("""
 UPDATE content SET block_ordinal = seq.rn
@@ -198,6 +201,25 @@ def _summary_prompt(spec: BatchSpec) -> tuple[str, int]:
     return prompt, budget * 2 + 512
 
 
+def _document_summary_prompt(filename: str, summaries: list[str]) -> tuple[str, int]:
+    body = "\n\n".join(summaries)
+    prompt = (
+        f"{load_prompt('document_summary').replace('{summary_tokens}', str(DOCUMENT_SUMMARY_TOKENS))}\n"
+        f"filename: {filename}\nparts:\n{body}"
+    )
+    return prompt, DOCUMENT_SUMMARY_TOKENS * 2 + 512
+
+
+async def _document_summary(doc_id: int, summaries: list[str]) -> str | None:
+    # the document's own summary, reduced from the parts already summarized. it is written after them and from them
+    # only — nothing re-reads the document — so it costs one call per document and cannot disagree with its parts
+    if not summaries:
+        return None
+    async with get_sessionmaker()() as session:
+        filename = await session.scalar(select(Document.filename).where(Document.id == doc_id)) or ""
+    return await collect_text(await emit_text(*_document_summary_prompt(filename, summaries), interactive=False))
+
+
 def _batch_row(doc_id: int, spec: BatchSpec, summary: str) -> ContentBatch:
     return ContentBatch(
         document_id=doc_id,
@@ -225,11 +247,14 @@ async def summarize_document(fields: dict[str, str]) -> None:
     packed = time.time()
     jobs = [(spec, await emit_text(*_summary_prompt(spec), interactive=False)) for spec in specs]
     rows = [_batch_row(doc_id, spec, await collect_text(job_id)) for spec, job_id in jobs]
+    summary = await _document_summary(doc_id, [row.summary for row in rows])
     summarized = time.time()
     async with get_sessionmaker()() as session, session.begin():
         await session.execute(delete(ContentBatch).where(ContentBatch.document_id == doc_id))
         session.add_all(rows)
-        await session.execute(update(Document).where(Document.id == doc_id).values(summarized_at=datetime.now(UTC)))
+        await session.execute(
+            update(Document).where(Document.id == doc_id).values(summary=summary, summarized_at=datetime.now(UTC))
+        )
     # pack vs summarize is the split that matters: packing is ours (CPU, tokenizing), summarizing is the model's. how
     # far this span runs against the rest of ingestion says whether summaries finish inside it or tail past it
     logger.info(
