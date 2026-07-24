@@ -487,24 +487,34 @@ async def _deeper_texts(depth: str, batches: list[BatchRef]) -> list[str]:
     return await _doc_blocks(batches)
 
 
-def _upgrade_order(documents: list[DocRef], depths: dict[int, str]) -> list[tuple[DocRef, str, bool]]:
+def _upgrade_order(documents: list[DocRef], depths: dict[int, str]) -> list[tuple[DocRef, tuple[str, ...], bool]]:
     # `full` before `parts`: the deeper ask is the one the answer turns on, so it gets first claim on what is spare.
+    # each ask carries its own way DOWN — a document whose wording will not fit is still owed the summaries of its
+    # parts, and must never drop to its own one-line summary just because the deepest rung was unaffordable.
     # then, with whatever is STILL spare, every remaining covered document is carried one rung deeper than it asked
     # for — a summary is the cheapest form of a document, not the most faithful one, and an unspent budget buys nothing
-    asked: list[tuple[DocRef, str, bool]] = [
-        (doc, depth, False) for depth in ("full", "parts") for doc in documents if depths.get(doc.id) == depth
+    ladders = {"full": ("full", "parts"), "parts": ("parts",)}
+    asked: list[tuple[DocRef, tuple[str, ...], bool]] = [
+        (doc, ladders[depth], False) for depth in ("full", "parts") for doc in documents if depths.get(doc.id) == depth
     ]
-    return asked + [(doc, "parts", True) for doc in documents if depths.get(doc.id, "overall") == "overall"]
+    return asked + [(doc, ("parts",), True) for doc in documents if depths.get(doc.id, "overall") == "overall"]
 
 
 async def _upgrade(
-    doc: DocRef, depth: str, batches: list[BatchRef], floor_cost: int, spare: int
-) -> tuple[list[str], int] | None:
-    texts = await _deeper_texts(depth, batches)
-    if not texts:
-        return None
-    cost = sum(await asyncio.to_thread(count_tokens_batch, texts))
-    return (texts, cost - floor_cost) if cost - floor_cost <= spare else None
+    doc: DocRef, ladder: tuple[str, ...], batches: list[BatchRef], floor_cost: int, spare: int
+) -> tuple[list[str], int, str] | None:
+    for depth in ladder:
+        # a document's blocks are priced from what it stored at ingestion, so an unaffordable one is rejected before a
+        # single block is read — the rung below is reached without paying to load the rung above
+        if depth == "full" and doc.content_tokens > spare + floor_cost:
+            continue
+        texts = await _deeper_texts(depth, batches)
+        if not texts:
+            continue
+        cost = sum(await asyncio.to_thread(count_tokens_batch, texts))
+        if cost - floor_cost <= spare:
+            return texts, cost - floor_cost, depth
+    return None
 
 
 async def render_text(
@@ -525,12 +535,12 @@ async def render_text(
     costs = dict(zip((doc.id for doc in documents), counts, strict=True))
     deepened: dict[int, str] = {}
     greedy: list[str] = []
-    for doc, depth, spent_spare in _upgrade_order(documents, depths):
-        upgraded = await _upgrade(doc, depth, batches.get(doc.id, []), costs[doc.id], spare)
+    for doc, ladder, spent_spare in _upgrade_order(documents, depths):
+        upgraded = await _upgrade(doc, ladder, batches.get(doc.id, []), costs[doc.id], spare)
         if upgraded is not None:
-            rendered[doc.id], delta = upgraded
+            rendered[doc.id], delta, reached = upgraded
             spare -= delta
-            deepened[doc.id] = depth
+            deepened[doc.id] = reached
             if spent_spare:
                 greedy.append(doc.filename)
     logger.info(
