@@ -2,6 +2,7 @@ import asyncio
 import functools
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import cast
@@ -37,7 +38,17 @@ async def emit(payload: dict, interactive: bool) -> str:
     job_id = uuid.uuid4().hex
     _pending()[job_id] = asyncio.Queue()
     stream = STREAM_SLM_INTERACTIVE if interactive else STREAM_SLM_BULK
-    await get_redis().xadd(stream, {"job_id": job_id, "reply_to": reply_stream(), "payload": json.dumps(payload)})
+    # t_emit rides with the job so the consumer can separate time SPENT WAITING for a slot from time generating.
+    # without it a slow call is unattributable: queued behind bulk work and slow to decode look identical
+    await get_redis().xadd(
+        stream,
+        {
+            "job_id": job_id,
+            "reply_to": reply_stream(),
+            "payload": json.dumps(payload),
+            "t_emit": str(time.time()),
+        },
+    )
     return job_id
 
 

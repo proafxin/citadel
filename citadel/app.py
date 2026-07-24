@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from citadel.db import get_engine
 from citadel.router import router
+from citadel.services.batching import library_batches_pending
 from citadel.services.document import (
     mark_described,
     mark_embed_started,
@@ -27,6 +28,19 @@ logger = logging.getLogger(__name__)
 
 _finalizing: set[int] = set()
 
+SUMMARY_POLL_S = 2  # how often finalization re-asks whether the library's documents have all been summarized
+
+
+async def _await_summaries(library_id: int) -> float:
+    started = time.time()
+    pending = await library_batches_pending(library_id)
+    if pending:
+        logger.info("waiting on summaries library=%d documents=%d", library_id, pending)
+    while pending:
+        await asyncio.sleep(SUMMARY_POLL_S)
+        pending = await library_batches_pending(library_id)
+    return time.time() - started
+
 
 async def _finalize(library_id: int, tag: str) -> None:
     if library_id in _finalizing:  # catch-up and the live NOTIFY can target the same library — run it once
@@ -37,12 +51,22 @@ async def _finalize(library_id: int, tag: str) -> None:
         await mark_finalize_started(library_id)
         await mark_described(library_id)  # descriptions are produced inline during structure now; this is an instant
         # status transition kept so the finalize phases (and the UI reading them) are unchanged
-        # batch summaries are streamed per-document at merge (the batch stage), not here — this phase only embeds
         await mark_embed_started(library_id)
         t = time.time()
         embedded = await embed_library(library_id)
+        # READY means the library can actually answer: persisted, embedded, AND every document's batches summarized.
+        # summarizing runs on its own stream throughout ingestion, so by now it is usually done or nearly — this waits
+        # out the remainder rather than declaring a library ready whose text channel is still filling in
+        waited = await _await_summaries(library_id)
         await mark_library_ready(library_id)
-        logger.info("%s library=%d nodes=%d embed=%.1fs", tag, library_id, embedded, time.time() - t)
+        logger.info(
+            "%s library=%d nodes=%d embed=%.1fs summaries_wait=%.1fs",
+            tag,
+            library_id,
+            embedded,
+            time.time() - t,
+            waited,
+        )
     finally:
         _finalizing.discard(library_id)
 

@@ -9,7 +9,7 @@ from typing import Any, cast
 
 from citadel.bus import get_redis
 from citadel.db import get_engine
-from citadel.services.batching import STREAM_BATCH, summarize_batch
+from citadel.services.batching import STREAM_BATCH, summarize_document
 from citadel.services.ingestion import (
     CROP_BOUND,
     DECODE_CONCURRENCY,
@@ -379,7 +379,7 @@ async def _batch_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
     fields = await _decode_or_settle(stream, msg_id, raw)
     if fields is None:
         return
-    work = asyncio.create_task(summarize_batch(fields))
+    work = asyncio.create_task(summarize_document(fields))
     await asyncio.wait({work})
     error = work.exception()
     if error is None:

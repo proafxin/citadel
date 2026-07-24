@@ -1,19 +1,22 @@
 import logging
+import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
-from sqlalchemy import delete, select, text, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
-from citadel.llm import collect_slm, count_tokens, count_tokens_batch, emit_slm
+from citadel.llm import collect_text, count_tokens, count_tokens_batch, emit_text
 from citadel.models.batch import ContentBatch
 from citadel.models.content import ContentNode
+from citadel.models.document import Document
+from citadel.models.status import DocumentStatus
 from citadel.models.table import Table
 from citadel.prompts import load_prompt
 
-STREAM_BATCH = "batch"  # one job per document batch: emits a summary to the slm stream and writes it back on reply
+STREAM_BATCH = "batch"  # one job per MERGED DOCUMENT: packs it into batches and summarizes them all
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +24,6 @@ BATCH_TOKENS = 32768
 SAMPLE_ROWS = 3
 SUMMARY_RATIO = 0.1
 SUMMARY_TOKENS_MAX = 4096
-
-_SUMMARY_SCHEMA = {
-    "type": "object",
-    "properties": {"summary": {"type": "string"}},
-    "required": ["summary"],
-    "additionalProperties": False,
-}
 
 _BLOCK_ORDINALS = text("""
 UPDATE content SET block_ordinal = seq.rn
@@ -169,82 +165,79 @@ async def build_document_specs(session: AsyncSession, doc_id: int) -> list[Batch
 
 
 async def emit_document_batches(doc_id: int) -> None:
-    # called once a document is fully persisted (its blocks all exist). block ordinals and qwen token counts are
-    # assigned here, the document is packed into batches, and ONE job per batch is put on the batch stream. this runs
-    # during ingestion, before the tier is decided, so there is NO tier gate — batches are always built and the tier is
-    # only a query-time access gate
+    # a merged document is a COMPLETE one — its blocks are all persisted and nothing more will arrive — so the whole of
+    # batching and summarizing can be handed off as one job naming just the document. no tier gate: batches are built
+    # for every library during ingestion, and the tier is only a query-time access gate
+    await get_redis().xadd(STREAM_BATCH, {"doc_id": str(doc_id)})
+
+
+async def library_batches_pending(library_id: int) -> int:
+    # documents of this library whose batches have not been summarized yet. nothing to count and no counter to keep in
+    # sync — a document is marked the moment its batching finishes, so this is a plain question of the data, and a
+    # redelivered job re-marks the same row without moving the answer. a FAILED document is excluded: it owes nothing,
+    # and waiting on one would hold the library back forever
+    async with get_sessionmaker()() as session:
+        pending = await session.scalar(
+            select(func.count())
+            .select_from(Document)
+            .where(
+                Document.library_id == library_id,
+                Document.status == DocumentStatus.INGESTED,
+                Document.summarized_at.is_(None),
+            )
+        )
+    return int(pending or 0)
+
+
+def _summary_prompt(spec: BatchSpec) -> tuple[str, int]:
+    budget = summary_budget(spec.content_tokens)
+    prompt = f"{load_prompt('batch_summary').replace('{summary_tokens}', str(budget))}\ntext:\n{spec.text}"
+    # the completion cap sits ABOVE the summary asked for — the ask is advisory (a model cannot count its own tokens)
+    # while the cap is hard. the reply is plain text, so content that resists compression comes back SHORTER rather
+    # than unparseable; a batch is never lost to its own length
+    return prompt, budget * 2 + 512
+
+
+def _batch_row(doc_id: int, spec: BatchSpec, summary: str) -> ContentBatch:
+    return ContentBatch(
+        document_id=doc_id,
+        batch_no=spec.batch_no,
+        start_block_ordinal=spec.start_block_ordinal,
+        end_block_ordinal=spec.end_block_ordinal,
+        start_page_no=spec.start_page_no,
+        end_page_no=spec.end_page_no,
+        summary=summary,
+        summary_tokens=count_tokens(summary),
+        content_tokens=spec.content_tokens,
+    )
+
+
+async def summarize_document(fields: dict[str, str]) -> None:
+    # ONE job per merged document: pack it into batches and summarize all of them. every batch's summary is emitted to
+    # the slm stream first and collected after, so a document's batches are summarized concurrently rather than one
+    # after another — and many documents are in flight at once, since the stage itself is unbounded.
+    # the batches and the document's mark are written in ONE transaction: a document is never left half-summarized, and
+    # re-running the job simply replaces the same rows
+    doc_id = int(fields["doc_id"])
+    started = time.time()
     async with get_sessionmaker()() as session, session.begin():
         specs = await build_document_specs(session, doc_id)
-        await session.execute(delete(ContentBatch).where(ContentBatch.document_id == doc_id))
-    redis = get_redis()
-    for spec in specs:
-        await redis.xadd(
-            STREAM_BATCH,
-            {
-                "doc_id": str(doc_id),
-                "batch_no": str(spec.batch_no),
-                "start": str(spec.start_block_ordinal),
-                "end": str(spec.end_block_ordinal),
-                "start_page": "" if spec.start_page_no is None else str(spec.start_page_no),
-                "end_page": "" if spec.end_page_no is None else str(spec.end_page_no),
-                "content_tokens": str(spec.content_tokens),
-            },
-        )
-    logger.info("batches doc=%d batches=%d", doc_id, len(specs))
-
-
-async def _load_batch_text(session: AsyncSession, doc_id: int, start: int, end: int) -> str:
-    nodes = list(
-        await session.scalars(
-            select(ContentNode)
-            .where(
-                ContentNode.document_id == doc_id,
-                ContentNode.block_ordinal >= start,
-                ContentNode.block_ordinal <= end,
-            )
-            .order_by(ContentNode.block_ordinal)
-        )
-    )
-    tables = {row.content_id: row for row in await session.scalars(select(Table).where(Table.document_id == doc_id))}
-    rendered = [body for node in nodes if (body := render_block(node, tables.get(node.id)).strip())]
-    return "\n\n".join(rendered)
-
-
-async def summarize_batch(fields: dict[str, str]) -> None:
-    # one batch stream job: render the batch's blocks, hand a summary job to the slm stream, and write the reply back.
-    # the stream drives many of these at once, so summaries run concurrently and none waits on another
-    doc_id = int(fields["doc_id"])
-    content_tokens = int(fields["content_tokens"])
-    async with get_sessionmaker()() as session:
-        text_body = await _load_batch_text(session, doc_id, int(fields["start"]), int(fields["end"]))
-    budget = summary_budget(content_tokens)
-    # the completion cap must sit ABOVE the summary we asked for — the ask is advisory (a model cannot count its own
-    # tokens) while the cap is hard, and overrunning it truncates the JSON mid-string. headroom covers the JSON
-    # wrapper, escaping, and the model running past what it was asked for
-    job_id = await emit_slm(
-        f"{load_prompt('batch_summary').replace('{summary_tokens}', str(budget))}\ntext:\n{text_body}",
-        _SUMMARY_SCHEMA,
-        interactive=False,
-        max_tokens=budget * 2 + 512,
-    )
-    data = await collect_slm(job_id)
-    summary = str(data.get("summary", "")).strip()
-    row = {
-        "document_id": doc_id,
-        "batch_no": int(fields["batch_no"]),
-        "start_block_ordinal": int(fields["start"]),
-        "end_block_ordinal": int(fields["end"]),
-        "start_page_no": int(fields["start_page"]) if fields["start_page"] else None,
-        "end_page_no": int(fields["end_page"]) if fields["end_page"] else None,
-        "summary": summary,
-        "summary_tokens": count_tokens(summary),
-        "content_tokens": content_tokens,
-    }
+    packed = time.time()
+    jobs = [(spec, await emit_text(*_summary_prompt(spec), interactive=False)) for spec in specs]
+    rows = [_batch_row(doc_id, spec, await collect_text(job_id)) for spec, job_id in jobs]
+    summarized = time.time()
     async with get_sessionmaker()() as session, session.begin():
-        insert_stmt = pg_insert(ContentBatch).values(row)
-        await session.execute(
-            insert_stmt.on_conflict_do_update(
-                index_elements=["document_id", "batch_no"],
-                set_={key: insert_stmt.excluded[key] for key in row if key not in {"document_id", "batch_no"}},
-            )
-        )
+        await session.execute(delete(ContentBatch).where(ContentBatch.document_id == doc_id))
+        session.add_all(rows)
+        await session.execute(update(Document).where(Document.id == doc_id).values(summarized_at=datetime.now(UTC)))
+    # pack vs summarize is the split that matters: packing is ours (CPU, tokenizing), summarizing is the model's. how
+    # far this span runs against the rest of ingestion says whether summaries finish inside it or tail past it
+    logger.info(
+        "batches doc=%d batches=%d content=%d pack=%.1fs summarize=%.1fs total=%.1fs",
+        doc_id,
+        len(rows),
+        sum(spec.content_tokens for spec in specs),
+        packed - started,
+        summarized - packed,
+        time.time() - started,
+    )

@@ -3,6 +3,7 @@ import functools
 import json
 import logging
 import signal
+import time
 import traceback
 from collections.abc import Coroutine
 from typing import Any, cast
@@ -120,6 +121,11 @@ async def _run_job(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
     job_id = raw[b"job_id"].decode()
     reply_to = raw[b"reply_to"].decode()
     attempt = int(raw.get(b"attempt", b"0"))
+    # wait = how long the job sat before vllm started it; gen = how long it took once running. a slow call is one or the
+    # other and they need opposite fixes — waiting means contention for slots, generating means the work is simply large
+    emitted = float(raw.get(b"t_emit", b"0") or 0)
+    started = time.time()
+    wait = started - emitted if emitted else 0.0
     try:
         await _call_provider(json.loads(raw[b"payload"].decode()), reply_to, job_id)
     except httpx.HTTPStatusError as error:
@@ -134,6 +140,7 @@ async def _run_job(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
         logger.exception("slm job failed job=%s attempt=%d", job_id, attempt)
         await _fail(stream, msg_id, raw, attempt)
         return
+    logger.info("slm job stream=%s wait=%.1fs gen=%.1fs", stream, wait, time.time() - started)
     await _emit(reply_to, job_id, DONE, "")
     await _settle(stream, msg_id)
 

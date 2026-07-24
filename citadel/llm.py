@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -79,6 +80,28 @@ async def emit_slm(prompt: str, schema: dict, interactive: bool, max_tokens: int
 
 async def collect_slm(job_id: str) -> dict:
     return json.loads(_extract_json(await collect_reply(job_id)))
+
+
+def _text_payload(prompt: str, max_tokens: int) -> dict:
+    return {
+        "model": QWEN_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
+async def emit_text(prompt: str, max_tokens: int, interactive: bool) -> str:
+    # PLAIN TEXT, deliberately. a json schema is for output that is actually structured — indices, sql, a table's shape.
+    # a summary is ONE free-text field, and wrapping it in `{"summary": "..."}` only adds an envelope that a length cap
+    # can corrupt: hitting max_tokens mid-string leaves unterminated json, which fails to parse and takes the whole
+    # batch down with it (measured). asked as text, the same cap merely yields a shorter summary, never a failure
+    return await emit(_text_payload(prompt, max_tokens), interactive)
+
+
+async def collect_text(job_id: str) -> str:
+    return (await collect_reply(job_id)).strip()
 
 
 _STRUCTURE_SCHEMA = {
@@ -217,16 +240,18 @@ async def write_queries(query: str, tables: list[str], library: str = "") -> Que
         return QueryPlan()
     listing = "\n\n".join(tables)
     prompt = f"{load_prompt('text_to_sql')}\nlibrary: {library}\nquestion: {query}\ntables:\n{listing}"
+    started = time.time()
     data = await call_slm(prompt, _QUERIES_SCHEMA, interactive=True)
     queries = [str(sql) for sql in data.get("queries", []) if str(sql).strip()]
     marked = [index for index in data.get("tables", []) if isinstance(index, int) and 0 <= index < len(tables)]
     plan = QueryPlan(queries=queries, tables=marked)
     logger.info(
-        "write_queries tables=%d prompt_tokens=%d queries=%d marked=%s",
+        "write_queries tables=%d prompt_tokens=%d queries=%d marked=%s %.1fs",
         len(tables),
         count_tokens(prompt),
         len(queries),
         marked,
+        time.time() - started,
     )
     for sql in queries:
         logger.info("  sql: %s", sql)
