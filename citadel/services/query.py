@@ -396,13 +396,13 @@ def _doc_item(doc: DocRef) -> str:
 
 
 def _table_item(table: TableCand) -> str:
-    # a table's identity, and nothing that would take its width: where it sits, what it is called, what its columns are
-    # named. no dtypes, no sample values, no row count — this view exists to decide whether the table bears on the
-    # question at all, and the full schema is bought later for the few that do
+    # a table's identity: where it sits, what it is called, how many rows it holds, what its columns are named. no
+    # dtypes and no sample values — those are the width-scaled part, bought later for the few tables that earn them.
+    # the row count stays: it is one number we hold, and how big a table is is itself something a question can be about
     locator = _table_locator(table)
     named = [str(table.metadata[key]) for key in ("title", "caption") if table.metadata.get(key)]
     columns = ", ".join(str(column.get("header") or "?") for column in table.columns)
-    head = f"table — {table.filename}{f' ({locator})' if locator else ''}"
+    head = f"table — {table.filename}{f' ({locator})' if locator else ''} rows={table.n_rows}"
     return f"{head}: {' | '.join(named)}. columns {columns}" if named else f"{head}: columns {columns}"
 
 

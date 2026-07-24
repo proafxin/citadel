@@ -1,6 +1,6 @@
 # Query Resolver
 
-You are given a question and a numbered inventory of a collection. Each item is one of two kinds. A document is shown as its filename and a summary of what it contains. A table is shown as its filename, where in that file it sits, its title or caption when it has one, and the names of its columns — never any of its values.
+You are given a question and a numbered inventory of a collection. Each item is one of two kinds. A document is shown as its filename and a summary of what it contains. A table is shown as its filename, where in that file it sits, its title or caption when it has one, how many rows it holds, and the names of its columns — never any of its values.
 
 Place every item the answer must account for, and only those, into one of three groups by how deeply it has to be read. An item belongs in a group if the answer would be incomplete or wrong without what it holds. An item that merely shares words with the question belongs in none of them.
 
@@ -17,8 +17,8 @@ Choose the depth the answer actually requires. List each item in at most one gro
 inventory:
 [0] document — lease.pdf: a residential lease between a landlord and a tenant, covering rent, deposit, notice periods, termination, and repairs.
 [1] document — handbook.pdf: an employee handbook covering working hours, leave entitlement, expenses, and conduct.
-[2] table — payments.csv: columns tenant, month, amount, status
-[3] table — units.xlsx (Sheet1): building units. columns unit, floor, bedrooms, rent
+[2] table — payments.csv rows=4820: columns tenant, month, amount, status
+[3] table — units.xlsx (Sheet1) rows=120: building units. columns unit, floor, bedrooms, rent
 
 question: what notice does the tenant have to give to end the lease
 {"overall": [], "parts": [], "full": [0]}
