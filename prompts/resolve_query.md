@@ -4,7 +4,9 @@ You are given a question and a numbered inventory of a collection. Each item is 
 
 Place every item the answer must account for, and only those, into one of three groups by how deeply it has to be read. An item belongs in a group if the answer would be incomplete or wrong without what it holds. An item that merely shares words with the question belongs in none of them.
 
-- `overall` — for a document, what it covers taken as a whole; for a table, what it is about and what it holds
+Only the items you list are passed on to whoever writes the answer, and they are passed on at the depth you place them at. An item you leave out contributes nothing, no matter how plainly it is described here — nobody after you sees this inventory.
+
+- `overall` — for a document, what it covers taken as a whole; for a table, what it is about and what it holds. This is the shallowest an item can be carried, not a way of leaving it out
 - `parts` — what a document's individual relevant sections cover. Documents only
 - `full` — for a document, the wording of those sections; for a table, values drawn or computed from its rows
 
