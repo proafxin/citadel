@@ -501,18 +501,20 @@ def _upgrade_order(documents: list[DocRef], depths: dict[int, str]) -> list[tupl
 
 
 async def _upgrade(
-    doc: DocRef, ladder: tuple[str, ...], batches: list[BatchRef], floor_cost: int, spare: int
+    doc: DocRef, ladder: tuple[str, ...], batches: list[BatchRef], floor_cost: int, allowance: int
 ) -> tuple[list[str], int, str] | None:
     for depth in ladder:
-        # a document's blocks are priced from what it stored at ingestion, so an unaffordable one is rejected before a
-        # single block is read — the rung below is reached without paying to load the rung above
-        if depth == "full" and doc.content_tokens > spare + floor_cost:
+        # a document's depth is priced from what it stored at ingestion — its blocks from content_tokens, its parts
+        # from their summary tokens — so an unaffordable rung is rejected before anything is read, and the rung below
+        # is reached without paying to load the rung above
+        stored = doc.content_tokens if depth == "full" else sum(batch.summary_tokens for batch in batches)
+        if stored > allowance + floor_cost:
             continue
         texts = await _deeper_texts(depth, batches)
         if not texts:
             continue
         cost = sum(await asyncio.to_thread(count_tokens_batch, texts))
-        if cost - floor_cost <= spare:
+        if cost - floor_cost <= allowance:
             return texts, cost - floor_cost, depth
     return None
 
@@ -521,8 +523,9 @@ async def render_text(
     question: str, documents: list[DocRef], depths: dict[int, str], batches: dict[int, list[BatchRef]], budget: int
 ) -> list[str]:
     # every covered document is present at its summary before anything is deepened — that is the floor, and it is what
-    # keeps coverage a property of the output rather than an outcome of the budget. whatever the floor leaves is then
-    # spent deepening the documents that asked for depth, each one all-or-nothing against what is still spare
+    # keeps coverage a property of the output rather than an outcome of the budget. what the floor leaves is then spent
+    # on depth, but no document may take more than an EQUAL SHARE of it: a long document's parts outnumber a short
+    # one's many times over, and without a ceiling the longest document in the coverage writes most of the answer
     if not documents or budget <= 0:
         logger.info("text floor documents=%d budget=%d", len(documents), budget)
         return []
@@ -531,12 +534,13 @@ async def render_text(
     if sum(counts) > budget:
         return await _reduce_floor(question, documents, counts, budget)
     spare = budget - sum(counts)
+    share = spare // len(documents)
     rendered = {doc.id: [text] for doc, text in zip(documents, floor, strict=True)}
     costs = dict(zip((doc.id for doc in documents), counts, strict=True))
     deepened: dict[int, str] = {}
     greedy: list[str] = []
     for doc, ladder, spent_spare in _upgrade_order(documents, depths):
-        upgraded = await _upgrade(doc, ladder, batches.get(doc.id, []), costs[doc.id], spare)
+        upgraded = await _upgrade(doc, ladder, batches.get(doc.id, []), costs[doc.id], min(share, spare))
         if upgraded is not None:
             rendered[doc.id], delta, reached = upgraded
             spare -= delta
@@ -544,11 +548,13 @@ async def render_text(
             if spent_spare:
                 greedy.append(doc.filename)
     logger.info(
-        "text documents=%d floor=%d asked=%s greedy=%d spare=%d budget=%d",
+        "text documents=%d floor=%d share=%d asked=%s greedy=%d capped=%s spare=%d budget=%d",
         len(documents),
         sum(counts),
+        share,
         {doc.filename: deepened[doc.id] for doc in documents if doc.id in deepened and doc.filename not in greedy},
         len(greedy),
+        [doc.filename for doc in documents if doc.id not in deepened],
         spare,
         budget,
     )
