@@ -7,10 +7,31 @@ import { cn } from "@/lib/cn";
 import { tierMeta } from "@/lib/tiers";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { ArrowLeft, Download, SendHorizontal } from "lucide-react";
+import { ArrowLeft, Download, SendHorizontal, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 type Message = { role: "user" | "assistant"; content: string };
+
+function chatKey(libraryId: number): string {
+  return `citadel-chat-${libraryId}`;
+}
+
+function isMessage(value: unknown): value is Message {
+  const m = value as Message;
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (m.role === "user" || m.role === "assistant") &&
+    typeof m.content === "string"
+  );
+}
+
+function storedMessages(libraryId: number): Message[] {
+  const raw = localStorage.getItem(chatKey(libraryId));
+  if (!raw) return [];
+  const parsed: unknown = JSON.parse(raw);
+  return Array.isArray(parsed) ? parsed.filter(isMessage) : [];
+}
 
 function toMarkdown(messages: Message[], libraryName: string): string {
   const head = `# ${libraryName}\n\n_Exported ${new Date().toLocaleString()}_\n`;
@@ -44,10 +65,20 @@ export function LibraryAskPage() {
   const libQ = useQuery({ queryKey: ["library", id], queryFn: () => getLibrary(id) });
   const searchable = libQ.data ? tierMeta(libQ.data.tier).searchable : true;
 
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>(() => storedMessages(id));
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setMessages(storedMessages(id));
+  }, [id]);
+
+  useEffect(() => {
+    if (busy) return;
+    if (messages.length === 0) localStorage.removeItem(chatKey(id));
+    else localStorage.setItem(chatKey(id), JSON.stringify(messages));
+  }, [busy, id, messages]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -105,17 +136,22 @@ export function LibraryAskPage() {
           <Eyebrow>Ask</Eyebrow>
           <h1 className="mt-2 font-display text-3xl tracking-tight text-ink">Chat with this library</h1>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={messages.length === 0 || busy}
-          onClick={() => {
-            const name = libQ.data?.name ?? "Library";
-            downloadMarkdown(toMarkdown(messages, name), `${slugify(name)}-chat.md`);
-          }}
-        >
-          <Download size={15} /> Export
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={messages.length === 0 || busy}
+            onClick={() => {
+              const name = libQ.data?.name ?? "Library";
+              downloadMarkdown(toMarkdown(messages, name), `${slugify(name)}-chat.md`);
+            }}
+          >
+            <Download size={15} /> Export
+          </Button>
+          <Button variant="ghost" size="sm" disabled={messages.length === 0 || busy} onClick={() => setMessages([])}>
+            <Trash2 size={15} /> Clear
+          </Button>
+        </div>
       </div>
 
       {!searchable ? (
