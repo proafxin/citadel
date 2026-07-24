@@ -1,15 +1,42 @@
 import { Eyebrow } from "@/components/eyebrow";
 import { Markdown } from "@/components/markdown";
+import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { getLibrary, queryStream } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { tierMeta } from "@/lib/tiers";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { ArrowLeft, SendHorizontal } from "lucide-react";
+import { ArrowLeft, Download, SendHorizontal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 type Message = { role: "user" | "assistant"; content: string };
+
+function toMarkdown(messages: Message[], libraryName: string): string {
+  const head = `# ${libraryName}\n\n_Exported ${new Date().toLocaleString()}_\n`;
+  const body = messages
+    .map((m) => `## ${m.role === "user" ? "Question" : "Answer"}\n\n${m.content.trim()}`)
+    .join("\n\n---\n\n");
+  return `${head}\n${body}\n`;
+}
+
+function slugify(value: string): string {
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "library"
+  );
+}
+
+function downloadMarkdown(text: string, filename: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 export function LibraryAskPage() {
   const { libraryId } = useParams({ from: "/library/$libraryId/ask" });
@@ -73,9 +100,22 @@ export function LibraryAskPage() {
         <ArrowLeft size={15} /> {libQ.data?.name ?? "Back to library"}
       </Link>
 
-      <div className="mt-4">
-        <Eyebrow>Ask</Eyebrow>
-        <h1 className="mt-2 font-display text-3xl tracking-tight text-ink">Chat with this library</h1>
+      <div className="mt-4 flex items-end justify-between gap-4">
+        <div>
+          <Eyebrow>Ask</Eyebrow>
+          <h1 className="mt-2 font-display text-3xl tracking-tight text-ink">Chat with this library</h1>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={messages.length === 0 || busy}
+          onClick={() => {
+            const name = libQ.data?.name ?? "Library";
+            downloadMarkdown(toMarkdown(messages, name), `${slugify(name)}-chat.md`);
+          }}
+        >
+          <Download size={15} /> Export
+        </Button>
       </div>
 
       {!searchable ? (
