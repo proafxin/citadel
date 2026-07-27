@@ -157,20 +157,36 @@ _STRUCTURE_SCHEMA = {
 }
 
 
-async def structure_sheet(rows: str, column_hint: str, height: int, width: int) -> list[dict]:
-    # one call per sheet: the model is shown only the interesting rows and a body sample (rows, index-tagged) and it
-    # returns the table(s) — header rows, column span, title, notes — reasoning over structure it can
-    # SEE, never over data it cannot. it decides the semantic calls (what is a header, where a table splits); the
-    # mechanical data spans are derived by the caller from the header positions it returns
-    prompt = (
+def _structure_prompt(rows: str, column_hint: str, height: int, width: int) -> str:
+    # the model is shown only the interesting rows and a body sample (rows, index-tagged) and it returns the table(s) —
+    # header rows, column span, title, notes — reasoning over structure it can SEE, never over data it cannot. it
+    # decides the semantic calls (what is a header, where a table splits); the mechanical data spans are derived by the
+    # caller from the header positions it returns
+    return (
         f"{load_prompt('table_structure')}\n"
         f"the sheet has {height} rows (0..{height - 1}) and {width} columns (0..{width - 1}).\n"
         f"column value kinds: {column_hint}\n"
         f"rows:\n{rows}"
     )
-    data = await call_slm(prompt, _STRUCTURE_SCHEMA, interactive=False)
+
+
+def _structure_tables(data: dict) -> list[dict]:
     tables = data.get("tables", [])
     return tables if isinstance(tables, list) else []
+
+
+async def emit_structure_sheet(rows: str, column_hint: str, height: int, width: int) -> str:
+    return await emit_slm(_structure_prompt(rows, column_hint, height, width), _STRUCTURE_SCHEMA, interactive=False)
+
+
+async def collect_structure_sheet(job_id: str) -> list[dict]:
+    return _structure_tables(await collect_slm(job_id))
+
+
+async def structure_sheet(rows: str, column_hint: str, height: int, width: int) -> list[dict]:
+    return _structure_tables(
+        await call_slm(_structure_prompt(rows, column_hint, height, width), _STRUCTURE_SCHEMA, interactive=False)
+    )
 
 
 async def _chat_stream(prompt: str) -> AsyncIterator[str]:

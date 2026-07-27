@@ -10,7 +10,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from citadel.schemas.table import TableStructure
 from citadel.services.grid import classify_grid, grid_text
 from citadel.tabular.materialize import MaterializedTable, materialize
-from citadel.tabular.structure import structure_grid
+from citadel.tabular.structure import collect_structure_grid, emit_structure_grid
 
 type RawCellValue = str | int | float | bool | datetime | None
 
@@ -256,28 +256,47 @@ def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
     ]
 
 
+@dataclass
+class _RegionPlan:
+    region: Region
+    grid: list[list[str]]
+    text: SheetText | None  # a non-table region resolves here; a table region carries a structure job instead
+    job_id: str | None
+
+
+async def _plan_region(sheet: SheetExtraction, region: Region) -> _RegionPlan | None:
+    # classify, and for a table region EMIT its structure job without awaiting it — so every table region on the sheet
+    # is in flight on the slm worker at once. a non-table region is resolved to its text here; nothing is materialized
+    # until collect, which keeps document order intact
+    grid = region_grid(sheet, region)
+    kind = classify_grid(grid)
+    if kind == "empty":
+        return None
+    if kind != "table":
+        text = " ".join([grid_text(grid), *region_comments(region)]).strip()
+        return _RegionPlan(region, grid, SheetText(sheet_no=sheet.sheet_no, text=text), None)
+    return _RegionPlan(region, grid, None, await emit_structure_grid(grid))
+
+
 async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, SheetItem]]:
+    plans = [plan for region in find_regions(sheet) if (plan := await _plan_region(sheet, region)) is not None]
     items: list[tuple[int, SheetItem]] = []
     ordinal = 0
-    for region in find_regions(sheet):
-        grid = region_grid(sheet, region)
-        kind = classify_grid(grid)
-        if kind == "empty":
-            continue
-        if kind != "table":
+    for plan in plans:  # collect in document order; the jobs already ran concurrently
+        if plan.text is not None:
             ordinal += 1
-            text = " ".join([grid_text(grid), *region_comments(region)]).strip()
-            items.append((ordinal, SheetText(sheet_no=sheet.sheet_no, text=text)))
+            items.append((ordinal, plan.text))
             continue
-        for structure in await structure_grid(grid):
+        structures = [] if plan.job_id is None else await collect_structure_grid(plan.grid, plan.job_id)
+        for structure in structures:
             ordinal += 1
             table = materialize(
-                grid,
+                plan.grid,
                 structure,
                 sheet_no=sheet.sheet_no,
-                formulas=region_formulas(region) or None,
-                extra_notes=region_comments(region),
-                anchors=_anchor_range(region, structure),
+                formulas=region_formulas(plan.region) or None,
+                extra_notes=region_comments(plan.region),
+                anchors=_anchor_range(plan.region, structure),
             )
             items.append((ordinal, table))
     return items

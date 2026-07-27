@@ -1,7 +1,7 @@
 import logging
 import operator
 
-from citadel.llm import structure_sheet
+from citadel.llm import collect_structure_sheet, emit_structure_sheet
 from citadel.schemas.table import Crosstab, Dimension, KeyColumn, TableStructure
 from citadel.tabular.flag import column_kinds, payload_rows
 
@@ -106,18 +106,20 @@ def _crosstab(table: dict, width: int) -> Crosstab | None:
 SKIP_TABLE_SLM = False
 
 
-async def structure_grid(grid: list[list[str]]) -> list[TableStructure]:
-    height = len(grid)
-    if height == 0:
-        return []
-    if SKIP_TABLE_SLM:
-        return []
+async def emit_structure_grid(grid: list[list[str]]) -> str | None:
+    # emit the structure job WITHOUT awaiting it, so a sheet's many regions are all in flight on the slm worker at once
+    # rather than one after another. returns the job id (None when there is nothing to ask). the grid prep is CPU and
+    # stays here; deriving the answer waits for collect
+    if len(grid) == 0 or SKIP_TABLE_SLM:
+        return None
     width = max(len(row) for row in grid)
     indices = payload_rows(grid)
     kinds = column_kinds(grid)
     hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))
-    tables = await structure_sheet(_payload_text(grid, indices, width), hint, height, width)
-    structures = _derive(tables, grid, height, width)  # the model's answer, whatever it is — nothing is invented here
+    return await emit_structure_sheet(_payload_text(grid, indices, width), hint, len(grid), width)
+
+
+def _log_crosstabs(structures: list[TableStructure]) -> None:
     # the crosstab RECIPE is applied then discarded — it is not stored anywhere, unlike the materialized columns/rows
     # which land in `tables`. so log only the recipe; the result is queryable from the db
     for structure in structures:
@@ -133,4 +135,15 @@ async def structure_grid(grid: list[list[str]]) -> list[TableStructure]:
                 crosstab.value_col_start,
                 crosstab.value_col_end,
             )
+
+
+async def collect_structure_grid(grid: list[list[str]], job_id: str) -> list[TableStructure]:
+    tables = await collect_structure_sheet(job_id)
+    structures = _derive(tables, grid, len(grid), max(len(row) for row in grid))  # nothing is invented here
+    _log_crosstabs(structures)
     return structures
+
+
+async def structure_grid(grid: list[list[str]]) -> list[TableStructure]:
+    job_id = await emit_structure_grid(grid)
+    return [] if job_id is None else await collect_structure_grid(grid, job_id)
