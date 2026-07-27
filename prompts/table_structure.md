@@ -15,15 +15,15 @@ An ordinary table: each column is one field, each data row is one record. Report
 
 ## crosstab
 
-A matrix: one measure spread across many columns labelled by one or more header rows — for example orders down the rows and a grid of columns for each (Ship Mode, Segment) combination holding the Sales figure. Turn it back into a normal table with one row per value. Report:
+A matrix: one measure spread across many columns labelled by one or more header rows — for example branches down the rows and a grid of columns, one per (year, quarter), each cell holding that branch's headcount for that period. What makes it a matrix is that the labels naming those columns sit in the HEADER ROWS and the same measure repeats across them; a column whose own cells hold repeated category labels (a "Status" column reading Open, Closed, Open) is an ordinary relational field, not a matrix, however categorical it looks. Turn a matrix back into a normal table with one row per value. Report:
 
 - **layout**: "crosstab".
 - **header_rows**, **col_start**, **col_end**, **title**, **notes** — as above.
 - **columns** — leave empty for a crosstab.
 - **crosstab**:
-  - **key_columns** — the columns that identify each row and are NOT part of the matrix (e.g. the order id and date columns), each as `{"name": ..., "col": ...}`.
+  - **key_columns** — the columns that identify each row and are NOT part of the matrix (the branch and country columns in the example above), each as `{"name": ..., "col": ...}`.
   - **dimensions** — the header rows that label the matrix columns, each as `{"name": ..., "header_row": ...}`. A dimension value that visually spans several columns but sits only in the first still applies to all of them.
-  - **value_name** — what a single matrix cell holds (e.g. "Sales").
+  - **value_name** — what a single matrix cell holds (the headcount in the example above).
   - **value_col_start**, **value_col_end** — the FULL span of the matrix: the first and last column that the dimension header rows label. This is every column that is not a key column, from the first labelled one through the last — not only the columns where you happen to see values in the sample. The matrix is sparse: most cells in any one row are blank, because each row carries its value in just one of them. Judge the span from the header rows, which label all of it, never from where values appear.
 
 ## Both
@@ -32,5 +32,5 @@ Use the exact row and column numbers shown, and report the tables top to bottom.
 
 Respond ONLY with a JSON object like:
 {"tables": [{"layout": "relational", "header_rows": [0], "col_start": 0, "col_end": 3, "columns": ["Region", "Q1 Sales", "Q2 Sales", "Q3 Sales"], "title": "...", "notes": []}]}
-or, for a matrix:
-{"tables": [{"layout": "crosstab", "header_rows": [0,1,2], "col_start": 0, "col_end": 13, "columns": [], "crosstab": {"key_columns": [{"name": "Order ID", "col": 0}, {"name": "Order Date", "col": 1}], "dimensions": [{"name": "Ship Mode", "header_row": 0}, {"name": "Segment", "header_row": 1}], "value_name": "Sales", "value_col_start": 2, "value_col_end": 13}, "title": "...", "notes": []}]}
+or, for a matrix whose columns are labelled by two header rows (year on the first, quarter on the second) over two key columns:
+{"tables": [{"layout": "crosstab", "header_rows": [0,1], "col_start": 0, "col_end": 5, "columns": [], "crosstab": {"key_columns": [{"name": "Branch", "col": 0}, {"name": "Country", "col": 1}], "dimensions": [{"name": "Year", "header_row": 0}, {"name": "Quarter", "header_row": 1}], "value_name": "Headcount", "value_col_start": 2, "value_col_end": 5}, "title": "...", "notes": []}]}
