@@ -458,7 +458,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "cachetools", specifier = ">=7.1.6" },
-    { name = "fastapi", extras = ["standard"], specifier = ">=0.140.2" },
+    { name = "fastapi", extras = ["standard"], specifier = ">=0.140.9" },
     { name = "filetype", specifier = ">=1.2.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "huggingface-hub", specifier = ">=1.25.1" },
@@ -765,7 +765,7 @@ wheels = [
 
 [[package]]
 name = "fastapi"
-version = "0.140.2"
+version = "0.140.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
@@ -774,9 +774,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "typing-inspection" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5b/fa/67d7232a733c5f5cea8859dcd6f6de78a688bb8886676808e3f5a8358008/fastapi-0.140.2.tar.gz", hash = "sha256:5f64faeb12339d783510db0498da660539195ac7b5bdf69c0fc558f4580a9724", size = 421280, upload-time = "2026-07-27T14:15:39.682Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/a4/7e4dc8867a5c7f53355655314f3007e4a1f18b3ada60d49b6509b303fe29/fastapi-0.140.9.tar.gz", hash = "sha256:fadc1dae3671c34a542a34b14e3cec92ebe774b9f6ae6ae8da7339a9f0e9c287", size = 422649, upload-time = "2026-07-28T12:38:57.359Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/74/ed/15196be41f2bf84e358d899e62daf5666ba4f6dbab4cbad87d16cc16df6d/fastapi-0.140.2-py3-none-any.whl", hash = "sha256:944336ef298148dfd97478638567b223d929aba8717ad8be73ae962a62ecd61d", size = 130883, upload-time = "2026-07-27T14:15:38.099Z" },
+    { url = "https://files.pythonhosted.org/packages/91/ea/113074d315b02e94ea452b0a0e0397d91d7791000215b098c03b68c2d471/fastapi-0.140.9-py3-none-any.whl", hash = "sha256:313ab1c00f02d1a2255573d456d2cb519e87826d3eb82ce75ea2da2e983bcb64", size = 131098, upload-time = "2026-07-28T12:38:55.736Z" },
 ]
 
 [package.optional-dependencies]
@@ -1431,7 +1431,7 @@ wheels = [
 
 [[package]]
 name = "modelscope"
-version = "1.38.1"
+version = "1.39.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "filelock" },
@@ -1442,9 +1442,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/33/72/b37f46f8e1900c64485420b210eecda1f758cbd0fe8ade60c5bbf883b25e/modelscope-1.38.1.tar.gz", hash = "sha256:a81f3685b1545f52b415d88a763456416aa65170e622f9dcc02eadb3f8e1cfa0", size = 4542886, upload-time = "2026-07-06T15:13:56.427Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/da/56/9ecae749768f93d42e85be8d00d2b02cd85eedc58e965f721fc51a7035b4/modelscope-1.39.0.tar.gz", hash = "sha256:d2e223bd42cc8054d1388b7584c52fdfa7f304888ae5c0efe6406d621499d259", size = 4548145, upload-time = "2026-07-28T08:35:47.933Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5d/f3/caf5ef8c4adc99cd66607639642ae503ac190a3358f782776687200a7c36/modelscope-1.38.1-py3-none-any.whl", hash = "sha256:7d65be96999144ca045386d27a8ea057b8777504c538d9755d60ec2c8906fe72", size = 6034052, upload-time = "2026-07-06T15:13:53.923Z" },
+    { url = "https://files.pythonhosted.org/packages/54/25/b4ea67e6f9e9a3453b5df7bf3d6fab297a7f9a92b1701165f1950b8f9164/modelscope-1.39.0-py3-none-any.whl", hash = "sha256:a363298e4620db83b3ec0057a23a73c4ee1fa122ca11b375e72ef94874123efa", size = 6038508, upload-time = "2026-07-28T08:35:45.054Z" },
 ]
 
 [[package]]
