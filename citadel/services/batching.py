@@ -167,11 +167,24 @@ async def build_document_specs(session: AsyncSession, doc_id: int) -> list[Batch
     return pack_batches(doc_id, blocks)
 
 
-async def emit_document_batches(doc_id: int) -> None:
-    # a merged document is a COMPLETE one — its blocks are all persisted and nothing more will arrive — so the whole of
-    # batching and summarizing can be handed off as one job naming just the document. no tier gate: batches are built
-    # for every library during ingestion, and the tier is only a query-time access gate
-    await get_redis().xadd(STREAM_BATCH, {"doc_id": str(doc_id)})
+async def emit_library_batches(library_id: int) -> int:
+    # summarizing is retrieval prep, not structure, so it runs as ONE post-ingestion pass over the whole library rather
+    # than per document at merge: off the ocr-contended window, and never leaving the resolver a partial inventory. one
+    # job per document lands on the same stream the worker already drains with bounded concurrency. FAILED/SKIPPED docs
+    # owe nothing; a document with no batches is still summarized (its job marks it) so the wait can reach zero
+    async with get_sessionmaker()() as session:
+        doc_ids = list(
+            await session.scalars(
+                select(Document.id).where(
+                    Document.library_id == library_id,
+                    Document.status.in_((DocumentStatus.INGESTED, DocumentStatus.PARTIAL)),
+                )
+            )
+        )
+    redis = get_redis()
+    for doc_id in doc_ids:
+        await redis.xadd(STREAM_BATCH, {"doc_id": str(doc_id)})
+    return len(doc_ids)
 
 
 async def library_batches_pending(library_id: int) -> int:
@@ -185,7 +198,7 @@ async def library_batches_pending(library_id: int) -> int:
             .select_from(Document)
             .where(
                 Document.library_id == library_id,
-                Document.status == DocumentStatus.INGESTED,
+                Document.status.in_((DocumentStatus.INGESTED, DocumentStatus.PARTIAL)),
                 Document.summarized_at.is_(None),
             )
         )
