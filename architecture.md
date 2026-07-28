@@ -77,8 +77,9 @@ scheduled by the same machinery as everything else, and no source gets its own c
 job that completes the last of a document's tables is the one that fires merge, the same counter-and-fire
 shape pages use, so redelivery is a no-op and merge runs exactly once.
 
-A document with no tables never enters that stream at all: it merges as soon as its pages are read, so it
-becomes searchable *during* the run rather than waiting behind work it does not have.
+A document with no tables never enters that stream at all: it merges as soon as its pages are read, so it is
+structured and stored *during* the run rather than waiting behind work it does not have. (Becoming
+*searchable* is a later, separate step — the prep phase in Part I's finalize — not part of this pipeline.)
 
 The bus carries only lightweight in-flight state — page images and per-page blocks; the uploaded source is
 held once in a doc-keyed store and memory-mapped by each stage that reads it, never copied through the bus
@@ -378,28 +379,39 @@ Search text is indexed two ways: dense multilingual vectors for meaning, and exa
 ## Output and finalize
 
 The result of ingestion is the materialized tree — sections and leaves with their content, and full
-canonical table representations. Progress is a state per document (`queued → processing → ingested`, with
-`failed` / `skipped` for the special cases) and per library (`ingesting → ingested → ready`).
+canonical table representations. That is the ingestion contract, and it draws a hard line: **ingestion
+produces the queryable *structure*; it does not produce retrieval.** Once the tree and tables exist the
+library is **DB-queryable** — SQL runs over the typed tables — but not yet **retrieval-queryable**, which
+needs the summaries the resolver reads. Progress is a state per document (`queued → processing → ingested`,
+with `failed` / `skipped` for the special cases) and per library (`ingesting → ingested → ready`).
 
-Making a library *answerable* is a **separate phase from ingesting it**, run once per library after its
-last document is stored — deliberately never interleaved with reading, so it can't contend with the vision
-model for the GPU. Finalize now does one thing:
+Making a library *answerable* is a **separate prep phase**, run once per library after its last document is
+stored — deliberately never interleaved with reading, so it can't contend with the vision model for the GPU.
+Everything in it is a *reduction over already-persisted structure*, not structure itself, which is exactly
+why it belongs after ingestion rather than inside it:
 
+- **Summarize.** Every document is packed into batches and each batch summarized, then the document's own
+  summary is reduced from those — the whole library in one pass. These are what the resolver reads, so a
+  library is not retrieval-queryable until they exist.
 - **Embed and index.** Each leaf's and table's search text is embedded into the dense index and the lexical
-  index is built, so the library becomes queryable.
+  index is built.
 
-Table descriptions used to be written here too, and are not any more: they moved into the table stage, one
-call per table, alongside the structure work they belong with. A table now leaves ingestion complete rather
-than half-formed, and the description work spreads across the run instead of massing into a phase at the
-end. Finalize keeps a `described` transition so the phases it reports — and the UI reading them — are
-unchanged; it is simply instant now.
+Both run on the SLM/embedding GPU, so the phase serializes them — summaries, then embeddings — rather than
+letting either contend with OCR or with each other. Summaries used to stream per document *during* ingestion,
+overlapping OCR; that overlap paid a GPU-contention tax and, worse, let a query in the window resolve over a
+partial inventory. Running them here, gated on the library's last document draining, closes both.
 
-Both are gated by the library's **tier**. A *structure* library is ingested to the lossless tree and
-tables and stops there; a *search* library additionally gets the descriptions, embeddings and indexes that
-Part II runs on. The tier is a pricing/access boundary, not a different pipeline — a structure library can
-be upgraded and finalized later without re-ingesting. Finalize is event-driven: it fires the moment a
-library's last in-flight document drains, and is re-checked on restart for any library that became ready
-while the embedder was down.
+Table descriptions are a third thing that used to live at the end and does not any more: they moved into the
+table stage, one call per table, alongside the structure work they belong with — a table leaves ingestion
+complete rather than half-formed. Finalize keeps a `described` transition so the phases it reports (and the
+UI reading them) are unchanged; it is simply instant now.
+
+The prep phase is gated by the library's **tier**. A *structure* library is ingested to the lossless tree
+and tables and stops there; a *search* library additionally gets the summaries, embeddings and indexes that
+Part II runs on. The tier is a pricing/access boundary, not a different pipeline — a structure library can be
+upgraded and finalized later without re-ingesting. The phase is event-driven: it fires the moment a library's
+last in-flight document drains, and is re-checked on restart for any library that became ready while the app
+was down.
 
 ---
 
@@ -436,11 +448,11 @@ column names per table, never the full content — and may legitimately return n
 reformulation, no corpus-wide similarity net, no per-section selection pass, and no cross-channel
 arbitration**. The reasons are below.
 
-### Batches — the unit of text relevance, built at ingestion
+### Batches — the unit of text relevance, built once in the prep phase
 
 The reason batches exist is **amortization**. Deciding which prose bears on a question requires reading
 prose, and reading a whole corpus per question is a map-reduce every time — paid again on every query, over
-text that never changed. Summarizing once at ingestion moves that cost to the batch stage and makes it
+text that never changed. Summarizing once, up front, moves that cost off the query path and makes it
 reusable: the corpus is read once, and every subsequent query judges relevance against the stored result.
 Query-time map-reduce then becomes the fallback for evidence that genuinely exceeds the window, not the
 routine path.
@@ -449,15 +461,16 @@ Headings are author-written labels. "Introduction" or "Section 3" carries no sig
 judges relevance from headings alone judges from metadata rather than content. Tables have an organic
 compressed form — schema and sample rows, the table's own content uninterpreted — but prose has none:
 sampled paragraphs are not representative. This is the one place in the system where generated text is
-justified, and it is confined to ingestion.
+justified.
 
 Each document is packed into **batches**: content blocks in document order are accumulated until a token
-limit is reached (`BATCH_TOKENS = 32768`). Each batch is summarized once, at ingestion, by the batch stage —
-a streaming stage that emits one summary job per batch to the model stream as each document finishes,
-overlapping the rest of ingestion. The batch stores its own **block-ordinal and page range** at creation, so
-citation is a stored field. Summary length is bounded per batch (`min(10% of content tokens, 4096)`) so the
-summaries stay a true reduction. Batching is not tier-gated: it runs for every library during ingestion,
-before the tier is decided, so a tier upgrade is instant.
+limit is reached (`BATCH_TOKENS = 32768`). Each batch is summarized once, in the **prep phase** — after the
+library's structure is complete, not during ingestion — one job per document on the stream, drained by the
+same bounded-concurrency pool as every other SLM stage. The batch stores its own **block-ordinal and page
+range** at creation, so citation is a stored field. Summary length is bounded per batch (`min(10% of content
+tokens, 4096)`) so the summaries stay a true reduction. Summaries are a *reduction over persisted structure*,
+not structure itself — which is why they run here, behind the same tier gate as embedding, rather than
+streaming during ingestion where they contended with OCR and could leave a query a partial inventory.
 
 This gives the hierarchy the query side needs — document summary → batch summary → block — and it means
 relevance is judged against content, not labels. A document's own summary is written at the end of the same
@@ -591,7 +604,8 @@ Summary quality. Two summaries now stand between the query and the content, and 
 **batch** summary misrepresents a section. A bad **document** summary is worse: it is the only thing
 resolution ever sees of that document, so a document whose summary omits what it holds is not merely
 under-read — it is never selected at all, and the failure is indistinguishable in the log from a document
-that genuinely bears on nothing. Both are set once, at ingestion, and neither can be compensated downstream.
+that genuinely bears on nothing. Both are set once, in the prep phase, and neither can be compensated
+downstream.
 
 ### Open
 
