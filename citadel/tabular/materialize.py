@@ -81,15 +81,26 @@ def _is_data_token(cell: str) -> bool:
 def _plausible_header_rows(grid: list[list[str]], header_rows: list[int]) -> list[int]:
     # a header NAMES the columns; it is never the data itself. emails and ISO dates are never column names, so a
     # predicted header row made mostly of them is a data row the model promoted (its cells then get space-joined into
-    # "103 104" / two emails). bare numbers are deliberately NOT a data signal: wide sheets legitimately use years as
-    # headers (Country Name | ... | 1960 | 1961 | ...), and rejecting those would destroy a correct schema.
+    # "103 104" / two emails). a DECIMAL is likewise never a column name — a label-beside-a-value row from a key-value
+    # block ("st | 0.11", "KB | 69.04") is data the model promoted, so ANY decimal cell disqualifies the row. bare
+    # INTEGERS are deliberately NOT a data signal: wide sheets legitimately use years as headers (... | 1960 | 1961),
+    # and rejecting those would destroy a correct schema.
     kept: list[int] = []
     for row in header_rows:
         cells = [cell for cell in (grid[row] if row < len(grid) else []) if cell.strip()]
+        if cells and any(_lossless_decimal(cell.strip()) for cell in cells):
+            continue
         if cells and sum(1 for cell in cells if _is_data_token(cell)) * 2 > len(cells):
             continue
         kept.append(row)
     return kept
+
+
+def _clean_name(name: str | None) -> str | None:
+    # a resolved column name that is a pure decimal is a value the model read as a name (a key-value block's value
+    # column). drop it so the plain col<index> fallback names the column instead. bare integers survive — a year is a
+    # real column name on a wide sheet
+    return None if name is not None and _lossless_decimal(name.strip()) else name
 
 
 def _sample(rows: list[list[CellValue]]) -> list[list[CellValue]]:
@@ -192,7 +203,9 @@ def materialize(
         ]
     else:
         headers = [_grid_header(grid, header_rows, structure.col_start + index) for index in range(count)]
-    columns = [Column(header=headers[index] or f"col{index}", dtype=dtypes[index]) for index in range(count)]
+    columns = [
+        Column(header=_clean_name(headers[index]) or f"col{index}", dtype=dtypes[index]) for index in range(count)
+    ]
     # the header rows are kept as the first rows of the stored grid — verbatim, never dropped. a row the detector
     # wrongly promoted to header survives as a queryable row; header_rows records what is header, deletion never does
     header_cells = [
