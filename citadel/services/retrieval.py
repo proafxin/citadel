@@ -77,7 +77,7 @@ def embed_texts(texts: list[str], longest: int) -> list[list[float]]:
     baseline = torch.cuda.memory_allocated()
     vectors = get_embedder().encode(texts, batch_size=batch_size, normalize_embeddings=True, show_progress_bar=False)
     activation = torch.cuda.max_memory_allocated() - baseline
-    logger.info(
+    logger.debug(
         "embed_encode rows=%d longest=%d batch=%d per_token=%d budget=%dMiB act=%dMiB avail=%dMiB",
         len(texts),
         longest,
@@ -153,11 +153,7 @@ def _take_group(nodes: list[_PendingNode], start: int, budget: int) -> tuple[int
     return end, longest
 
 
-async def _encode_group(
-    library_id: int, batch: list[_PendingNode], longest: int, label: str
-) -> list[dict[str, object]]:
-    total = sum(node.token_len for node in batch)  # real tokens packed vs the padded ceiling (rows x longest)
-    logger.info("embed_group %s rows=%d longest=%d total=%d", label, len(batch), longest, total)
+async def _encode_group(library_id: int, batch: list[_PendingNode], longest: int) -> list[dict[str, object]]:
     vectors = await _embed([node.search_text for node in batch], longest)  # GPU work outside any open transaction
     return [
         {"content_id": node.content_id, "library_id": library_id, "type": node.node_type, "embedding": vector}
@@ -177,7 +173,7 @@ async def _write_group(records: list[dict[str, object]], label: str) -> None:
             await session.execute(
                 ins.on_conflict_do_update(index_elements=["content_id"], set_={"embedding": ins.excluded.embedding})
             )
-    logger.info("embed_group %s write %.2fs", label, time.time() - write_t)
+    logger.debug("embed_group %s write %.2fs", label, time.time() - write_t)
 
 
 async def _mark_documents_embedded(library_id: int) -> None:
@@ -213,16 +209,26 @@ async def embed_library(library_id: int) -> int:
         end, longest = _take_group(pending, index, token_budget())
         group_no += 1
         label = f"lib{library_id}.g{group_no}"
-        records = await _encode_group(library_id, pending[index:end], longest, label)
+        records = await _encode_group(library_id, pending[index:end], longest)
         if writing is not None:
             await writing  # one open transaction at a time, and a failed write raises here rather than being lost
         writing = asyncio.create_task(_write_group(records, label))
-        embedded += end - index
+        group_rows = end - index
+        embedded += group_rows
         index = end
         elapsed = time.time() - started
         rate = embedded / elapsed if elapsed > 0 else 0.0
         await redis.hset(f"embed:{library_id}", mapping={"done": embedded, "total": total})
-        logger.info("embed library=%d %d/%d nodes %.1fs %.0f nodes/s", library_id, embedded, total, elapsed, rate)
+        logger.info(
+            "embed %s rows=%d longest=%d %d/%d nodes %.1fs %.0f nodes/s",
+            label,
+            group_rows,
+            longest,
+            embedded,
+            total,
+            elapsed,
+            rate,
+        )
     if writing is not None:
         await writing  # the last group's write must land before any document is marked embedded
     await _mark_documents_embedded(library_id)
