@@ -287,7 +287,7 @@ async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, Sheet
             ordinal += 1
             items.append((ordinal, plan.text))
             continue
-        structures = [] if plan.job_id is None else await collect_structure_grid(plan.grid, plan.job_id)
+        structures = await collect_structure_grid(plan.grid, plan.job_id)
         for structure in structures:
             ordinal += 1
             table = materialize(

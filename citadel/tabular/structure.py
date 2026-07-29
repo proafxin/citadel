@@ -35,6 +35,57 @@ def _is_header_row(grid: list[list[str]], row: int, width: int) -> bool:
     return not (width >= SPARSE_HEADER_MIN_WIDTH and populated <= SPARSE_HEADER_MAX_CELLS)
 
 
+MIN_DIMENSION_RUN = 3  # a value matrix is several like-typed columns; two look-alike headers are not yet a crosstab
+MAX_HEADER_SCAN = 8  # the crosstab header sits near the top of its region; scan only the opening rows for it
+YEAR_DIGITS = 4
+YEAR_MIN = 1000
+YEAR_MAX = 3100
+
+
+def _cell(grid: list[list[str]], row: int, col: int) -> str:
+    return grid[row][col].strip() if 0 <= row < len(grid) and 0 <= col < len(grid[row]) else ""
+
+
+def _is_year(cell: str) -> bool:
+    return len(cell) == YEAR_DIGITS and cell.isdigit() and YEAR_MIN <= int(cell) <= YEAR_MAX
+
+
+def _deterministic_crosstab(grid: list[list[str]], height: int, width: int) -> TableStructure | None:
+    # a flat crosstab whose value columns are headed by a YEAR SEQUENCE (the WDI shape: Country…|1960|…|2025). read from
+    # the grid ALONE so it is reproducible — the model's non-deterministic layout call otherwise flips 82,636 long rows
+    # into a wide table on some re-ingests. conservative on purpose: the year band must be right-anchored (last column)
+    # and have at least one NAMED key column to its left, or nothing fires and the model decides as before
+    for header_row in range(min(height, MAX_HEADER_SCAN)):
+        run = 0
+        for col in range(width - 1, -1, -1):
+            if not _is_year(_cell(grid, header_row, col)):
+                break
+            run += 1
+        if run < MIN_DIMENSION_RUN:
+            continue
+        value_start = width - run
+        if value_start == 0 or not all(_cell(grid, header_row, col) for col in range(value_start)):
+            continue  # the columns left of the year band are the keys; they must all be named to trust this row
+        crosstab = Crosstab(
+            key_columns=[KeyColumn(name=_cell(grid, header_row, col), col=col) for col in range(value_start)],
+            dimensions=[Dimension(name="Year", header_row=header_row)],
+            value_name="value",
+            value_col_start=value_start,
+            value_col_end=width - 1,
+        )
+        return TableStructure(
+            layout="crosstab",
+            col_start=0,
+            col_end=width - 1,
+            header_rows=[header_row],
+            data_start=header_row + 1,
+            data_end=height - 1,
+            columns=None,
+            crosstab=crosstab,
+        )
+    return None
+
+
 def _derive(tables: list[dict], grid: list[list[str]], height: int, width: int) -> list[TableStructure]:
     # the model returns header rows + column span per table; the data spans are ours to compute. each table owns the
     # rows from just after its header down to just before the next table starts (or the sheet's end)
@@ -54,7 +105,11 @@ def _derive(tables: list[dict], grid: list[list[str]], height: int, width: int) 
         data_end = (int(ordered[position + 1]["top"]) - 1) if position + 1 < len(ordered) else height - 1
         if data_start > data_end:
             continue
-        columns = [str(name) for name in table.get("columns", [])] or None
+        # column names are grounded in header rows the model marked. with NO header row the table is header-less, and
+        # the model is told to leave columns empty (they take plain col<index> names) — but it sometimes invents names
+        # from the data anyway (a degree audit came back with fabricated, per-fragment-inconsistent field names). so
+        # ENFORCE the rule: no header row → no names. this never touches a real header (its rows survive the filter)
+        columns = ([str(name) for name in table.get("columns", [])] or None) if header_rows else None
         crosstab = _crosstab(table, width) if table.get("layout") == "crosstab" else None
         out.append(
             TableStructure(
@@ -113,6 +168,8 @@ async def emit_structure_grid(grid: list[list[str]]) -> str | None:
     if len(grid) == 0 or SKIP_TABLE_SLM:
         return None
     width = max(len(row) for row in grid)
+    if _deterministic_crosstab(grid, len(grid), width) is not None:
+        return None  # the structure is already known from the grid — don't spend an slm call to re-derive it
     indices = payload_rows(grid)
     kinds = column_kinds(grid)
     hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))
@@ -137,7 +194,15 @@ def _log_crosstabs(structures: list[TableStructure]) -> None:
             )
 
 
-async def collect_structure_grid(grid: list[list[str]], job_id: str) -> list[TableStructure]:
+async def collect_structure_grid(grid: list[list[str]], job_id: str | None) -> list[TableStructure]:
+    if len(grid) == 0 or SKIP_TABLE_SLM:
+        return []
+    detected = _deterministic_crosstab(grid, len(grid), max(len(row) for row in grid))
+    if detected is not None:
+        _log_crosstabs([detected])
+        return [detected]
+    if job_id is None:
+        return []
     tables = await collect_structure_sheet(job_id)
     structures = _derive(tables, grid, len(grid), max(len(row) for row in grid))  # nothing is invented here
     _log_crosstabs(structures)
@@ -145,5 +210,4 @@ async def collect_structure_grid(grid: list[list[str]], job_id: str) -> list[Tab
 
 
 async def structure_grid(grid: list[list[str]]) -> list[TableStructure]:
-    job_id = await emit_structure_grid(grid)
-    return [] if job_id is None else await collect_structure_grid(grid, job_id)
+    return await collect_structure_grid(grid, await emit_structure_grid(grid))
