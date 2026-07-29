@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import json
 import logging
@@ -272,6 +273,54 @@ async def resolve_query(query: str, items: list[str], library: str = "") -> dict
     if not coverage:
         logger.warning("resolve covered nothing raw=%s", data)
     return coverage
+
+
+_VALIDATE_SCHEMA = {
+    "type": "object",
+    "properties": {"tables": {"type": "array", "items": {"type": "integer"}}},
+    "required": ["tables"],
+}
+
+
+def _pack_indices(counts: list[int], budget: int) -> list[list[int]]:
+    groups: list[list[int]] = []
+    current: list[int] = []
+    used = 0
+    for index, cost in enumerate(counts):
+        if current and used + cost > budget:
+            groups.append(current)
+            current, used = [], 0
+        current.append(index)
+        used += cost
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _validate_prompt(candidates: list[str]) -> str:
+    listing = "\n\n".join(f"[{index}] {candidate}" for index, candidate in enumerate(candidates))
+    return f"{load_prompt('table_validation')}\ncandidates:\n{listing}"
+
+
+async def validate_tables(candidates: list[str]) -> list[bool]:
+    # which of a document's candidate tables are real. per-candidate judgment, so an oversized candidate set splits
+    # across concurrent batches losslessly — each batch decides its own members, nothing needs cross-candidate context
+    if not candidates:
+        return []
+    counts = await asyncio.to_thread(count_tokens_batch, candidates)
+    packs = _pack_indices(counts, RESOLVE_BUDGET)
+    jobs: list[tuple[list[int], str]] = []
+    for pack in packs:
+        job_id = await emit_slm(_validate_prompt([candidates[i] for i in pack]), _VALIDATE_SCHEMA, False)
+        jobs.append((pack, job_id))
+    keep = [False] * len(candidates)
+    for pack, job_id in jobs:
+        data = await collect_slm(job_id)
+        for local in data.get("tables", []):
+            if isinstance(local, int) and 0 <= local < len(pack):
+                keep[pack[local]] = True
+    logger.info("validate_tables candidates=%d packs=%d kept=%d", len(candidates), len(packs), sum(keep))
+    return keep
 
 
 async def write_queries(query: str, tables: list[str], library: str = "") -> QueryPlan:

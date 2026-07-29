@@ -13,6 +13,7 @@ from sqlalchemy import func, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
+from citadel.llm import validate_tables
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
 from citadel.models.library import Library
@@ -245,6 +246,39 @@ def collect_tables(results: dict[int, str | bytes]) -> tuple[dict[int, int], lis
         counts[index] = len(tables)
         queue.extend(tables)
     return counts, queue
+
+
+CANDIDATE_SAMPLE_ROWS = 3
+
+
+def _candidate_render(table: MaterializedTable) -> str:
+    # enough to tell a real table from a captured banner/heading: the column names and a few of its rows. not the whole
+    # table — the shape is what the judgment turns on, not the data
+    headers = ", ".join(str(column.header or "?") for column in table.columns)
+    body = "\n".join(
+        " | ".join("" if cell is None else str(cell) for cell in row)
+        for row in table.sample_rows[:CANDIDATE_SAMPLE_ROWS]
+    )
+    return f"columns: {headers}\n{body}" if body else f"columns: {headers}"
+
+
+async def validate_document_tables(
+    counts: dict[int, int], queue: list[MaterializedTable]
+) -> tuple[dict[int, int], list[MaterializedTable]]:
+    # drop candidates the model judges are not real tables (page banners, headings captured with a table shape). the
+    # queue is ordered by block index exactly as build_tree consumes it, so a dropped table must also decrement its
+    # block's count or the tree and the queue fall out of step
+    if not queue:
+        return counts, queue
+    keep = await validate_tables([_candidate_render(table) for table in queue])
+    new_counts: dict[int, int] = {}
+    position = 0
+    for index in sorted(counts):
+        take = counts[index]
+        new_counts[index] = sum(keep[position : position + take])
+        position += take
+    new_queue = [table for table, kept in zip(queue, keep, strict=True) if kept]
+    return new_counts, new_queue
 
 
 def _token_count(text: str | None) -> int:

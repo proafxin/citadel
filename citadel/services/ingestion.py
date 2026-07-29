@@ -50,6 +50,7 @@ from citadel.services.document import (
     save_sheet_tables,
     structure_table_block,
     table_block_indices,
+    validate_document_tables,
 )
 from citadel.services.excel import (
     SheetExtraction,
@@ -1422,6 +1423,7 @@ async def handle_merge(fields: dict[str, str]) -> None:
     prepared = load_structures(await redis.get(f"structures:{doc_id}"))
     results = await redis.hgetall(f"tables:{doc_id}")
     table_counts, table_queue = collect_tables({int(key): value for key, value in results.items()})
+    table_counts, table_queue = await validate_document_tables(table_counts, table_queue)
     await save_document_tree(int(doc_id), blocks, state, prepared, table_counts, table_queue)
     await persist_document_tree(int(doc_id))
     await redis.hset(f"doc:{doc_id}", mapping={"state": state, "t_done": time.time()})
