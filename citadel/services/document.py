@@ -41,7 +41,7 @@ from citadel.services.tree import (
     split_title,
 )
 from citadel.storage import delete_object, get_object, put_object
-from citadel.tabular.materialize import MaterializedTable, materialize
+from citadel.tabular.materialize import MaterializedTable, materialize, normalize_orientation
 from citadel.tabular.structure import structure_grid
 from config import EMBED_MAX_TOKENS, get_embed_tokenizer
 
@@ -200,7 +200,7 @@ def _authoritative_header(table: MaterializedTable) -> bool:
 
 
 async def _structure_ocr_grid(html: str) -> list[MaterializedTable]:
-    grid = grid_from_html(html)
+    grid = normalize_orientation(grid_from_html(html))
     if not grid:
         return []
     return [table for structure in await structure_grid(grid) if (table := materialize(grid, structure)).n_rows]

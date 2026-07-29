@@ -86,6 +86,25 @@ def _deterministic_crosstab(grid: list[list[str]], height: int, width: int) -> T
     return None
 
 
+def structure_declared_table(grid: list[list[str]], header_row_count: int) -> TableStructure:
+    # an authoritative table (an excel ListObject) declares its header row COUNT and exact range, so the header is known
+    # rather than guessed — but the declaration does not say whether the columns are a value matrix, so the crosstab
+    # check still gets first say; otherwise it is a plain relational table with the header rows we were handed
+    height = len(grid)
+    width = max((len(row) for row in grid), default=0)
+    crosstab = _deterministic_crosstab(grid, height, width)
+    if crosstab is not None:
+        return crosstab
+    header_rows = list(range(min(max(header_row_count, 0), height)))
+    return TableStructure(
+        col_start=0,
+        col_end=width - 1,
+        header_rows=header_rows,
+        data_start=len(header_rows),
+        data_end=height - 1,
+    )
+
+
 def _derive(tables: list[dict], grid: list[list[str]], height: int, width: int) -> list[TableStructure]:
     # the model returns header rows + column span per table; the data spans are ours to compute. each table owns the
     # rows from just after its header down to just before the next table starts (or the sheet's end)

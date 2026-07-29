@@ -5,12 +5,13 @@ from io import BytesIO
 
 import openpyxl
 from openpyxl.cell.cell import Cell as OpenpyxlCell
+from openpyxl.utils.cell import range_boundaries
 from openpyxl.worksheet.worksheet import Worksheet
 
 from citadel.schemas.table import TableStructure
 from citadel.services.grid import classify_grid, grid_text
-from citadel.tabular.materialize import MaterializedTable, materialize
-from citadel.tabular.structure import collect_structure_grid, emit_structure_grid
+from citadel.tabular.materialize import MaterializedTable, materialize, normalize_orientation
+from citadel.tabular.structure import collect_structure_grid, emit_structure_grid, structure_declared_table
 
 type RawCellValue = str | int | float | bool | datetime | None
 
@@ -43,6 +44,23 @@ class MergedRange:
 
 
 @dataclass
+class SheetTable:
+    min_row: int
+    min_col: int
+    max_row: int
+    max_col: int
+    header_row_count: int
+
+
+@dataclass
+class SheetPivot:
+    min_row: int
+    min_col: int
+    max_row: int
+    max_col: int
+
+
+@dataclass
 class SheetExtraction:
     sheet_no: int
     sheet_name: str
@@ -50,6 +68,8 @@ class SheetExtraction:
     max_col: int
     cells: list[Cell]
     merges: list[MergedRange]
+    tables: list[SheetTable]
+    pivots: list[SheetPivot]
 
 
 @dataclass
@@ -125,6 +145,40 @@ def _capture_merges(worksheet: Worksheet) -> list[MergedRange]:
     ]
 
 
+def _capture_tables(worksheet: Worksheet) -> list[SheetTable]:
+    # a ListObject is an AUTHORITATIVE table: excel stores its exact range and header row count. hidden under
+    # read_only, but load_all_sheets does full loads so it is here for free. these override the region heuristic
+    tables: list[SheetTable] = []
+    for table in worksheet.tables.values():
+        min_col, min_row, max_col, max_row = range_boundaries(table.ref)
+        tables.append(
+            SheetTable(
+                min_row=min_row,
+                min_col=min_col,
+                max_row=max_row,
+                max_col=max_col,
+                header_row_count=table.headerRowCount or 1,
+            )
+        )
+    return tables
+
+
+def _capture_pivots(worksheet: Worksheet) -> list[SheetPivot]:
+    # a pivot table is a DERIVED aggregate. when its source is a range in this workbook, that source is extracted on its
+    # own as a grounded table, so the rendered aggregate is suppressed rather than stored a second time. a pivot with an
+    # external source (or a named source we cannot resolve to a sheet) is left alone — its data lives nowhere else here
+    names = set(worksheet.parent.sheetnames)
+    pivots: list[SheetPivot] = []
+    for pivot in worksheet._pivots:
+        ref = getattr(pivot.location, "ref", None)
+        source = getattr(pivot.cache.cacheSource, "worksheetSource", None)
+        if ref is None or source is None or source.sheet not in names:
+            continue
+        min_col, min_row, max_col, max_row = range_boundaries(ref)
+        pivots.append(SheetPivot(min_row=min_row, min_col=min_col, max_row=max_row, max_col=max_col))
+    return pivots
+
+
 def extract_sheet(values_sheet: Worksheet, formulas_sheet: Worksheet, sheet_no: int) -> SheetExtraction:
     return SheetExtraction(
         sheet_no=sheet_no,
@@ -133,6 +187,8 @@ def extract_sheet(values_sheet: Worksheet, formulas_sheet: Worksheet, sheet_no: 
         max_col=formulas_sheet.max_column or 0,
         cells=_capture_cells(values_sheet, formulas_sheet),
         merges=_capture_merges(formulas_sheet),
+        tables=_capture_tables(formulas_sheet),
+        pivots=_capture_pivots(formulas_sheet),
     )
 
 
@@ -226,6 +282,17 @@ def _anchor_range(region: Region, structure: TableStructure) -> dict:
     }
 
 
+def _region_bounds(region: Region) -> dict:
+    # a transposed region's structure offsets are on the flipped grid, so they no longer map back to sheet rows/cols —
+    # anchor to the region rectangle, which is the same regardless of orientation
+    return {
+        "min_row": region.min_row,
+        "min_col": region.min_col,
+        "max_row": region.max_row,
+        "max_col": region.max_col,
+    }
+
+
 def _render_cell(value: RawCellValue) -> str:
     if value is None:
         return ""
@@ -256,26 +323,63 @@ def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
     ]
 
 
+def _pivot_covers(region: Region, pivots: list[SheetPivot]) -> bool:
+    # the rendered aggregate occupies the pivot's location; a region overlapping it IS that aggregate
+    return any(
+        region.min_row <= pivot.max_row
+        and region.max_row >= pivot.min_row
+        and region.min_col <= pivot.max_col
+        and region.max_col >= pivot.min_col
+        for pivot in pivots
+    )
+
+
+def _declared_for_region(region: Region, tables: list[SheetTable]) -> SheetTable | None:
+    # a region is served by a declared table when it starts at that table's top-left and stays within its range — the
+    # declaration then gives the header rows authoritatively. exact top-left anchoring keeps a table that merely sits
+    # near others from being claimed
+    for table in tables:
+        if (
+            region.min_row == table.min_row
+            and region.min_col == table.min_col
+            and region.max_row <= table.max_row
+            and region.max_col <= table.max_col
+        ):
+            return table
+    return None
+
+
 @dataclass
 class _RegionPlan:
     region: Region
     grid: list[list[str]]
     text: SheetText | None  # a non-table region resolves here; a table region carries a structure job instead
     job_id: str | None
+    structures: list[TableStructure] | None  # set when the structure is known upfront (a declared table)
+    transposed: bool = False  # the grid was flipped to normal orientation; anchor to the region rectangle instead
 
 
 async def _plan_region(sheet: SheetExtraction, region: Region) -> _RegionPlan | None:
     # classify, and for a table region EMIT its structure job without awaiting it — so every table region on the sheet
     # is in flight on the slm worker at once. a non-table region is resolved to its text here; nothing is materialized
     # until collect, which keeps document order intact
-    grid = region_grid(sheet, region)
+    raw = region_grid(sheet, region)
+    if classify_grid(raw) == "empty":
+        return None
+    if _pivot_covers(region, sheet.pivots):
+        return None  # a derived pivot aggregate — its worksheet source is extracted as a grounded table instead
+    declared = _declared_for_region(region, sheet.tables)
+    if declared is not None:  # authoritative: a ListObject is a table by declaration, orientation included
+        return _RegionPlan(region, raw, None, None, [structure_declared_table(raw, declared.header_row_count)])
+    grid = normalize_orientation(raw)
+    transposed = grid is not raw
     kind = classify_grid(grid)
     if kind == "empty":
         return None
     if kind != "table":
         text = " ".join([grid_text(grid), *region_comments(region)]).strip()
-        return _RegionPlan(region, grid, SheetText(sheet_no=sheet.sheet_no, text=text), None)
-    return _RegionPlan(region, grid, None, await emit_structure_grid(grid))
+        return _RegionPlan(region, grid, SheetText(sheet_no=sheet.sheet_no, text=text), None, None, transposed)
+    return _RegionPlan(region, grid, None, await emit_structure_grid(grid), None, transposed)
 
 
 async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, SheetItem]]:
@@ -287,7 +391,9 @@ async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, Sheet
             ordinal += 1
             items.append((ordinal, plan.text))
             continue
-        structures = await collect_structure_grid(plan.grid, plan.job_id)
+        structures = (
+            plan.structures if plan.structures is not None else await collect_structure_grid(plan.grid, plan.job_id)
+        )
         for structure in structures:
             ordinal += 1
             table = materialize(
@@ -296,7 +402,7 @@ async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, Sheet
                 sheet_no=sheet.sheet_no,
                 formulas=region_formulas(plan.region) or None,
                 extra_notes=region_comments(plan.region),
-                anchors=_anchor_range(plan.region, structure),
+                anchors=_region_bounds(plan.region) if plan.transposed else _anchor_range(plan.region, structure),
             )
             items.append((ordinal, table))
     return items

@@ -68,6 +68,58 @@ def _grid_cell(grid: list[list[str]], row: int, col: int) -> str:
     return grid[row][col] if 0 <= row < len(grid) and 0 <= col < len(grid[row]) else ""
 
 
+TRANSPOSE_MIN_DIM = 3  # a transposed table needs a field column plus at least two record columns to be distinguishable
+TRANSPOSE_MIXED_MIN = 0.5  # the given orientation must be at least this fraction type-mixed columns to be a suspect
+TRANSPOSE_PURE_MAX = 0.2  # and its transpose at most this — a clear margin, so a clean table is never flipped
+TRANSPOSE_MIN_CELLS = 2  # a column needs at least two filled cells before its type mix means anything
+
+
+def _is_numeric(cell: str) -> bool:
+    stripped = cell.strip()
+    return _lossless_int(stripped) or _lossless_decimal(stripped)
+
+
+def _mixed_column_fraction(grid: list[list[str]]) -> float:
+    # fraction of columns that MIX numeric and non-numeric cells. a clean relational column is one field and does not
+    # mix; a transposed table's record columns do (a name, an age, a city stacked down one record). the first row is
+    # skipped — it is the header/label whose text would otherwise make every numeric column read as mixed
+    width = max((len(row) for row in grid), default=0)
+    mixed = 0
+    total = 0
+    for col in range(width):
+        cells = [value for row in grid[1:] if col < len(row) and (value := row[col].strip())]
+        if len(cells) < TRANSPOSE_MIN_CELLS:
+            continue
+        total += 1
+        numeric = sum(1 for cell in cells if _is_numeric(cell))
+        if 0 < numeric < len(cells):
+            mixed += 1
+    return mixed / total if total else 0.0
+
+
+def transpose_grid(grid: list[list[str]]) -> list[list[str]]:
+    width = max((len(row) for row in grid), default=0)
+    return [[_grid_cell(grid, row, col) for row in range(len(grid))] for col in range(width)]
+
+
+def detect_transposed(grid: list[list[str]]) -> bool:
+    # a transposed table lists field NAMES down column 0 and one RECORD per following column, so its columns MIX types
+    # while the same data read the other way has clean one-type columns. flip ONLY on a clear type-axis asymmetry —
+    # never when the given orientation is already clean, and never without a numeric signal (all-text is undecidable)
+    height = len(grid)
+    width = max((len(row) for row in grid), default=0)
+    if height < TRANSPOSE_MIN_DIM or width < TRANSPOSE_MIN_DIM:
+        return False
+    return (
+        _mixed_column_fraction(grid) >= TRANSPOSE_MIXED_MIN
+        and _mixed_column_fraction(transpose_grid(grid)) <= TRANSPOSE_PURE_MAX
+    )
+
+
+def normalize_orientation(grid: list[list[str]]) -> list[list[str]]:
+    return transpose_grid(grid) if detect_transposed(grid) else grid
+
+
 def _grid_header(grid: list[list[str]], header_rows: list[int], col: int) -> str | None:
     parts = dict.fromkeys(cell for row in header_rows if (cell := _grid_cell(grid, row, col)))
     return " ".join(parts) or None
@@ -169,6 +221,123 @@ def _materialize_crosstab(
     )
 
 
+SECTION_MIN_WIDTH = 3  # below this, a single-value row is too ambiguous to call a section banner over sparse data
+SECTION_MIN_SPAN = 2  # a banner spans at least two columns; a lone cell is indistinguishable from sparse data
+
+
+def _section_marker(grid: list[list[str]], row: int, col_start: int, count: int) -> tuple[int, str] | None:
+    # a right-anchored horizontal span of ONE value across a wide row is a merged section banner, not data — the source
+    # spanned a single label to the table's edge (grid smear is why it currently repeats across every column). the
+    # leftmost spanned column is its nesting level: a full-width banner starts at 0, an indented sub-section further in
+    if count < SECTION_MIN_WIDTH:
+        return None
+    filled = [(index, value) for index in range(count) if (value := _grid_cell(grid, row, col_start + index).strip())]
+    if len(filled) < SECTION_MIN_SPAN or len({value for _, value in filled}) != 1:
+        return None
+    offsets = [index for index, _ in filled]
+    if offsets != list(range(offsets[0], count)):  # must reach the right edge, contiguously — a banner, not a dup cell
+        return None
+    return offsets[0], filled[0][1]
+
+
+def _collect_sections(
+    grid: list[list[str]], data_start: int, data_end: int, col_start: int, count: int
+) -> tuple[list[list[str]], list[list[str | None]], list[str]]:
+    # denormalize section-label rows: each banner is lifted out of the data and its label filled DOWN onto the rows it
+    # governs, as leading grouping column(s). one column per distinct indent level; a shallower banner clears deeper
+    # levels. nothing is dropped and nothing invented — the label is source text, the membership is source structure
+    markers: dict[int, tuple[int, str]] = {}
+    for offset in range(data_start, data_end + 1):
+        marker = _section_marker(grid, offset, col_start, count)
+        if marker is not None:
+            markers[offset] = marker
+    levels = sorted({level for level, _ in markers.values()})
+    level_index = {level: index for index, level in enumerate(levels)}
+    active: list[str | None] = [None] * len(levels)
+    collected: list[list[str]] = []
+    sections: list[list[str | None]] = []
+    for offset in range(data_start, data_end + 1):
+        if offset in markers:
+            level, label = markers[offset]
+            index = level_index[level]
+            active[index] = label
+            for deeper in range(index + 1, len(active)):
+                active[deeper] = None
+            continue
+        raw = [_grid_cell(grid, offset, col_start + index) for index in range(count)]
+        if not any(raw):
+            continue
+        collected.append(raw)
+        sections.append(list(active))
+    names = ["section"] if len(levels) == 1 else [f"section_{index + 1}" for index in range(len(levels))]
+    return collected, sections, names
+
+
+def _section_columns(sections: list[list[str | None]], names: list[str]) -> list[Column]:
+    return [
+        Column(header=names[index], dtype=dtype_of([section[index] or "" for section in sections]))
+        for index in range(len(names))
+    ]
+
+
+def _materialize_relational(
+    grid: list[list[str]],
+    structure: TableStructure,
+    sheet_no: int,
+    formulas: list[str] | None,
+    extra_notes: list[str] | None,
+    anchors: dict | None,
+) -> MaterializedTable:
+    count = structure.col_end - structure.col_start + 1
+    header_rows = _plausible_header_rows(grid, structure.header_rows or [])
+    # a rejected header row is data the model ate — pull data_start back so those rows are kept as rows, not lost
+    rejected = set(structure.header_rows or []) - set(header_rows)
+    data_start = min([structure.data_start, *rejected]) if rejected else structure.data_start
+    collected, sections, section_names = _collect_sections(
+        grid, data_start, structure.data_end, structure.col_start, count
+    )
+    dtypes = [dtype_of([raw[index] for raw in collected]) for index in range(count)]
+    # SLM-resolved names win when present (it handles implied/merged/multi-row headers); else stack the header rows
+    if structure.columns:
+        headers: list[str | None] = [
+            structure.columns[index] if index < len(structure.columns) else None for index in range(count)
+        ]
+    else:
+        headers = [_grid_header(grid, header_rows, structure.col_start + index) for index in range(count)]
+    columns = [
+        Column(header=_clean_name(headers[index]) or f"col{index}", dtype=dtypes[index]) for index in range(count)
+    ]
+    section_columns = _section_columns(sections, section_names)
+    header_pad: list[CellValue] = [None] * len(section_names)
+    # the header rows are kept as the first rows of the stored grid — verbatim, never dropped. a row the detector
+    # wrongly promoted to header survives as a queryable row; header_rows records what is header, deletion never does
+    header_cells = [
+        [*header_pad, *(cast_cell(_grid_cell(grid, row, structure.col_start + index)) for index in range(count))]
+        for row in sorted(header_rows)
+    ]
+    data_rows = [
+        [
+            *(cast_cell(sections[position][index] or "") for index in range(len(section_names))),
+            *(cast_cell(collected[position][index]) for index in range(count)),
+        ]
+        for position in range(len(collected))
+    ]
+    header_indices = list(range(len(header_cells)))
+    return MaterializedTable(
+        sheet_no=sheet_no,
+        columns=[*section_columns, *columns],
+        rows=[*header_cells, *data_rows],
+        sample_rows=_sample(data_rows),
+        n_rows=len(data_rows),
+        title=structure.title,
+        caption=structure.caption,
+        notes=[*(structure.notes or []), *(extra_notes or [])],
+        anchors={**(anchors or {}), "header_rows": header_indices},
+        formulas=formulas,
+        header_rows=header_indices,
+    )
+
+
 def materialize(
     grid: list[list[str]],
     structure: TableStructure,
@@ -184,46 +353,4 @@ def materialize(
     # comments, its address range) ride in as metadata rather than forking the logic
     if structure.layout == "crosstab" and structure.crosstab is not None:
         return _materialize_crosstab(grid, structure, structure.crosstab, sheet_no, formulas, extra_notes, anchors)
-    count = structure.col_end - structure.col_start + 1
-    header_rows = _plausible_header_rows(grid, structure.header_rows or [])
-    # a rejected header row is data the model ate — pull data_start back so those rows are kept as rows, not lost
-    rejected = set(structure.header_rows or []) - set(header_rows)
-    data_start = min([structure.data_start, *rejected]) if rejected else structure.data_start
-    collected: list[list[str]] = []
-    for offset in range(data_start, structure.data_end + 1):
-        raw = [_grid_cell(grid, offset, structure.col_start + index) for index in range(count)]
-        if not any(raw):
-            continue
-        collected.append(raw)
-    dtypes = [dtype_of([raw[index] for raw in collected]) for index in range(count)]
-    # SLM-resolved names win when present (it handles implied/merged/multi-row headers); else stack the header rows
-    if structure.columns:
-        headers: list[str | None] = [
-            structure.columns[index] if index < len(structure.columns) else None for index in range(count)
-        ]
-    else:
-        headers = [_grid_header(grid, header_rows, structure.col_start + index) for index in range(count)]
-    columns = [
-        Column(header=_clean_name(headers[index]) or f"col{index}", dtype=dtypes[index]) for index in range(count)
-    ]
-    # the header rows are kept as the first rows of the stored grid — verbatim, never dropped. a row the detector
-    # wrongly promoted to header survives as a queryable row; header_rows records what is header, deletion never does
-    header_cells = [
-        [cast_cell(_grid_cell(grid, row, structure.col_start + index)) for index in range(count)]
-        for row in sorted(header_rows)
-    ]
-    data_rows = [[cast_cell(raw[index]) for index in range(count)] for raw in collected]
-    header_indices = list(range(len(header_cells)))
-    return MaterializedTable(
-        sheet_no=sheet_no,
-        columns=columns,
-        rows=[*header_cells, *data_rows],
-        sample_rows=_sample(data_rows),
-        n_rows=len(data_rows),
-        title=structure.title,
-        caption=structure.caption,
-        notes=[*(structure.notes or []), *(extra_notes or [])],
-        anchors={**(anchors or {}), "header_rows": header_indices},
-        formulas=formulas,
-        header_rows=header_indices,
-    )
+    return _materialize_relational(grid, structure, sheet_no, formulas, extra_notes, anchors)
