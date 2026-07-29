@@ -41,7 +41,8 @@ from citadel.services.tree import (
     split_title,
 )
 from citadel.storage import delete_object, get_object, put_object
-from citadel.tabular.materialize import MaterializedTable
+from citadel.tabular.materialize import MaterializedTable, materialize
+from citadel.tabular.structure import structure_grid
 from config import EMBED_MAX_TOKENS, get_embed_tokenizer
 
 
@@ -187,10 +188,32 @@ def table_block_indices(blocks: list[Block]) -> list[int]:
     return [index for index, block in enumerate(blocks) if block.type == "table"]
 
 
-async def structure_table_block(block: Block, context: str) -> list[MaterializedTable]:
-    # ONE table block = ONE job. the stage claims it off the stream like any other unit, so table structuring is bounded
-    # by the stream's capacity and the slm queue, not by a fan-out hidden inside a single claimed job
-    return structure_html_tables(block.text or "")
+def _authoritative_header(table: MaterializedTable) -> bool:
+    # the OCR-marked header is trustworthy only when it is a real column header: a header row was marked, every column
+    # got a name (no col<index> fallback), and the names are distinct. a banner marked as the header repeats a
+    # span-expanded value across columns (duplicate names); a missed header leaves the columns unnamed. either way the
+    # structure is ambiguous and the grid is better handed to the model — the same treatment a spreadsheet region gets
+    if not table.header_rows:
+        return False
+    names = [column.header for column in table.columns]
+    return all(name is not None for name in names) and len(set(names)) == len(names)
+
+
+async def _structure_ocr_grid(html: str) -> list[MaterializedTable]:
+    grid = grid_from_html(html)
+    if not grid:
+        return []
+    return [table for structure in await structure_grid(grid) if (table := materialize(grid, structure)).n_rows]
+
+
+async def structure_table_block(block: Block, context: str, from_ocr: bool) -> list[MaterializedTable]:
+    # ONE table block = ONE job, bounded by the stream and the slm queue. digital markup (docx/html/pptx) states its own
+    # header — trust it, no model. a table recognized out of a PDF carries only the OCR model's GUESS at the header, so
+    # trust that only when it is cleanly authoritative; otherwise the grid is ambiguous and goes to the structure model
+    deterministic = structure_html_tables(block.text or "")
+    if not from_ocr or (len(deterministic) == 1 and _authoritative_header(deterministic[0])):
+        return deterministic
+    return await _structure_ocr_grid(block.text or "")
 
 
 @dataclass

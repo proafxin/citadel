@@ -593,6 +593,7 @@ async def handle_paginate(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     kind = fields["kind"]
     redis = get_redis()
+    await redis.hset(f"doc:{doc_id}", "kind", kind)  # read back at table_structure to route OCR tables to the model
     await redis.hset(f"doc:{doc_id}", "state", "paginating")
     await redis.hsetnx(f"doc:{doc_id}", "t_paginate", time.time())
     paginator = _BLOCK_PAGINATORS.get(kind)
@@ -1401,8 +1402,10 @@ async def handle_table_structure(fields: dict[str, str]) -> None:
     block_idx = int(fields["block_idx"])
     redis = get_redis()
     filename = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
+    kind = (await redis.hget(f"doc:{doc_id}", "kind") or b"").decode()
+    from_ocr = kind == "pdf" or kind.startswith("image:")  # digital markup states its header; ocr only guesses it
     prepared = load_structures(await redis.get(f"structures:{doc_id}"))
-    tables = await structure_table_block(prepared.stitched[block_idx], filename)
+    tables = await structure_table_block(prepared.stitched[block_idx], filename, from_ocr=from_ocr)
     await record_table(doc_id, block_idx, dump_tables(tables))
 
 
