@@ -167,11 +167,33 @@ async def build_document_specs(session: AsyncSession, doc_id: int) -> list[Batch
     return pack_batches(doc_id, blocks)
 
 
+_SUMMARY_LOCK = 2  # advisory-lock namespace for the per-library summary-completion check (disjoint from the embed lock)
+
+
+def _summaries_done_stream(library_id: int) -> str:
+    return f"summaries:done:{library_id}"
+
+
+async def _pending_summaries(session: AsyncSession, library_id: int) -> int:
+    # documents whose batches are not summarized yet. a FAILED document is excluded — it is not INGESTED/PARTIAL, so it
+    # owes nothing and can never hold the library back; a redelivered job re-marks the same row without moving the count
+    pending = await session.scalar(
+        select(func.count())
+        .select_from(Document)
+        .where(
+            Document.library_id == library_id,
+            Document.status.in_((DocumentStatus.INGESTED, DocumentStatus.PARTIAL)),
+            Document.summarized_at.is_(None),
+        )
+    )
+    return int(pending or 0)
+
+
 async def emit_library_batches(library_id: int) -> int:
     # summarizing is retrieval prep, not structure, so it runs as ONE post-ingestion pass over the whole library rather
     # than per document at merge: off the ocr-contended window, and never leaving the resolver a partial inventory. one
-    # job per document lands on the same stream the worker already drains with bounded concurrency. FAILED/SKIPPED docs
-    # owe nothing; a document with no batches is still summarized (its job marks it) so the wait can reach zero
+    # job per document lands on the same stream the worker already drains with bounded concurrency. the completion
+    # stream is cleared BEFORE any job can fire, so a stale entry from a prior run is never mistaken for this one's
     async with get_sessionmaker()() as session:
         doc_ids = list(
             await session.scalars(
@@ -182,27 +204,31 @@ async def emit_library_batches(library_id: int) -> int:
             )
         )
     redis = get_redis()
+    await redis.delete(_summaries_done_stream(library_id))
     for doc_id in doc_ids:
-        await redis.xadd(STREAM_BATCH, {"doc_id": str(doc_id)})
+        await redis.xadd(STREAM_BATCH, {"doc_id": str(doc_id), "library_id": str(library_id)})
     return len(doc_ids)
 
 
-async def library_batches_pending(library_id: int) -> int:
-    # documents of this library whose batches have not been summarized yet. nothing to count and no counter to keep in
-    # sync — a document is marked the moment its batching finishes, so this is a plain question of the data, and a
-    # redelivered job re-marks the same row without moving the answer. a FAILED document is excluded: it owes nothing,
-    # and waiting on one would hold the library back forever
-    async with get_sessionmaker()() as session:
-        pending = await session.scalar(
-            select(func.count())
-            .select_from(Document)
-            .where(
-                Document.library_id == library_id,
-                Document.status.in_((DocumentStatus.INGESTED, DocumentStatus.PARTIAL)),
-                Document.summarized_at.is_(None),
-            )
+async def record_summary(library_id: int) -> None:
+    # counter-and-fire, DB-backed like embed's inflight check: once a document's summary commits, the job that finds no
+    # summaries left fires the library's completion stream. the advisory lock serializes the check, so two documents
+    # finishing together cannot both miss zero and leave the library never firing
+    async with get_sessionmaker()() as session, session.begin():
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:cls, :lib)"), {"cls": _SUMMARY_LOCK, "lib": library_id}
         )
-    return int(pending or 0)
+        remaining = await _pending_summaries(session, library_id)
+    if remaining == 0:
+        await get_redis().xadd(_summaries_done_stream(library_id), {"library_id": str(library_id)})
+
+
+async def wait_library_summaries(library_id: int, emitted: int) -> None:
+    # the last summary to land fires the completion stream; block on it instead of polling. reading from "0" is
+    # race-free — the entry persists, so a fire that happened before this read is still seen
+    if emitted == 0:
+        return
+    await get_redis().xread({_summaries_done_stream(library_id): "0"}, block=0)
 
 
 def _summary_prompt(spec: BatchSpec) -> tuple[str, int]:

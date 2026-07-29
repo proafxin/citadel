@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from citadel.db import get_engine
 from citadel.router import router
-from citadel.services.batching import emit_library_batches, library_batches_pending
+from citadel.services.batching import emit_library_batches, wait_library_summaries
 from citadel.services.document import (
     mark_described,
     mark_embed_started,
@@ -28,19 +28,6 @@ logger = logging.getLogger(__name__)
 
 _finalizing: set[int] = set()
 
-SUMMARY_POLL_S = 2  # how often finalization re-asks whether the library's documents have all been summarized
-
-
-async def _await_summaries(library_id: int) -> float:
-    started = time.time()
-    pending = await library_batches_pending(library_id)
-    if pending:
-        logger.info("waiting on summaries library=%d documents=%d", library_id, pending)
-    while pending:
-        await asyncio.sleep(SUMMARY_POLL_S)
-        pending = await library_batches_pending(library_id)
-    return time.time() - started
-
 
 async def _finalize(library_id: int, tag: str) -> None:
     if library_id in _finalizing:  # catch-up and the live NOTIFY can target the same library — run it once
@@ -51,24 +38,17 @@ async def _finalize(library_id: int, tag: str) -> None:
         await mark_finalize_started(library_id)
         await mark_described(library_id)  # descriptions are produced inline during structure now; this is an instant
         # status transition kept so the finalize phases (and the UI reading them) are unchanged
-        # prep is retrieval-queryable work, run as ONE pass now that ingestion (structure) is done: summarize the whole
-        # library and wait it out, THEN embed. both hit the GPU, so serialized here they never contend, and neither runs
-        # during ocr. summaries must land before READY so the resolver is never handed a partial inventory
+        # prep is retrieval-queryable work, run now that ingestion (structure) is done, off the ocr-contended window.
+        # summarizing (worker) and embedding (here) do not depend on each other, so they run CONCURRENTLY and the
+        # library is READY once BOTH land — the summary wait is an event (the last summary fires it), never a poll
         emitted = await emit_library_batches(library_id)
         logger.info("summarizing library=%d documents=%d", library_id, emitted)
-        waited = await _await_summaries(library_id)
         await mark_embed_started(library_id)
         t = time.time()
-        embedded = await embed_library(library_id)
+        _, embedded = await asyncio.gather(wait_library_summaries(library_id, emitted), embed_library(library_id))
         await mark_library_ready(library_id)
         logger.info(
-            "%s library=%d documents=%d summaries=%.1fs nodes=%d embed=%.1fs",
-            tag,
-            library_id,
-            emitted,
-            waited,
-            embedded,
-            time.time() - t,
+            "%s library=%d documents=%d nodes=%d prep=%.1fs", tag, library_id, emitted, embedded, time.time() - t
         )
     finally:
         _finalizing.discard(library_id)

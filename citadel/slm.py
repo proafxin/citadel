@@ -49,7 +49,9 @@ async def _emit(reply_to: str, job_id: str, kind: str, value: str) -> None:
     await redis.xtrim(reply_to, maxlen=REPLY_MAXLEN, approximate=True)
 
 
-async def _stream_call(client: httpx.AsyncClient, url: str, payload: dict, reply_to: str, job_id: str) -> None:
+async def _stream_call(client: httpx.AsyncClient, url: str, payload: dict, reply_to: str, job_id: str) -> float | None:
+    # returns when the FIRST token landed: it splits the queue-plus-prefill wait (emit → here) from decode (here → done)
+    first: float | None = None
     async with client.stream("POST", url, json=payload) as response:
         if response.is_error:
             body = await response.aread()
@@ -63,24 +65,30 @@ async def _stream_call(client: httpx.AsyncClient, url: str, payload: dict, reply
                 break
             delta = json.loads(data)["choices"][0]["delta"].get("content")
             if delta:
+                if first is None:
+                    first = time.time()
                 await _emit(reply_to, job_id, CHUNK, delta)
+    return first
 
 
-async def _blocking_call(client: httpx.AsyncClient, url: str, payload: dict, reply_to: str, job_id: str) -> None:
+async def _blocking_call(
+    client: httpx.AsyncClient, url: str, payload: dict, reply_to: str, job_id: str
+) -> float | None:
     response = await client.post(url, json=payload)
     if response.is_error:
         logger.error("provider %d job=%s body=%s", response.status_code, job_id, response.text[:2000])
     response.raise_for_status()
+    first = time.time()  # a blocking call yields the whole reply at once, so first ≈ done: no decode span to measure
     await _emit(reply_to, job_id, CHUNK, response.json()["choices"][0]["message"]["content"])
+    return first
 
 
-async def _call_provider(payload: dict, reply_to: str, job_id: str) -> None:
+async def _call_provider(payload: dict, reply_to: str, job_id: str) -> float | None:
     url = f"{get_settings().qwen_base_url}/chat/completions"
     async with httpx.AsyncClient(timeout=NO_TIMEOUT) as client:
         if payload.get("stream"):
-            await _stream_call(client, url, payload, reply_to, job_id)
-        else:
-            await _blocking_call(client, url, payload, reply_to, job_id)
+            return await _stream_call(client, url, payload, reply_to, job_id)
+        return await _blocking_call(client, url, payload, reply_to, job_id)
 
 
 async def _settle(stream: str, msg_id: str) -> None:
@@ -121,13 +129,13 @@ async def _run_job(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
     job_id = raw[b"job_id"].decode()
     reply_to = raw[b"reply_to"].decode()
     attempt = int(raw.get(b"attempt", b"0"))
-    # wait = how long the job sat before vllm started it; gen = how long it took once running. a slow call is one or the
-    # other and they need opposite fixes — waiting means contention for slots, generating means the work is simply large
+    # ttft = emit → first token: the queue-plus-prefill wait, most of which is spent WAITING inside vllm for a KV slot
+    # (no client gate — a job is dispatched at once and then waits there). gen = first token → done: the actual decode.
+    # a slow call is one or the other and they need opposite fixes — contention vs work that is simply large
     emitted = float(raw.get(b"t_emit", b"0") or 0)
     started = time.time()
-    wait = started - emitted if emitted else 0.0
     try:
-        await _call_provider(json.loads(raw[b"payload"].decode()), reply_to, job_id)
+        first = await _call_provider(json.loads(raw[b"payload"].decode()), reply_to, job_id)
     except httpx.HTTPStatusError as error:
         logger.exception("slm job failed job=%s attempt=%d", job_id, attempt)
         if error.response.is_client_error:
@@ -140,7 +148,13 @@ async def _run_job(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
         logger.exception("slm job failed job=%s attempt=%d", job_id, attempt)
         await _fail(stream, msg_id, raw, attempt)
         return
-    logger.info("slm job stream=%s wait=%.1fs gen=%.1fs", stream, wait, time.time() - started)
+    done = time.time()
+    ttft = (first - emitted) if first and emitted else (started - emitted if emitted else 0.0)
+    gen = (done - first) if first else (done - started)
+    # per-job lines are only signal for the few interactive (query) calls; the many bulk (summary) ones would just be
+    # noise at info, so they go to debug
+    level = logging.INFO if stream == STREAM_SLM_INTERACTIVE else logging.DEBUG
+    logger.log(level, "slm job stream=%s ttft=%.1fs gen=%.1fs", stream, ttft, gen)
     await _emit(reply_to, job_id, DONE, "")
     await _settle(stream, msg_id)
 

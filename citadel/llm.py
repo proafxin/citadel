@@ -88,12 +88,15 @@ async def collect_slm(job_id: str) -> dict:
 
 
 def _text_payload(prompt: str, max_tokens: int) -> dict:
+    # streamed so the job runner can time the first token — separating the in-vllm queue+prefill wait from decode. the
+    # reply is collected chunk by chunk exactly as before; streaming only changes how the tokens arrive, not the result
     return {
         "model": QWEN_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
+        "stream": True,
     }
 
 

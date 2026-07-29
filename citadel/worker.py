@@ -9,7 +9,7 @@ from typing import Any, cast
 
 from citadel.bus import get_redis
 from citadel.db import get_engine
-from citadel.services.batching import STREAM_BATCH, summarize_document
+from citadel.services.batching import STREAM_BATCH, record_summary, summarize_document
 from citadel.services.ingestion import (
     CROP_BOUND,
     DECODE_CONCURRENCY,
@@ -384,9 +384,13 @@ async def _batch_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
     error = work.exception()
     if error is None:
         await _settle(stream, msg_id)
-        return
-    logger.error("batch failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(error))
-    await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "batch"))
+    else:
+        logger.error("batch failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(error))
+        await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "batch"))
+    # fire the library's summary-completion check after EVERY attempt: it is idempotent (checks pending, fires once at
+    # zero), and reaching it on a permanent failure is what keeps a failed last document from stranding the wait. a
+    # retry leaves the document pending, so the check simply finds work left and does not fire early
+    await record_summary(int(fields["library_id"]))
 
 
 # ---- normalize: read `ingest`, convert, write `normalized`. one dedicated libreoffice profile per job
