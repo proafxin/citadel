@@ -317,6 +317,16 @@ Year, Value]` — 82,636 one-value rows — which is what makes it answerable by
 matters because a crosstab left wide is unqueryable: "the value for Bangladesh in 2010" is a *column name*,
 not a filter, and no `WHERE` can reach it.
 
+**Verified grounding (2026-07-29).** The spreadsheet path was checked cell-for-cell against a deliberately
+hard sheet — one tab, 5,594×71, twelve stacked regions: side-by-side parameter blocks, two crosstabs, wide
+metadata tables, and divider labels. Every extracted table matched a source region, and the denormalizations
+were exact: the WDI crosstab's **82,636** rows equal the count of non-empty source cells (66 year-columns
+over ~3,020 rows), a spot value agreed (`VC.IDP.NWDS`/Bangladesh/2008 = `61000` in both), the sales
+`Ship Mode × Segment` crosstab's **834** rows equal its non-empty cells, and the FSI table's 179 rows
+matched — with the three title/divider cells correctly *not* extracted. No cell invented, none lost. This is
+the reference baseline for the tabular path; the failure surface it does **not** cover is header-less form
+PDFs (see Known limitations).
+
 By source:
 
 - **Spreadsheets** — every cell, merge, table object and frozen pane is captured; contiguous regions are
@@ -694,14 +704,16 @@ data in its head: it reads, judges, and writes queries; the database keeps the n
 Open gaps in the current build. None corrupts an answer — each is a place the system is weaker than the
 design intends.
 
-- **Header-less forms and irregular grids keep generic `col0…colN` columns.** The table-structure step
-  assumes a header band over data rows. A form or invoice laid out as label/value pairs, or an irregular
-  government-form PDF (a degree-progress report, a transfer-credit report), has no such band — so either a
-  wrong row is latched onto as the header, or none is found and the columns fall back to `col0, col1, …`.
-  Validation does not catch these: they *are* grid-shaped, so they pass as real tables, just with unusable
-  column names. Measured on the 32-file corpus, this is the dominant table-fidelity failure — one such PDF
-  produced thirteen `col0…col6` tables. The table still materializes and never blocks ingestion; the effect
-  is confined to queries actually about such a form, since the filter ignores it otherwise.
+- **Missed headers and section-labels-captured-as-data in irregular PDFs.** A *genuinely* header-less table
+  correctly gets generic `col0…colN` columns — a key-value block, a bare listing under a section heading —
+  and its rows are faithful, just unnamed; that is the right structure, not a defect (verified on a
+  degree-audit report whose course rows carry a consistent schema and have no header row). The real failures
+  are narrower. First, a header row that *is* present can be missed and left as a data row while the columns
+  fall back to `col0…colN` — seen on a transfer-credit report whose `Transfer Term | Incoming Course | Course
+  Title | …` row sat in the data. Second, a section-label row *inside* a table (`1B. ENG 121`) can be
+  flattened into a data row with the label repeated across every column. Validation catches neither — both
+  are grid-shaped — so the table materializes with correct data but a wrong header/row boundary; the effect
+  is confined to queries about that document.
 
 - **Prose occasionally survives as a table cell.** Validation drops most non-tabular candidates, but a page
   of running text laid out in a way that reads as a two-column grid can still slip through with a whole
