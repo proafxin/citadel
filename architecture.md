@@ -67,7 +67,7 @@ upload → normalize → paginate → render → ocr → structure ─┬──�
 | render | rasterize one PDF page |
 | ocr | detect the page's regions, then read each one → blocks |
 | structure | a document's blocks → paratext split, reclassify, stitch tables; then route — no tables goes straight to merge, each table found becomes its own job |
-| table_structure | one job per table unit — a spreadsheet sheet, or one table block — → canonical Table, described |
+| table_structure | one job per table unit — a spreadsheet sheet, or one table block — → canonical Table; a document's candidates then pass an LLM validation that drops the spurious ones |
 | merge | assemble the content tree from the prepared blocks and the finished tables → persist |
 
 **Every table is a job on one stream**, whatever it came from. A spreadsheet sheet and a single table on
@@ -307,6 +307,16 @@ Tables are separated **by schema**: a run of rows with consistent columns is one
 starts a new one, so a single source table yields **one or more** canonical tables — a stacked invoice
 splits into its summary block and its line-items.
 
+A table also has a **layout**, which the structure model reports alongside the columns: *relational* (each
+column is a field, each row a record) or *crosstab* (a matrix — one measure spread across many columns
+labelled by the header rows, a grid of years across the top with a value in each cell). A crosstab is
+**denormalized to long form** at ingestion: the key columns that identify a row, one column per header-row
+dimension, and a single value column, so one wide row becomes many narrow ones. A World Development
+Indicators sheet of 66 year-columns lands as one relational table of `[Country, Code, Indicator, Code,
+Year, Value]` — 82,636 one-value rows — which is what makes it answerable by ordinary SQL. The distinction
+matters because a crosstab left wide is unqueryable: "the value for Bangladesh in 2010" is a *column name*,
+not a filter, and no `WHERE` can reach it.
+
 By source:
 
 - **Spreadsheets** — every cell, merge, table object and frozen pane is captured; contiguous regions are
@@ -333,21 +343,23 @@ five-million-row sheet cost the same call. Sizing that view by a *token budget* 
 and measured — it let a prompt grow to fill whatever window was available, producing 20k-token requests to
 decide which rows were headers.
 
-Every table gets a description written for retrieval — its subject, what a row represents, and the entities
-and vocabulary a user would search for. It is written **in the table stage, one call per table**, uniformly
-over native, HTML and scanned-page tables — a search artifact, never ingested data. Per-table is what makes
-it cheap to parallelize: each is a small independent request, so a hundred tables are a hundred requests the
-server batches, not one request generating a hundred descriptions one token at a time. This description is
-what makes a table *findable*: a grid of numbers and terse headers has almost no natural-language surface to
-match a question against, so without a written description a search for the table's subject would miss it.
+A document's candidate tables pass a **validation** step before they are kept. Structure detection
+over-produces — a block of prose gridded into cells, a figure or a caption read as a one-row table, a
+region that is not tabular at all — so an LLM is shown the candidates for a document and judges which are
+real tables. It is a per-candidate keep/drop decision, batched across the document's candidates (a set too
+large for one call splits losslessly, each batch deciding its own members), so a spurious grid is dropped
+before it ever reaches the query side. The model decides *membership*, never content — the same boundary as
+structure. This is what reconciles over-detection: a document whose structure pass proposed nineteen
+candidates keeps the six that are genuinely tables.
 
 ## Search representation
 
 Citadel retrieves **leaves and tables, never chunks**. A leaf's search text is its own cleaned text plus
 its context: library, filename, the headings above it, and the page's paratext; cleaning normalizes
 Unicode, rejoins hyphen-split words, collapses whitespace, and turns machine names into words. A table's
-search text is richer: library, file, sheet, title, caption, notes, its column headers, and its
-description. Rows stay off the text path.
+search text is assembled the same way, from what the table already holds: library, file, sheet, title,
+caption, notes, and its column headers. It is built mechanically, not written by a model. Rows stay off the
+text path.
 
 Search text is indexed two ways: dense multilingual vectors for meaning, and exact lexical matching
 (substring and trigram) for the names, identifiers and codes a meaning vector blurs together. A table is
@@ -396,15 +408,18 @@ why it belongs after ingestion rather than inside it:
 - **Embed and index.** Each leaf's and table's search text is embedded into the dense index and the lexical
   index is built.
 
-Both run on the SLM/embedding GPU, so the phase serializes them — summaries, then embeddings — rather than
-letting either contend with OCR or with each other. Summaries used to stream per document *during* ingestion,
-overlapping OCR; that overlap paid a GPU-contention tax and, worse, let a query in the window resolve over a
-partial inventory. Running them here, gated on the library's last document draining, closes both.
+Summaries and embeddings do not depend on each other, so they run **concurrently** and the library is ready
+once both land — the summary work is on the SLM, the embedding on the embedder, and running them together
+hides the shorter (embedding) under the longer (summaries) instead of stacking the two. Summaries used to
+stream per document *during* ingestion, overlapping OCR; that overlap paid a GPU-contention tax and, worse,
+let a query in the window resolve over a partial inventory. Running them in this phase, gated on the
+library's last document draining, closes both, and the summary wait is event-driven — the last summary to
+land fires a completion signal — never a poll.
 
-Table descriptions are a third thing that used to live at the end and does not any more: they moved into the
-table stage, one call per table, alongside the structure work they belong with — a table leaves ingestion
-complete rather than half-formed. Finalize keeps a `described` transition so the phases it reports (and the
-UI reading them) are unchanged; it is simply instant now.
+Finalize keeps a `described` status transition so the phases it reports (and the UI reading them) are
+unchanged, but nothing is generated there any more: table structure and validation happen in the table
+stage, and there is no separate per-table description — a table's search and evidence text is built
+mechanically from what it already holds.
 
 The prep phase is gated by the library's **tier**. A *structure* library is ingested to the lossless tree
 and tables and stops there; a *search* library additionally gets the summaries, embeddings and indexes that
@@ -679,13 +694,19 @@ data in its head: it reads, judges, and writes queries; the database keeps the n
 Open gaps in the current build. None corrupts an answer — each is a place the system is weaker than the
 design intends.
 
-- **Key-value forms mis-structured as tables.** The table-structure step assumes a grid: a header band
-  over data rows. A form or invoice laid out as label/value pairs (an applicant form, a cash-sale invoice)
-  has no such band, so header-row detection latches onto the wrong rows — a date, a reference number, or a
-  name becomes a "column header" while the real fields sit in the cells. The table still materializes and
-  never blocks ingestion; it is simply a poor representation of a document that was never really a table.
-  The filter ignores these when they don't bear on a question, so the effect is confined to queries
-  actually about such a form.
+- **Header-less forms and irregular grids keep generic `col0…colN` columns.** The table-structure step
+  assumes a header band over data rows. A form or invoice laid out as label/value pairs, or an irregular
+  government-form PDF (a degree-progress report, a transfer-credit report), has no such band — so either a
+  wrong row is latched onto as the header, or none is found and the columns fall back to `col0, col1, …`.
+  Validation does not catch these: they *are* grid-shaped, so they pass as real tables, just with unusable
+  column names. Measured on the 32-file corpus, this is the dominant table-fidelity failure — one such PDF
+  produced thirteen `col0…col6` tables. The table still materializes and never blocks ingestion; the effect
+  is confined to queries actually about such a form, since the filter ignores it otherwise.
+
+- **Prose occasionally survives as a table cell.** Validation drops most non-tabular candidates, but a page
+  of running text laid out in a way that reads as a two-column grid can still slip through with a whole
+  paragraph stuffed into one "cell" (observed on a block of statute text). Grid-shaped enough to pass, it is
+  a poor representation of what was never a table — harmless unless a question turns on it.
 
 - **Stray query on a prose question.** A purely narrative question ("what is this dispute about")
   sometimes still draws a single read-only query against a loosely related table. It is harmless — the
