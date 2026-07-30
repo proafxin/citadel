@@ -1,4 +1,5 @@
 import logging
+import time
 
 from citadel.llm import (
     collect_structure_candidates,
@@ -130,9 +131,11 @@ async def structure_tables(
     # candidate indices so the caller can place it (e.g. under its first block). no structure decided in code
     if not candidates:
         return []
+    started = time.perf_counter()
     payload = "\n\n".join(_candidate_text(grid, index) for index, grid in enumerate(candidates))
     specs = await collect_structure_candidates(await emit_structure_candidates(payload))
     out: list[tuple[MaterializedTable, list[int]]] = []
+    merged = 0
     for spec in specs:
         blocks = [index for index in spec.get("blocks", []) if isinstance(index, int) and 0 <= index < len(candidates)]
         if not blocks:
@@ -141,4 +144,12 @@ async def structure_tables(
         table = materialize(grid, _table_from_spec(spec, grid), sheet_no=sheet_no, anchors=anchors)
         if table.n_rows:
             out.append((table, blocks))
+            merged += len(blocks) > 1
+    logger.info(
+        "table_structure candidates=%d tables=%d merged=%d secs=%.1f",
+        len(candidates),
+        len(out),
+        merged,
+        time.perf_counter() - started,
+    )
     return out

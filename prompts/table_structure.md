@@ -22,13 +22,17 @@ Most tables list one record per row with field names along the top. A few are tu
 Each column is one field, each row one record.
 
 - **col_start**, **col_end** — first/last column index (0-based, inclusive).
-- **header_rows** — the row number(s) whose cells NAME the columns. A header labels columns; it is not data. A row of values (even a total or top line) is data. A row holding one label with the rest empty (a title/banner) is NOT a header — put a title in `title`, other such text in `notes`. A label/value block (`S | 60`, `st | 0.11`) has NO header: return `header_rows` empty, leave `columns` empty, never promote a label-beside-value row.
-- **columns** — the resolved name of every column from col_start to col_end. Combine multi-row or group headers into one clear name each (`First Class` over `Consumer/Corporate` → `First Class Consumer`…). Never two columns with the same name.
-- **section_rows** — row numbers of SECTION-LABEL rows inside this table: a row carrying one label (rest empty or spanned) that introduces the group of rows beneath it and shares this table's columns (`Assets` above asset rows). List them; they are neither header nor data. A label introducing DIFFERENT columns is a separate table; a single label naming the whole table is a `title`.
+- **header_rows** — the row number(s) whose cells NAME the columns. A header labels columns; it is not data. A row of values (even a total or top line) is data. A row holding one label with the rest empty (a title/banner) is NOT a header — put a title in `title`, other such text in `notes`. A block of label-and-value pairs — a left column of field names beside a right column of their values — has NO header: return `header_rows` empty, leave `columns` empty, never promote a label-beside-value row.
+- **columns** — the resolved name of every column from col_start to col_end. When the header spans several rows, or a heading covers several columns and sits only in the first, combine them into one clear name per column. Never two columns with the same name.
+- **section_rows** — row numbers of SECTION-LABEL rows inside this table: a row carrying one label (the rest empty or that label spanned across the row) that introduces the group of rows beneath it and shares this table's columns. List them; they are neither header nor data. A label introducing DIFFERENT columns is a separate table; a single label naming the whole table is a `title`.
 
-## crosstab
+## crosstab (check this for every table before calling it relational)
 
-A matrix: one measure spread across many columns labelled by the header row(s) — the labels sit in the HEADER ROWS and the same measure repeats across them. A column whose own cells repeat category labels (`Open, Closed, Open`) is an ordinary field, not a matrix. Report `layout: crosstab`, leave `columns` empty, and give **crosstab**:
+A crosstab is a long table laid out wide: one measure is spread across a run of columns whose HEADERS are the values of a dimension, not names of fields. The tell is in the column headers — a run of columns (typically to the right of a few key columns) whose headers form a sequence or a repeating set of category labels, where every column in that run holds the same kind of measure. That is a matrix even though each header is distinct; reporting it as relational, with those headers as columns, leaves it unqueryable. Unpivot it.
+
+The matrix labels live in the HEADER row. A column whose OWN cells repeat category labels is an ordinary field, not a matrix.
+
+Report `layout: crosstab`, leave `columns` empty, and give **crosstab**:
 
 - **key_columns** — the columns identifying each row, each `{"name", "col"}`.
 - **dimensions** — the header rows labelling the matrix, each `{"name", "header_row"}`. A value spanning several columns but sitting only in the first applies to all.
