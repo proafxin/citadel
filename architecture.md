@@ -67,15 +67,17 @@ upload → normalize → paginate → render → ocr → structure ─┬──�
 | render | rasterize one PDF page |
 | ocr | detect the page's regions, then read each one → blocks |
 | structure | a document's blocks → paratext split, reclassify, stitch tables; then route — no tables goes straight to merge, each table found becomes its own job |
-| table_structure | one job per table unit — a spreadsheet sheet, or one table block — → canonical Table; a document's candidates then pass an LLM validation that drops the spurious ones |
+| table_structure | one job per unit — a document's whole set of candidate table blocks, or a spreadsheet sheet — → canonical Tables; the model sees every candidate at once and in one call structures each real table, drops the spurious ones, and merges those that are one table split apart |
 | merge | assemble the content tree from the prepared blocks and the finished tables → persist |
 
-**Every table is a job on one stream**, whatever it came from. A spreadsheet sheet and a single table on
-page 340 of a scanned book are the same kind of work item, claimed the same way. A forty-table document is
-forty jobs, not one job that fans out privately inside itself — so a document's table work is bounded and
-scheduled by the same machinery as everything else, and no source gets its own concurrency by accident. The
-job that completes the last of a document's tables is the one that fires merge, the same counter-and-fire
-shape pages use, so redelivery is a no-op and merge runs exactly once.
+**Table structuring is one job per unit, and every unit is the same kind of work item.** Whatever the source —
+a spreadsheet sheet, or all the tables a scanned book yielded — its candidate tables go to one job on one
+stream, claimed the same way as everything else. The job hands the model every candidate at once (each shown
+as bounded sample rows, never full data), and the model makes every call in that single pass: which candidates
+are real tables, each one's structure, and which candidates are one table split across pages or regions and
+should merge. Deterministic code decides nothing about structure — it only gathers the candidates and builds
+what the model returned, placing each table under its first source block. The table job fires merge when it
+finishes, so redelivery is a no-op and merge runs exactly once.
 
 A document with no tables never enters that stream at all: it merges as soon as its pages are read, so it is
 structured and stored *during* the run rather than waiting behind work it does not have. (Becoming
@@ -704,16 +706,15 @@ data in its head: it reads, judges, and writes queries; the database keeps the n
 Open gaps in the current build. None corrupts an answer — each is a place the system is weaker than the
 design intends.
 
-- **Missed headers and section-labels-captured-as-data in irregular PDFs.** A *genuinely* header-less table
-  correctly gets generic `col0…colN` columns — a key-value block, a bare listing under a section heading —
-  and its rows are faithful, just unnamed; that is the right structure, not a defect (verified on a
-  degree-audit report whose course rows carry a consistent schema and have no header row). The real failures
-  are narrower. First, a header row that *is* present can be missed and left as a data row while the columns
-  fall back to `col0…colN` — seen on a transfer-credit report whose `Transfer Term | Incoming Course | Course
-  Title | …` row sat in the data. Second, a section-label row *inside* a table (`1B. ENG 121`) can be
-  flattened into a data row with the label repeated across every column. Validation catches neither — both
-  are grid-shaped — so the table materializes with correct data but a wrong header/row boundary; the effect
-  is confined to queries about that document.
+- **Missed headers and section-labels in irregular PDFs (targeted, unverified).** A *genuinely* header-less
+  table correctly gets generic `col0…colN` columns — a key-value block, a bare listing — and its rows are
+  faithful, just unnamed; that is the right structure, not a defect. Two narrower failures used to slip
+  through the old per-block path: a header row that *is* present left as a data row (a transfer-credit report
+  whose `Transfer Term | Incoming Course | …` header sat in the data, because the continuation page was
+  structured in isolation with no header), and a section-label row *inside* a table (`1B. ENG 121`) flattened
+  into a data row. The unified stage is built to close both — the model sees the whole document's candidates
+  at once, so it marks section rows and a header-once table's continuation merges back under its header block
+  — but this has not yet been confirmed on a real run.
 
 - **Prose occasionally survives as a table cell.** Validation drops most non-tabular candidates, but a page
   of running text laid out in a way that reads as a two-column grid can still slip through with a whole

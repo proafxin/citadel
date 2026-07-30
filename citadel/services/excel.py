@@ -10,8 +10,8 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from citadel.schemas.table import TableStructure
 from citadel.services.grid import classify_grid, grid_text
-from citadel.tabular.materialize import MaterializedTable, materialize, normalize_orientation
-from citadel.tabular.structure import collect_structure_grid, emit_structure_grid, structure_declared_table
+from citadel.tabular.materialize import MaterializedTable
+from citadel.tabular.structure import structure_tables
 
 type RawCellValue = str | int | float | bool | datetime | None
 
@@ -334,75 +334,32 @@ def _pivot_covers(region: Region, pivots: list[SheetPivot]) -> bool:
     )
 
 
-def _declared_for_region(region: Region, tables: list[SheetTable]) -> SheetTable | None:
-    # a region is served by a declared table when it starts at that table's top-left and stays within its range — the
-    # declaration then gives the header rows authoritatively. exact top-left anchoring keeps a table that merely sits
-    # near others from being claimed
-    for table in tables:
-        if (
-            region.min_row == table.min_row
-            and region.min_col == table.min_col
-            and region.max_row <= table.max_row
-            and region.max_col <= table.max_col
-        ):
-            return table
-    return None
-
-
-@dataclass
-class _RegionPlan:
-    region: Region
-    grid: list[list[str]]
-    text: SheetText | None  # a non-table region resolves here; a table region carries a structure job instead
-    job_id: str | None
-    structures: list[TableStructure] | None  # set when the structure is known upfront (a declared table)
-    transposed: bool = False  # the grid was flipped to normal orientation; anchor to the region rectangle instead
-
-
-async def _plan_region(sheet: SheetExtraction, region: Region) -> _RegionPlan | None:
-    # classify, and for a table region EMIT its structure job without awaiting it — so every table region on the sheet
-    # is in flight on the slm worker at once. a non-table region is resolved to its text here; nothing is materialized
-    # until collect, which keeps document order intact
-    raw = region_grid(sheet, region)
-    if classify_grid(raw) == "empty":
-        return None
-    if _pivot_covers(region, sheet.pivots):
-        return None  # a derived pivot aggregate — its worksheet source is extracted as a grounded table instead
-    declared = _declared_for_region(region, sheet.tables)
-    if declared is not None:  # authoritative: a ListObject is a table by declaration, orientation included
-        return _RegionPlan(region, raw, None, None, [structure_declared_table(raw, declared.header_row_count)])
-    grid = normalize_orientation(raw)
-    transposed = grid is not raw
-    kind = classify_grid(grid)
-    if kind == "empty":
-        return None
-    if kind != "table":
-        text = " ".join([grid_text(grid), *region_comments(region)]).strip()
-        return _RegionPlan(region, grid, SheetText(sheet_no=sheet.sheet_no, text=text), None, None, transposed)
-    return _RegionPlan(region, grid, None, await emit_structure_grid(grid), None, transposed)
-
-
 async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, SheetItem]]:
-    plans = [plan for region in find_regions(sheet) if (plan := await _plan_region(sheet, region)) is not None]
-    items: list[tuple[int, SheetItem]] = []
-    ordinal = 0
-    for plan in plans:  # collect in document order; the jobs already ran concurrently
-        if plan.text is not None:
-            ordinal += 1
-            items.append((ordinal, plan.text))
+    # find the regions, turn every table region into a row/column candidate, and hand ALL of them to ONE structure call:
+    # the model reads the whole sheet at once and decides table boundaries, splits and merges itself. non-table regions
+    # resolve to text here. nothing about table structure is decided in this code
+    text: list[SheetItem] = []
+    grids: list[list[list[str]]] = []
+    cells: list[Cell] = []
+    for region in find_regions(sheet):
+        grid = region_grid(sheet, region)
+        kind = classify_grid(grid)
+        if kind == "empty" or _pivot_covers(region, sheet.pivots):
             continue
-        structures = (
-            plan.structures if plan.structures is not None else await collect_structure_grid(plan.grid, plan.job_id)
-        )
-        for structure in structures:
-            ordinal += 1
-            table = materialize(
-                plan.grid,
-                structure,
-                sheet_no=sheet.sheet_no,
-                formulas=region_formulas(plan.region) or None,
-                extra_notes=region_comments(plan.region),
-                anchors=_region_bounds(plan.region) if plan.transposed else _anchor_range(plan.region, structure),
-            )
-            items.append((ordinal, table))
-    return items
+        if kind != "table":
+            body = " ".join([grid_text(grid), *region_comments(region)]).strip()
+            text.append(SheetText(sheet_no=sheet.sheet_no, text=body))
+            continue
+        grids.append(grid)
+        cells.extend(region.cells)
+    items: list[SheetItem] = list(text)
+    if grids:
+        anchors = {
+            "min_row": min(cell.row for cell in cells),
+            "min_col": min(cell.col for cell in cells),
+            "max_row": max(cell.row for cell in cells),
+            "max_col": max(cell.col for cell in cells),
+        }
+        structured = await structure_tables(grids, sheet_no=sheet.sheet_no, anchors=anchors)
+        items.extend(table for table, _blocks in structured)
+    return list(enumerate(items, start=1))

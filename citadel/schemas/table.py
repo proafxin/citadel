@@ -43,12 +43,14 @@ class Crosstab(BaseModel):
 
 class TableStructure(BaseModel):
     layout: Literal["relational", "crosstab"] = "relational"
+    transposed: bool = False  # the model judged fields run DOWN column 0, one record per following column
     col_start: int
     col_end: int
     header_rows: list[int] | None = None
     data_start: int
     data_end: int
     columns: list[str] | None = None  # SLM-resolved column names (relational); None → derive from header_rows
+    section_rows: list[int] | None = None  # data-band rows the model marked as section labels (grouping dividers)
     crosstab: Crosstab | None = None
     title: str | None = None
     caption: str | None = None

@@ -13,7 +13,6 @@ from sqlalchemy import func, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.db import get_sessionmaker
-from citadel.llm import validate_tables
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
 from citadel.models.library import Library
@@ -27,7 +26,6 @@ from citadel.services.tabular import (
     grid_from_html,
     html_to_text,
     stitch_tables,
-    structure_html_tables,
 )
 from citadel.services.tree import (
     EMPTY_IMAGE_TYPES,
@@ -41,8 +39,7 @@ from citadel.services.tree import (
     split_title,
 )
 from citadel.storage import delete_object, get_object, put_object
-from citadel.tabular.materialize import MaterializedTable, materialize, normalize_orientation
-from citadel.tabular.structure import structure_grid
+from citadel.tabular.materialize import MaterializedTable
 from config import EMBED_MAX_TOKENS, get_embed_tokenizer
 
 
@@ -188,34 +185,6 @@ def table_block_indices(blocks: list[Block]) -> list[int]:
     return [index for index, block in enumerate(blocks) if block.type == "table"]
 
 
-def _authoritative_header(table: MaterializedTable) -> bool:
-    # the OCR-marked header is trustworthy only when it is a real column header: a header row was marked, every column
-    # got a name (no col<index> fallback), and the names are distinct. a banner marked as the header repeats a
-    # span-expanded value across columns (duplicate names); a missed header leaves the columns unnamed. either way the
-    # structure is ambiguous and the grid is better handed to the model — the same treatment a spreadsheet region gets
-    if not table.header_rows:
-        return False
-    names = [column.header for column in table.columns]
-    return all(name is not None for name in names) and len(set(names)) == len(names)
-
-
-async def _structure_ocr_grid(html: str) -> list[MaterializedTable]:
-    grid = normalize_orientation(grid_from_html(html))
-    if not grid:
-        return []
-    return [table for structure in await structure_grid(grid) if (table := materialize(grid, structure)).n_rows]
-
-
-async def structure_table_block(block: Block, context: str, from_ocr: bool) -> list[MaterializedTable]:
-    # ONE table block = ONE job, bounded by the stream and the slm queue. digital markup (docx/html/pptx) states its own
-    # header — trust it, no model. a table recognized out of a PDF carries only the OCR model's GUESS at the header, so
-    # trust that only when it is cleanly authoritative; otherwise the grid is ambiguous and goes to the structure model
-    deterministic = structure_html_tables(block.text or "")
-    if not from_ocr or (len(deterministic) == 1 and _authoritative_header(deterministic[0])):
-        return deterministic
-    return await _structure_ocr_grid(block.text or "")
-
-
 @dataclass
 class _Prepared:
     stitched: list[Block]
@@ -269,39 +238,6 @@ def collect_tables(results: dict[int, str | bytes]) -> tuple[dict[int, int], lis
         counts[index] = len(tables)
         queue.extend(tables)
     return counts, queue
-
-
-CANDIDATE_SAMPLE_ROWS = 3
-
-
-def _candidate_render(table: MaterializedTable) -> str:
-    # enough to tell a real table from a captured banner/heading: the column names and a few of its rows. not the whole
-    # table — the shape is what the judgment turns on, not the data
-    headers = ", ".join(str(column.header or "?") for column in table.columns)
-    body = "\n".join(
-        " | ".join("" if cell is None else str(cell) for cell in row)
-        for row in table.sample_rows[:CANDIDATE_SAMPLE_ROWS]
-    )
-    return f"columns: {headers}\n{body}" if body else f"columns: {headers}"
-
-
-async def validate_document_tables(
-    counts: dict[int, int], queue: list[MaterializedTable]
-) -> tuple[dict[int, int], list[MaterializedTable]]:
-    # drop candidates the model judges are not real tables (page banners, headings captured with a table shape). the
-    # queue is ordered by block index exactly as build_tree consumes it, so a dropped table must also decrement its
-    # block's count or the tree and the queue fall out of step
-    if not queue:
-        return counts, queue
-    keep = await validate_tables([_candidate_render(table) for table in queue])
-    new_counts: dict[int, int] = {}
-    position = 0
-    for index in sorted(counts):
-        take = counts[index]
-        new_counts[index] = sum(keep[position : position + take])
-        position += take
-    new_queue = [table for table, kept in zip(queue, keep, strict=True) if kept]
-    return new_counts, new_queue
 
 
 def _token_count(text: str | None) -> int:

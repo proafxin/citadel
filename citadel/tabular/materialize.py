@@ -68,56 +68,11 @@ def _grid_cell(grid: list[list[str]], row: int, col: int) -> str:
     return grid[row][col] if 0 <= row < len(grid) and 0 <= col < len(grid[row]) else ""
 
 
-TRANSPOSE_MIN_DIM = 3  # a transposed table needs a field column plus at least two record columns to be distinguishable
-TRANSPOSE_MIXED_MIN = 0.5  # the given orientation must be at least this fraction type-mixed columns to be a suspect
-TRANSPOSE_PURE_MAX = 0.2  # and its transpose at most this — a clear margin, so a clean table is never flipped
-TRANSPOSE_MIN_CELLS = 2  # a column needs at least two filled cells before its type mix means anything
-
-
-def _is_numeric(cell: str) -> bool:
-    stripped = cell.strip()
-    return _lossless_int(stripped) or _lossless_decimal(stripped)
-
-
-def _mixed_column_fraction(grid: list[list[str]]) -> float:
-    # fraction of columns that MIX numeric and non-numeric cells. a clean relational column is one field and does not
-    # mix; a transposed table's record columns do (a name, an age, a city stacked down one record). the first row is
-    # skipped — it is the header/label whose text would otherwise make every numeric column read as mixed
-    width = max((len(row) for row in grid), default=0)
-    mixed = 0
-    total = 0
-    for col in range(width):
-        cells = [value for row in grid[1:] if col < len(row) and (value := row[col].strip())]
-        if len(cells) < TRANSPOSE_MIN_CELLS:
-            continue
-        total += 1
-        numeric = sum(1 for cell in cells if _is_numeric(cell))
-        if 0 < numeric < len(cells):
-            mixed += 1
-    return mixed / total if total else 0.0
-
-
 def transpose_grid(grid: list[list[str]]) -> list[list[str]]:
+    # turn a sub-grid on its side. the DECISION to do so is the model's (structure.transposed); this is only the
+    # mechanical flip that follows it, so a side-on table's first column becomes the header row of a normal table
     width = max((len(row) for row in grid), default=0)
     return [[_grid_cell(grid, row, col) for row in range(len(grid))] for col in range(width)]
-
-
-def detect_transposed(grid: list[list[str]]) -> bool:
-    # a transposed table lists field NAMES down column 0 and one RECORD per following column, so its columns MIX types
-    # while the same data read the other way has clean one-type columns. flip ONLY on a clear type-axis asymmetry —
-    # never when the given orientation is already clean, and never without a numeric signal (all-text is undecidable)
-    height = len(grid)
-    width = max((len(row) for row in grid), default=0)
-    if height < TRANSPOSE_MIN_DIM or width < TRANSPOSE_MIN_DIM:
-        return False
-    return (
-        _mixed_column_fraction(grid) >= TRANSPOSE_MIXED_MIN
-        and _mixed_column_fraction(transpose_grid(grid)) <= TRANSPOSE_PURE_MAX
-    )
-
-
-def normalize_orientation(grid: list[list[str]]) -> list[list[str]]:
-    return transpose_grid(grid) if detect_transposed(grid) else grid
 
 
 def _grid_header(grid: list[list[str]], header_rows: list[int], col: int) -> str | None:
@@ -221,36 +176,26 @@ def _materialize_crosstab(
     )
 
 
-SECTION_MIN_WIDTH = 3  # below this, a single-value row is too ambiguous to call a section banner over sparse data
-SECTION_MIN_SPAN = 2  # a banner spans at least two columns; a lone cell is indistinguishable from sparse data
-
-
-def _section_marker(grid: list[list[str]], row: int, col_start: int, count: int) -> tuple[int, str] | None:
-    # a right-anchored horizontal span of ONE value across a wide row is a merged section banner, not data — the source
-    # spanned a single label to the table's edge (grid smear is why it currently repeats across every column). the
-    # leftmost spanned column is its nesting level: a full-width banner starts at 0, an indented sub-section further in
-    if count < SECTION_MIN_WIDTH:
-        return None
-    filled = [(index, value) for index in range(count) if (value := _grid_cell(grid, row, col_start + index).strip())]
-    if len(filled) < SECTION_MIN_SPAN or len({value for _, value in filled}) != 1:
-        return None
-    offsets = [index for index, _ in filled]
-    if offsets != list(range(offsets[0], count)):  # must reach the right edge, contiguously — a banner, not a dup cell
-        return None
-    return offsets[0], filled[0][1]
+def _section_at(grid: list[list[str]], row: int, col_start: int, count: int) -> tuple[int, str] | None:
+    # a section row the MODEL marked: its label is the first filled cell, its nesting level is that cell's column offset
+    # (a full-width label starts at 0, an indented sub-section deeper). no decision here — the model already made it
+    for offset in range(count):
+        value = _grid_cell(grid, row, col_start + offset).strip()
+        if value:
+            return offset, value
+    return None
 
 
 def _collect_sections(
-    grid: list[list[str]], data_start: int, data_end: int, col_start: int, count: int
+    grid: list[list[str]], data_start: int, data_end: int, col_start: int, count: int, section_rows: list[int]
 ) -> tuple[list[list[str]], list[list[str | None]], list[str]]:
-    # denormalize section-label rows: each banner is lifted out of the data and its label filled DOWN onto the rows it
-    # governs, as leading grouping column(s). one column per distinct indent level; a shallower banner clears deeper
-    # levels. nothing is dropped and nothing invented — the label is source text, the membership is source structure
+    # apply the model's section-label calls: lift each marked row out of the data and fill its label DOWN onto the rows
+    # it governs, as leading grouping column(s). one column per distinct indent level; a shallower label clears deeper
+    # levels. nothing is decided or invented here — the label is source text, the membership is source structure
     markers: dict[int, tuple[int, str]] = {}
-    for offset in range(data_start, data_end + 1):
-        marker = _section_marker(grid, offset, col_start, count)
-        if marker is not None:
-            markers[offset] = marker
+    for row in section_rows:
+        if data_start <= row <= data_end and (marker := _section_at(grid, row, col_start, count)) is not None:
+            markers[row] = marker
     levels = sorted({level for level, _ in markers.values()})
     level_index = {level: index for index, level in enumerate(levels)}
     active: list[str | None] = [None] * len(levels)
@@ -294,7 +239,7 @@ def _materialize_relational(
     rejected = set(structure.header_rows or []) - set(header_rows)
     data_start = min([structure.data_start, *rejected]) if rejected else structure.data_start
     collected, sections, section_names = _collect_sections(
-        grid, data_start, structure.data_end, structure.col_start, count
+        grid, data_start, structure.data_end, structure.col_start, count, structure.section_rows or []
     )
     dtypes = [dtype_of([raw[index] for raw in collected]) for index in range(count)]
     # SLM-resolved names win when present (it handles implied/merged/multi-row headers); else stack the header rows
@@ -338,6 +283,35 @@ def _materialize_relational(
     )
 
 
+def _materialize_transposed(
+    grid: list[list[str]],
+    structure: TableStructure,
+    sheet_no: int,
+    formulas: list[str] | None,
+    extra_notes: list[str] | None,
+    anchors: dict | None,
+) -> MaterializedTable:
+    # the model judged this table is on its side; turn its span back so the first column becomes the header row of a
+    # normal table, then materialize that. the flip is mechanical — the decision was the model's
+    span = [
+        [_grid_cell(grid, row, col) for col in range(structure.col_start, structure.col_end + 1)]
+        for row in range(structure.data_start, structure.data_end + 1)
+    ]
+    flipped = transpose_grid(span)
+    height = len(flipped)
+    turned = TableStructure(
+        col_start=0,
+        col_end=max((len(row) for row in flipped), default=1) - 1,
+        header_rows=[0] if height else [],
+        data_start=1,
+        data_end=height - 1,
+        title=structure.title,
+        caption=structure.caption,
+        notes=structure.notes,
+    )
+    return _materialize_relational(flipped, turned, sheet_no, formulas, extra_notes, anchors)
+
+
 def materialize(
     grid: list[list[str]],
     structure: TableStructure,
@@ -351,6 +325,8 @@ def materialize(
     # as a grid plus the structure the model returned, and leaves as a MaterializedTable. one implementation, so a
     # table's shape never depends on which file it came out of. source-specific extras (a sheet's formulas, cell
     # comments, its address range) ride in as metadata rather than forking the logic
+    if structure.transposed:
+        return _materialize_transposed(grid, structure, sheet_no, formulas, extra_notes, anchors)
     if structure.layout == "crosstab" and structure.crosstab is not None:
         return _materialize_crosstab(grid, structure, structure.crosstab, sheet_no, formulas, extra_notes, anchors)
     return _materialize_relational(grid, structure, sheet_no, formulas, extra_notes, anchors)

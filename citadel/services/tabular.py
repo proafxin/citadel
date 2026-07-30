@@ -64,20 +64,6 @@ def _grid(table: Tag) -> list[list[str]]:
     return [[occupied.get((row, col), "") for col in range(width)] for row in range(height)]
 
 
-def _header_count(table: Tag) -> int:
-    thead = table.find("thead", recursive=False)
-    if isinstance(thead, Tag):
-        return max(len(thead.find_all("tr", recursive=False)), 1)
-    count = 0
-    for tr in _table_rows(table):
-        cells = tr.find_all(["td", "th"], recursive=False)
-        if cells and all(cell.name == "th" for cell in cells):
-            count += 1
-        else:
-            break
-    return count or 1
-
-
 def html_to_text(html: str) -> str:
     return BeautifulSoup(html, "lxml").get_text(separator=" ", strip=True)
 
@@ -98,20 +84,6 @@ def single_table_structure(grid: list[list[str]], header_rows: int) -> TableStru
         data_start=header_rows,
         data_end=len(grid) - 1,
     )
-
-
-def structure_html_tables(html: str) -> list[MaterializedTable]:
-    # a <table> is ONE table with its header already marked — by <thead>/<th> when the source is docx/html/pptx, and by
-    # paddle's own <ched> verdict when it came out of a pdf. nothing here is inferred, so no model is asked
-    table = BeautifulSoup(html, "lxml").find("table")
-    if not isinstance(table, Tag):
-        return []
-    grid = _grid(table)
-    if not grid:
-        return []
-    structured = materialize(grid, single_table_structure(grid, _header_count(table)))
-    # a structure that yields no data rows is not a table — drop it rather than storing an empty relation
-    return [structured] if structured.n_rows else []
 
 
 async def structure_csv_tables(data: bytes, separator: str) -> list[MaterializedTable]:
