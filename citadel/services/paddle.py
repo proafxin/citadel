@@ -207,42 +207,63 @@ def resize_for_vlm(crop: Image.Image) -> Image.Image:
 _OTSL_TOKEN = re.compile(r"<(fcel|ecel|lcel|ucel|xcel|nl|ched|rhed|srow)>")
 
 
-def otsl_rows(otsl: str) -> list[tuple[list[str], bool]]:
-    # each row with the model's own verdict on whether it is a COLUMN HEADER. <ched> is that verdict and it is the
-    # header signal we no longer have to infer: it travels out as <th> so nothing downstream has to guess. <rhed> marks
-    # a row-label cell and <srow> a section row — neither makes the row a column header, so neither sets the flag
-    rows: list[tuple[list[str], bool]] = []
+def otsl_rows(otsl: str) -> list[tuple[list[str], bool, bool]]:
+    # each row with the model's own verdict on whether it is a COLUMN HEADER, plus whether the row is a SINGLE cell
+    # spanning its own full width. <ched> is the header verdict and it is the header signal we no longer have to
+    # infer: it travels out as <th> so nothing downstream has to guess. <rhed> marks a row-label cell and <srow> a
+    # section row — neither makes the row a column header, so neither sets the flag.
+    # the span flag is sourced from the token stream itself — one <fcel> followed only by <lcel> to the row's end —
+    # not re-inferred from the flattened text later: a genuine multi-level header's top label spans only PART of a
+    # row and still needs its value repeated in every cell it covers (materialize combines it with its sub-header
+    # per column), so only a span that consumes the ENTIRE row is flagged here for collapsing downstream
+    rows: list[tuple[list[str], bool, bool]] = []
     row: list[str] = []
     header = False
+    single_span = False
     parts = _OTSL_TOKEN.split(otsl)
     for marker, content in itertools.zip_longest(parts[1::2], parts[2::2], fillvalue=""):
         text = str(content).strip()
         match marker:
             case "nl":
-                rows.append((row, header))
+                rows.append((row, header, single_span and len(row) > 1))
                 row = []
                 header = False
+                single_span = False
             case "fcel":
                 row.append(text)
+                single_span = len(row) == 1
             case "ecel":
                 row.append("")
+                single_span = False
             case "lcel":  # spans expanded, never left blank: a flattened span repeats its value in every cell it covers
                 row.append(row[-1] if row else "")
             case "ucel" | "xcel":
                 above = rows[-1][0] if rows else []
                 row.append(above[len(row)] if len(row) < len(above) else "")
+                single_span = False
             case _:
                 header = header or marker == "ched"
                 if text:
                     row.append(text)
+                single_span = False
     if row:
-        rows.append((row, header))
-    return [(cells, flag) for cells, flag in rows if any(cell for cell in cells)]
+        rows.append((row, header, single_span and len(row) > 1))
+    return [(cells, flag, span) for cells, flag, span in rows if any(cell for cell in cells)]
 
 
 def _row_html(cells: list[str], width: int, tag: str) -> str:
     body = "".join(f"<{tag}>{html.escape(cells[i]) if i < len(cells) else ''}</{tag}>" for i in range(width))
     return f"<tr>{body}</tr>"
+
+
+def _blank_full_width_spans(rows: list[tuple[list[str], bool, bool]], width: int) -> list[tuple[list[str], bool]]:
+    # a row that is ONE cell spanning its own full width is a title/banner, not a repeated header or repeated data —
+    # collapse it to its first cell so downstream title/header detection can recognize it as sparse
+    out: list[tuple[list[str], bool]] = []
+    for cells, header, span in rows:
+        collapsed = [cells[0], *([""] * (len(cells) - 1))] if span and len(cells) == width else cells
+        out.append((collapsed, header))
+    return out
 
 
 def otsl_to_html(otsl: str) -> str:
@@ -251,8 +272,9 @@ def otsl_to_html(otsl: str) -> str:
     rows = otsl_rows(otsl)
     if not rows:
         return ""
-    width = max(len(cells) for cells, _ in rows)
-    body = "".join(_row_html(cells, width, "th" if flag else "td") for cells, flag in rows)
+    width = max(len(cells) for cells, _, _ in rows)
+    collapsed = _blank_full_width_spans(rows, width)
+    body = "".join(_row_html(cells, width, "th" if flag else "td") for cells, flag in collapsed)
     return f"<table>{body}</table>"
 
 
