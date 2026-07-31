@@ -1,5 +1,6 @@
 import logging
 import time
+from collections import Counter
 
 from citadel.llm import (
     collect_structure_candidates,
@@ -89,19 +90,20 @@ def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
     col_start = max(0, min(int(spec.get("col_start", 0)), max(width - 1, 0)))
     col_end = max(col_start, min(int(spec.get("col_end", width - 1)), max(width - 1, 0)))
     if bool(spec.get("transposed")):
+        data_end = max(0, min(int(spec.get("row_end", height - 1)), max(height - 1, 0)))
         return TableStructure(
             transposed=True,
             col_start=col_start,
             col_end=col_end,
             header_rows=[],
             data_start=0,
-            data_end=height - 1,
+            data_end=data_end,
             title=spec.get("title") or None,
             notes=spec.get("notes") or [],
         )
     header_rows = sorted(h for h in spec.get("header_rows", []) if 0 <= h < height and _is_header_row(grid, h, width))
     data_start = (max(header_rows) + 1) if header_rows else 0
-    data_end = height - 1
+    data_end = max(data_start, min(int(spec.get("row_end", height - 1)), max(height - 1, 0)))
     columns = ([str(name) for name in spec.get("columns", [])] or None) if header_rows else None
     crosstab = _crosstab(spec, width) if spec.get("layout") == "crosstab" else None
     section_rows = sorted(
@@ -127,7 +129,8 @@ async def structure_tables(
 ) -> list[tuple[MaterializedTable, list[int]]]:
     # THE unified stage — one call per document/sheet, for candidate tables from ANY source. the model sees every
     # candidate labelled, returns the real tables (dropping non-tables) with each table's source candidate INDEX(es) —
-    # several = one table split apart, which we concatenate — and its structure. returns each table with its source
+    # several = one table split apart, which we concatenate; one block claimed by several tables = one block holding
+    # several tables stacked by row, bounded by row_end — and its structure. returns each table with its source
     # candidate indices so the caller can place it (e.g. under its first block). no structure decided in code
     if not candidates:
         return []
@@ -136,20 +139,27 @@ async def structure_tables(
     specs = await collect_structure_candidates(await emit_structure_candidates(payload))
     out: list[tuple[MaterializedTable, list[int]]] = []
     merged = 0
+    block_uses: Counter[int] = Counter()
     for spec in specs:
         blocks = [index for index in spec.get("blocks", []) if isinstance(index, int) and 0 <= index < len(candidates)]
         if not blocks:
+            logger.info("table_structure dropped spec blocks=%r — no valid block index", spec.get("blocks"))
             continue
         grid = candidates[blocks[0]] if len(blocks) == 1 else stack_candidates([candidates[i] for i in blocks])
         table = materialize(grid, _table_from_spec(spec, grid), sheet_no=sheet_no, anchors=anchors)
         if table.n_rows:
             out.append((table, blocks))
             merged += len(blocks) > 1
+            block_uses.update(blocks)
+        else:
+            logger.info("table_structure dropped blocks=%s — materialized 0 rows", blocks)
+    split = sum(1 for count in block_uses.values() if count > 1)
     logger.info(
-        "table_structure candidates=%d tables=%d merged=%d secs=%.1f",
+        "table_structure candidates=%d tables=%d merged=%d split=%d secs=%.1f",
         len(candidates),
         len(out),
         merged,
+        split,
         time.perf_counter() - started,
     )
     return out

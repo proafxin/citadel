@@ -15,6 +15,9 @@ from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL
 logger = logging.getLogger(__name__)
 
 STRUCT_MAX_TOKENS = 4096  # structured calls emit short JSON (indices, a concise merge summary, SQL)
+STRUCTURE_MAX_TOKENS = 8192  # table structuring emits one entry per real table in the document, plus now up to
+# several entries per block when one block is split by row — STRUCT_MAX_TOKENS is sized for a single short object,
+# not an array that grows with the document's table count
 SYNTH_MAX_TOKENS = 8192  # the streamed answer; the evidence budget reserves this much of the context window for it
 SLM_MODEL_LEN = 65536  # qwen --max-model-len: prompt and completion share this one window
 # resolution is ONE call over the WHOLE library — splitting it would put the breadth judgment back inside a slice, each
@@ -124,6 +127,7 @@ _STRUCTURE_SCHEMA = {
                     "layout": {"type": "string", "enum": ["relational", "crosstab"]},
                     "transposed": {"type": "boolean"},
                     "header_rows": {"type": "array", "items": {"type": "integer"}},
+                    "row_end": {"type": "integer"},
                     "col_start": {"type": "integer"},
                     "col_end": {"type": "integer"},
                     "columns": {"type": "array", "items": {"type": "string"}},
@@ -161,6 +165,7 @@ _STRUCTURE_SCHEMA = {
                     "layout",
                     "transposed",
                     "header_rows",
+                    "row_end",
                     "col_start",
                     "col_end",
                     "columns",
@@ -183,7 +188,8 @@ def _structure_tables(data: dict) -> list[dict]:
 async def emit_structure_candidates(payload: str) -> str:
     # the unified stage: `payload` lays out every block for one document, each labelled by number. the model returns the
     # real tables — each naming its source block(s) so a split table's fragments come back as one — with structure
-    return await emit_slm(f"{load_prompt('table_structure')}\n{payload}", _STRUCTURE_SCHEMA, interactive=False)
+    prompt = f"{load_prompt('table_structure')}\n{payload}"
+    return await emit_slm(prompt, _STRUCTURE_SCHEMA, interactive=False, max_tokens=STRUCTURE_MAX_TOKENS)
 
 
 async def collect_structure_candidates(job_id: str) -> list[dict]:

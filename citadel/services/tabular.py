@@ -41,8 +41,30 @@ GRID_MAX_SPAN = 1000  # a single cell's row/col span is clamped here; real heade
 GRID_MAX_CELLS = 5_000_000  # hard ceiling on a materialized grid so a hallucinated/oversized span can't OOM the merge
 
 
+def _place_span(
+    occupied: dict[tuple[int, int], str], row: int, col: int, rowspan: int, colspan: int, value: str
+) -> None:
+    for delta_row in range(rowspan):
+        for delta_col in range(colspan):
+            occupied[row + delta_row, col + delta_col] = value
+
+
+def _blank_full_width_titles(
+    occupied: dict[tuple[int, int], str], row_spans: list[tuple[int, int]], width: int
+) -> None:
+    # a cell spanning the table's FULL width is a title/banner, not a repeated column header — a genuine multi-level
+    # header's top label spans only PART of the width, and that duplication is needed downstream to combine with its
+    # sub-header, so only a full-width span is collapsed to its first cell here
+    for row_idx, colspan in row_spans:
+        if colspan >= width:
+            for col in range(1, width):
+                occupied[row_idx, col] = ""
+
+
 def _grid(table: Tag) -> list[list[str]]:
     occupied: dict[tuple[int, int], str] = {}
+    row_spans: list[tuple[int, int]] = []  # (row_idx, colspan) for a spanning cell — a title's colspan can only be
+    # judged against the table's total width, which isn't known until every row is walked
     width = 0
     height = 0
     for row_idx, tr in enumerate(_table_rows(table)):
@@ -53,14 +75,15 @@ def _grid(table: Tag) -> list[list[str]]:
             value = cell.get_text(separator=" ", strip=True)
             colspan = min(max(int(cell.get("colspan") or 1), 1), GRID_MAX_SPAN)
             rowspan = min(max(int(cell.get("rowspan") or 1), 1), GRID_MAX_SPAN)
-            for delta_row in range(rowspan):
-                for delta_col in range(colspan):
-                    occupied[row_idx + delta_row, col + delta_col] = value
+            _place_span(occupied, row_idx, col, rowspan, colspan, value)
             if len(occupied) > GRID_MAX_CELLS:
                 raise ValueError("table grid exceeds cell cap")
+            if colspan > 1:
+                row_spans.append((row_idx, colspan))
             col += colspan
             width = max(width, col)
         height = row_idx + 1
+    _blank_full_width_titles(occupied, row_spans, width)
     return [[occupied.get((row, col), "") for col in range(width)] for row in range(height)]
 
 
