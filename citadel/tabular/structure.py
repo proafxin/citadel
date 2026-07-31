@@ -124,6 +124,28 @@ def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
     )
 
 
+def _contained(inner: TableStructure, outer: TableStructure) -> bool:
+    return (
+        outer.data_start <= inner.data_start
+        and inner.data_end <= outer.data_end
+        and (inner.data_start, inner.data_end) != (outer.data_start, outer.data_end)
+    )
+
+
+def _drop_contained_specs(
+    prepared: list[tuple[list[int], list[list[str]], TableStructure]],
+) -> list[tuple[list[int], list[list[str]], TableStructure]]:
+    # two specs can share a block without the model coordinating their row ranges against each other — nothing
+    # upstream re-checks it. a range strictly inside another one from the SAME block is the same rows claimed twice;
+    # keep the larger, more complete table and drop the one it subsumes
+    dropped: set[int] = set()
+    for i, (blocks_i, _, structure_i) in enumerate(prepared):
+        for j, (blocks_j, _, structure_j) in enumerate(prepared):
+            if i != j and blocks_i == blocks_j and _contained(structure_i, structure_j):
+                dropped.add(i)
+    return [item for index, item in enumerate(prepared) if index not in dropped]
+
+
 async def structure_tables(
     candidates: list[list[list[str]]], *, sheet_no: int = 0, anchors: dict | None = None
 ) -> list[tuple[MaterializedTable, list[int]]]:
@@ -137,16 +159,19 @@ async def structure_tables(
     started = time.perf_counter()
     payload = "\n\n".join(_candidate_text(grid, index) for index, grid in enumerate(candidates))
     specs = await collect_structure_candidates(await emit_structure_candidates(payload))
-    out: list[tuple[MaterializedTable, list[int]]] = []
-    merged = 0
-    block_uses: Counter[int] = Counter()
+    prepared: list[tuple[list[int], list[list[str]], TableStructure]] = []
     for spec in specs:
         blocks = [index for index in spec.get("blocks", []) if isinstance(index, int) and 0 <= index < len(candidates)]
         if not blocks:
             logger.info("table_structure dropped spec blocks=%r — no valid block index", spec.get("blocks"))
             continue
         grid = candidates[blocks[0]] if len(blocks) == 1 else stack_candidates([candidates[i] for i in blocks])
-        table = materialize(grid, _table_from_spec(spec, grid), sheet_no=sheet_no, anchors=anchors)
+        prepared.append((blocks, grid, _table_from_spec(spec, grid)))
+    out: list[tuple[MaterializedTable, list[int]]] = []
+    merged = 0
+    block_uses: Counter[int] = Counter()
+    for blocks, grid, structure in _drop_contained_specs(prepared):
+        table = materialize(grid, structure, sheet_no=sheet_no, anchors=anchors)
         if table.n_rows:
             out.append((table, blocks))
             merged += len(blocks) > 1

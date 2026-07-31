@@ -1,8 +1,12 @@
+import logging
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal
 
 from citadel.schemas.table import CellValue, Column, ColumnDType, Crosstab, TableStructure
+
+logger = logging.getLogger(__name__)
 
 SAMPLE_TABLE_ROWS = 10
 
@@ -225,6 +229,27 @@ def _section_columns(sections: list[list[str | None]], names: list[str]) -> list
     ]
 
 
+def _dedupe_headers(
+    grid: list[list[str]], header_rows: list[int], col_start: int, headers: list[str | None]
+) -> list[str | None]:
+    # a multi-level header resolved for only the first of several siblings under one shared label collides here — the
+    # grid's own header rows, mechanically joined per column, resolve a genuinely varying sub-label without asking the
+    # model again. a name that still collides after that has no distinguishing text anywhere in the header rows —
+    # inventing a suffix would hide that gap, not close it, so it is logged and left as the ambiguous name it is
+    counts = Counter(name for name in headers if name)
+    resolved: list[str | None] = []
+    for index, name in enumerate(headers):
+        if name and counts[name] > 1:
+            resolved.append(_grid_header(grid, header_rows, col_start + index) or name)
+        else:
+            resolved.append(name)
+    counts = Counter(name for name in resolved if name)
+    duplicates = sorted({name for name, count in counts.items() if count > 1})
+    if duplicates:
+        logger.warning("materialize duplicate column names survive grid fallback: %s", duplicates)
+    return resolved
+
+
 def _materialize_relational(
     grid: list[list[str]],
     structure: TableStructure,
@@ -242,13 +267,15 @@ def _materialize_relational(
         grid, data_start, structure.data_end, structure.col_start, count, structure.section_rows or []
     )
     dtypes = [dtype_of([raw[index] for raw in collected]) for index in range(count)]
-    # SLM-resolved names win when present (it handles implied/merged/multi-row headers); else stack the header rows
-    if structure.columns:
+    # SLM-resolved names win when present (it handles implied/merged/multi-row headers) — but only over a header row
+    # that survived validation: a name resolved from a row that turned out to be data is not a name for anything
+    if structure.columns and header_rows:
         headers: list[str | None] = [
             structure.columns[index] if index < len(structure.columns) else None for index in range(count)
         ]
     else:
         headers = [_grid_header(grid, header_rows, structure.col_start + index) for index in range(count)]
+    headers = _dedupe_headers(grid, header_rows, structure.col_start, headers)
     columns = [
         Column(header=_clean_name(headers[index]) or f"col{index}", dtype=dtypes[index]) for index in range(count)
     ]
