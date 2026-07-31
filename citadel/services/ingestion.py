@@ -893,6 +893,41 @@ def _to_read(blocks: list[DetBlock], digital: bool) -> list[int]:
     return [i for i, b in enumerate(blocks) if is_readable(b) and b.label not in skip]
 
 
+GAP_GRID = 24  # the page is rasterized into this many cells per axis to approximate the coverage complement — coarse
+# enough to be cheap, fine enough that a genuinely missed table does not vanish into one giant cell
+GAP_CELL_PX = 6  # each cell is represented by this many px/side in the downsampled image the content signal reads
+# from — resizing DOWN first and computing std on the small image, rather than on the full page, is what keeps this
+# cheap: measured 11ms/page this way against 108ms computing the same signal at full resolution
+GAP_MIN_AREA_FRACTION = 0.04  # a gap below this is a margin/gutter, not a candidate miss
+GAP_CONTENT_STD = 2.0  # grayscale std of the downsampled uncovered cells above this reads as real content rather
+# than blank background. calibrated against exactly one known miss (Citadel Pitch Deck.pdf slide 9: content_std=3.7)
+# and one true-blank slide (content_std=0.7) — real separation, but one example each, not a measured corpus. THIS IS
+# LOG-ONLY: it never triggers a crop or a model call, it exists to make misses visible so a real threshold can be
+# set from real data instead of guessed twice
+
+
+def _occupancy(blocks: list[DetBlock]) -> np.ndarray:
+    covered = np.zeros((GAP_GRID, GAP_GRID), dtype=bool)
+    for block in blocks:
+        x0, y0, x1, y1 = block.bbox
+        col0, col1 = int(x0 * GAP_GRID), min(GAP_GRID, max(int(x0 * GAP_GRID) + 1, int(x1 * GAP_GRID)))
+        row0, row1 = int(y0 * GAP_GRID), min(GAP_GRID, max(int(y0 * GAP_GRID) + 1, int(y1 * GAP_GRID)))
+        covered[row0:row1, col0:col1] = True
+    return covered
+
+
+def _coverage_gap(img: Image.Image, blocks: list[DetBlock]) -> tuple[float, float] | None:
+    small_side = GAP_GRID * GAP_CELL_PX
+    small = np.asarray(img.convert("L").resize((small_side, small_side), Image.Resampling.BILINEAR), dtype=np.float64)
+    cell_std = small.reshape(GAP_GRID, GAP_CELL_PX, GAP_GRID, GAP_CELL_PX).std(axis=(1, 3))
+    uncovered = ~_occupancy(blocks)
+    fraction = float(uncovered.mean())
+    if fraction < GAP_MIN_AREA_FRACTION:
+        return None
+    content = float(cell_std[uncovered].mean())
+    return (fraction, content) if content >= GAP_CONTENT_STD else None
+
+
 def _cut_one(img: Image.Image, bbox: list[float]) -> Image.Image:
     width, height = img.size
     box = (int(bbox[0] * width), int(bbox[1] * height), int(bbox[2] * width), int(bbox[3] * height))
@@ -1081,6 +1116,16 @@ async def extract_page(doc_id: str, page_idx: int, image: bytes, digital: bool) 
         spans.decode_wait = 0.0
         with Image.open(io.BytesIO(image)) as img:
             groups = group_crops(blocks, indices, img.size)
+            gap = await asyncio.to_thread(_coverage_gap, img, blocks)
+            if gap is not None:
+                fraction, content = gap
+                logger.info(
+                    "coverage gap doc=%s page=%d uncovered=%.0f%% content_std=%.1f — log-only, no rescue",
+                    doc_id,
+                    page_idx,
+                    fraction * 100,
+                    content,
+                )
             try:
                 payloads = await asyncio.to_thread(_cut_crops, img, blocks, groups)
             except BaseException:
