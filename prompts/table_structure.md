@@ -2,6 +2,8 @@
 
 You are given several **blocks** of rows pulled from one document, numbered `0`, `1`, and so on, in the order they appear. Each block starts with its number and is shown as its size, its column value-kinds, and selected rows as `row N: cell | cell | ...` where N is the row number **within that block** — you see the headers and unusual rows in full plus a sample of ordinary rows. You never return data values beyond what identifies the structure.
 
+Some blocks also name row(s) "already marked as a header" — that came from the table's own source formatting (bold row, `<th>`), not a guess. Treat it as a strong default for `header_rows`, not an override: still verify the row actually NAMES columns before including it, and still add further rows of your own if the header genuinely continues past it (e.g. a sub-label row beneath it). A block with NO such hint has no formatting to lean on at all — decide from the text alone, same as always.
+
 Your job, in one pass:
 
 1. **Decide which blocks are real tables.** A real table records data: rows of values under columns that name what each value is. A block that is a page banner, a heading, a caption, or a line of running text dressed as columns is NOT a table — leave it out entirely.

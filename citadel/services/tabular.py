@@ -61,15 +61,21 @@ def _blank_full_width_titles(
                 occupied[row_idx, col] = ""
 
 
-def _grid(table: Tag) -> list[list[str]]:
+def _grid(table: Tag) -> tuple[list[list[str]], list[int]]:
     occupied: dict[tuple[int, int], str] = {}
     row_spans: list[tuple[int, int]] = []  # (row_idx, colspan) for a spanning cell — a title's colspan can only be
     # judged against the table's total width, which isn't known until every row is walked
+    header_rows: list[int] = []  # a row is a header when the SOURCE already said so — every one of its cells came in
+    # as <th> (paddle.py emits a whole OTSL <ched> row this way; native HTML sources mark it the same way). this is a
+    # signal already computed upstream, carried through rather than thrown away and re-guessed later
     width = 0
     height = 0
     for row_idx, tr in enumerate(_table_rows(table)):
         col = 0
-        for cell in tr.find_all(["td", "th"], recursive=False):
+        cells = tr.find_all(["td", "th"], recursive=False)
+        if cells and all(cell.name == "th" for cell in cells):
+            header_rows.append(row_idx)
+        for cell in cells:
             while (row_idx, col) in occupied:
                 col += 1
             value = cell.get_text(separator=" ", strip=True)
@@ -84,16 +90,17 @@ def _grid(table: Tag) -> list[list[str]]:
             width = max(width, col)
         height = row_idx + 1
     _blank_full_width_titles(occupied, row_spans, width)
-    return [[occupied.get((row, col), "") for col in range(width)] for row in range(height)]
+    grid = [[occupied.get((row, col), "") for col in range(width)] for row in range(height)]
+    return grid, header_rows
 
 
 def html_to_text(html: str) -> str:
     return BeautifulSoup(html, "lxml").get_text(separator=" ", strip=True)
 
 
-def grid_from_html(html: str) -> list[list[str]]:
+def grid_from_html(html: str) -> tuple[list[list[str]], list[int]]:
     table = BeautifulSoup(html, "lxml").find("table")
-    return _grid(table) if isinstance(table, Tag) else []
+    return _grid(table) if isinstance(table, Tag) else ([], [])
 
 
 def single_table_structure(grid: list[list[str]], header_rows: int) -> TableStructure:
@@ -193,7 +200,7 @@ def _columns(html: str) -> int:
     table = BeautifulSoup(html, "lxml").find("table")
     if not isinstance(table, Tag):
         return 0
-    grid = _grid(table)
+    grid, _ = _grid(table)
     return len(grid[0]) if grid else 0
 
 

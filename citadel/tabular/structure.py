@@ -76,12 +76,16 @@ def stack_candidates(grids: list[list[list[str]]]) -> list[list[str]]:
     return [[row[index] if index < len(row) else "" for index in range(width)] for grid in grids for row in grid]
 
 
-def _candidate_text(grid: list[list[str]], index: int) -> str:
+def _candidate_text(grid: list[list[str]], index: int, header_hint: list[int] | None = None) -> str:
     width = max((len(row) for row in grid), default=0)
     kinds = column_kinds(grid)
     hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))
+    header_line = ""
+    if header_hint:
+        rows = ", ".join(str(row) for row in header_hint)
+        header_line = f"; row(s) {rows} came from the source already marked as a header"
     body = _payload_text(grid, payload_rows(grid), width)
-    return f"{index}: {len(grid)} rows, {width} cols; column kinds: {hint}\n{body}"
+    return f"{index}: {len(grid)} rows, {width} cols; column kinds: {hint}{header_line}\n{body}"
 
 
 def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
@@ -166,17 +170,27 @@ def _is_degenerate(table: MaterializedTable) -> bool:
 
 
 async def structure_tables(
-    candidates: list[list[list[str]]], *, sheet_no: int = 0, anchors: dict | None = None
+    candidates: list[list[list[str]]],
+    *,
+    sheet_no: int = 0,
+    anchors: dict | None = None,
+    header_hints: list[list[int]] | None = None,
 ) -> list[tuple[MaterializedTable, list[int]]]:
     # THE unified stage — one call per document/sheet, for candidate tables from ANY source. the model sees every
     # candidate labelled, returns the real tables (dropping non-tables) with each table's source candidate INDEX(es) —
     # several = one table split apart, which we concatenate; one block claimed by several tables = one block holding
     # several tables stacked by row, bounded by row_end — and its structure. returns each table with its source
-    # candidate indices so the caller can place it (e.g. under its first block). no structure decided in code
+    # candidate indices so the caller can place it (e.g. under its first block). no structure decided in code.
+    # header_hints, when given, is one row-index list per candidate: rows the SOURCE format already marked as a
+    # header (a table's own <th>/OTSL <ched> row) — a real signal, not a guess, so it rides along as a hint rather
+    # than being decided here; the model still makes the call, same as everything else in this stage
     if not candidates:
         return []
     started = time.perf_counter()
-    payload = "\n\n".join(_candidate_text(grid, index) for index, grid in enumerate(candidates))
+    hints = header_hints or [[] for _ in candidates]
+    payload = "\n\n".join(
+        _candidate_text(grid, index, hints[index]) for index, grid in enumerate(candidates)
+    )
     specs = await collect_structure_candidates(await emit_structure_candidates(payload))
     prepared: list[tuple[list[int], list[list[str]], TableStructure]] = []
     for spec in specs:

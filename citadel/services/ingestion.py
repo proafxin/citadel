@@ -1413,8 +1413,12 @@ async def handle_table_structure(fields: dict[str, str]) -> None:
     redis = get_redis()
     prepared = load_structures(await redis.get(f"structures:{doc_id}"))
     indices = table_block_indices(prepared.stitched)
-    grids = [grid_from_html(prepared.stitched[index].text or "") for index in indices]
-    structured = await structure_tables(grids)  # every candidate at once → structure + drop non-tables + merge splits
+    extracted = [grid_from_html(prepared.stitched[index].text or "") for index in indices]
+    grids = [grid for grid, _ in extracted]
+    header_hints = [header_rows for _, header_rows in extracted]
+    structured = await structure_tables(
+        grids, header_hints=header_hints
+    )  # every candidate at once → structure + drop non-tables + merge splits
     by_block: dict[int, list[MaterializedTable]] = {}
     for table, blocks in structured:  # each table lands on its FIRST source block; the rest yield nothing
         by_block.setdefault(indices[min(blocks)], []).append(table)
