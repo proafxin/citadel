@@ -22,4 +22,4 @@ repos:
     - id: semgrep
       types: [python]
       exclude: ^tests/
-      args: ['--config', 'p/security-audit', '--error', '--skip-unknown-extensions']
+      args: ['--config', 'p/security-audit', '--error', '--skip-unknown-extensions', '--metrics=off']

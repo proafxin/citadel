@@ -388,12 +388,33 @@ def salvage_prefix(text: str) -> str:
     return text[:low]
 
 
+# a table response can degenerate without ever hitting the token cap or tripping the shingle test above — OTSL's own
+# grid syntax repeats tokens legitimately, which is why tables are exempted from that test, but a real table's ROWS
+# still vary: an actual record is rarely byte-identical to the one before it. a small cycle of rows repeating through
+# the whole response is the same failure as a looping plain read, just one level up — at the row instead of the
+# character. no larger corpus of failures exists yet to tune this against (this is one observed case: seven data
+# rows, all identical, distinct ratio 0.14), so the threshold is set conservatively rather than measured
+TABLE_LOOP_MIN_ROWS = 4
+TABLE_LOOP_DISTINCT_RATIO = 0.5
+
+
+def _table_degenerate(content: str) -> bool:
+    rows = [tuple(cells) for cells, header, _ in otsl_rows(content) if not header]
+    if len(rows) < TABLE_LOOP_MIN_ROWS:
+        return False
+    return len(set(rows)) / len(rows) < TABLE_LOOP_DISTINCT_RATIO
+
+
 def _ran_away(content: str, finish: str, prompt: str) -> bool:
-    # a table is legitimately repetitive — its grid is <fcel>...<fcel>...<nl> over and over — so the shingle test would
-    # accuse an honest one. tables are checked by the grid parser instead; here only the token cap applies to them
+    # a table is legitimately repetitive at the CHARACTER level — its grid is <fcel>...<fcel>...<nl> over and over —
+    # so the shingle test above would accuse an honest one and is skipped for it. that is not the same as exempting
+    # tables from degeneracy entirely: _table_degenerate checks the parsed ROWS instead, which a real table still
+    # varies even when its raw token stream does not
     if finish == "length":
         return True
-    return prompt != PROMPT_TABLE and is_looping(content)
+    if prompt == PROMPT_TABLE:
+        return _table_degenerate(content)
+    return is_looping(content)
 
 
 async def recognize(payload: bytes, prompt: str) -> str:

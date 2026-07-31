@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from collections import Counter
 
@@ -146,6 +147,24 @@ def _drop_contained_specs(
     return [item for index, item in enumerate(prepared) if index not in dropped]
 
 
+_SHORT_INDEX = re.compile(r"^\d{1,4}\.?$")  # a bare row-number ("1", "23.") — never prose, so it marks a blank
+# form's own placeholder row rather than a caption the model mistook for data
+
+
+def _is_degenerate(table: MaterializedTable) -> bool:
+    # a table that resolves to one row with only one cell filled is almost always a caption or banner the model
+    # mistook for data — the same sparse signal that already disqualifies a HEADER row (SPARSE_HEADER_MIN_WIDTH/
+    # MAX_CELLS), applied here to whether the table should exist at all. the one legitimate exception is a blank
+    # form's own row-index placeholder: that lone cell is a short digit token, never prose, so it is exempted
+    # rather than dropped along with genuine captions
+    if table.n_rows != 1 or len(table.columns) < SPARSE_HEADER_MIN_WIDTH:
+        return False
+    populated = [cell for cell in table.sample_rows[0] if cell not in {None, ""}]
+    if len(populated) > SPARSE_HEADER_MAX_CELLS:
+        return False
+    return not populated or not _SHORT_INDEX.match(str(populated[0]).strip())
+
+
 async def structure_tables(
     candidates: list[list[list[str]]], *, sheet_no: int = 0, anchors: dict | None = None
 ) -> list[tuple[MaterializedTable, list[int]]]:
@@ -172,12 +191,13 @@ async def structure_tables(
     block_uses: Counter[int] = Counter()
     for blocks, grid, structure in _drop_contained_specs(prepared):
         table = materialize(grid, structure, sheet_no=sheet_no, anchors=anchors)
-        if table.n_rows:
+        if table.n_rows and not _is_degenerate(table):
             out.append((table, blocks))
             merged += len(blocks) > 1
             block_uses.update(blocks)
         else:
-            logger.info("table_structure dropped blocks=%s — materialized 0 rows", blocks)
+            reason = "materialized 0 rows" if not table.n_rows else "degenerate single-cell row"
+            logger.info("table_structure dropped blocks=%s — %s", blocks, reason)
     split = sum(1 for count in block_uses.values() if count > 1)
     logger.info(
         "table_structure candidates=%d tables=%d merged=%d split=%d secs=%.1f",
