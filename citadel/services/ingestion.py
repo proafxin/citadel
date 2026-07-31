@@ -716,17 +716,15 @@ async def requeue_message(stream: str, msg_id: str, fields: dict[bytes, bytes]) 
 
 
 async def render_weights(docs: list[str]) -> dict[str, float]:
-    # REMAINING CROPS per document is what the share must be proportional to, so a document that still owes many
-    # crops keeps priority over one nearing completion — density is observed (crops seen / pages finished) and
-    # refines as the document runs; a document that has finished no pages yet has no density of its own and borrows
-    # the corpus mean, so its weight is still denominated in crops and comparable. that term ALONE also holds a
-    # near-finished document back indefinitely behind a much larger one, clustering every document's completion —
-    # and therefore every document's table-structure call — at the tail of the run (measured: a fixed completion
-    # bonus does not fix this — against a corpus where two documents carry 93% of the total crop volume, their
-    # density_term runs into the thousands, and a flat constant is noise against that; every small document still
-    # dribbles along at a negligible share until the giants' own weight finally shrinks, and everything left
-    # crosses the finish line together). the completion term below is scaled to the CURRENT most-demanding document
-    # instead, so a near-finished document can always compete for a real claim, whatever the corpus looks like
+    # REMAINING CROPS per document, which is what the share must be proportional to. density is observed
+    # (crops seen / pages finished) and refines as the document runs; a document that has finished no pages yet has no
+    # density of its own and borrows the corpus mean, so its weight is still denominated in crops and comparable.
+    # a completion-boost term was tried here (twice) to desynchronize table-structure calls from the tail of the run.
+    # both measured WORSE total wall time on the real corpus (490s plain -> 504s -> 529s), not better: boosting a
+    # document nearing completion pulls render-claim priority away from whichever document has the most work left —
+    # on a corpus where two documents carry over 90% of total crop volume, that IS the critical path, and slowing it
+    # down to let smaller documents finish early costs more than the clustering it was meant to fix. plain
+    # proportional share, unmodified, is what is measured to minimize wall time
     redis = get_redis()
     pipe = redis.pipeline(transaction=False)
     for doc_id in docs:
@@ -740,24 +738,14 @@ async def render_weights(docs: list[str]) -> dict[str, float]:
         seen_crops += crops
         seen_pages += done
     mean_density = seen_crops / seen_pages if seen_pages else 1.0
-    density_terms: dict[str, float] = {}
-    remaining_pages: dict[str, float] = {}
+    weights: dict[str, float] = {}
     for doc_id, (pages, done, crops) in stats.items():
         density = crops / done if done else mean_density
-        remaining_pages[doc_id] = pages - done
         # floored at ONE crop per page: a fully-digital document owes no crops at all (its text comes from the
         # layer), and weighting purely by crops would give it no share and never render its pages — it would simply
         # never finish. every remaining page costs a render and a detect whatever its crop yield, so it always
         # carries weight
-        density_terms[doc_id] = max(1.0, remaining_pages[doc_id] * max(density, 1.0))
-    scale = max(density_terms.values(), default=1.0)  # the single biggest pull in THIS pass, whatever it is
-    weights: dict[str, float] = {}
-    for doc_id in stats:
-        remaining = remaining_pages[doc_id]
-        completion_term = scale / remaining if remaining > 0 else 0.0  # equals `scale` at one page left: a fair
-        # shot at a claim alongside the corpus's most demanding document, not a fixed amount that only matters
-        # against a small corpus
-        weights[doc_id] = density_terms[doc_id] + completion_term
+        weights[doc_id] = max(1.0, (pages - done) * max(density, 1.0))
     return weights
 
 
