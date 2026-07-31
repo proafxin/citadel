@@ -900,10 +900,11 @@ GAP_CELL_PX = 6  # each cell is represented by this many px/side in the downsamp
 # cheap: measured 11ms/page this way against 108ms computing the same signal at full resolution
 GAP_MIN_AREA_FRACTION = 0.04  # a gap below this is a margin/gutter, not a candidate miss
 GAP_CONTENT_STD = 2.0  # grayscale std of the downsampled uncovered cells above this reads as real content rather
-# than blank background. calibrated against exactly one known miss (Citadel Pitch Deck.pdf slide 9: content_std=3.7)
-# and one true-blank slide (content_std=0.7) — real separation, but one example each, not a measured corpus. THIS IS
-# LOG-ONLY: it never triggers a crop or a model call, it exists to make misses visible so a real threshold can be
-# set from real data instead of guessed twice
+# than blank background — DISABLED, not called from extract_page: tested against a real scanned book
+# (Vorlesungen uber Zahlentheorie) and it fires on nearly every page. raw pixel variance cannot tell a genuinely
+# missed table apart from a scanning artifact or aged-paper texture, both of which vary just as much as real
+# content — this needs a signal tied to actual text/line structure (periodic edges at line-height spacing) before
+# it is safe to call again, not another threshold guess against the same signal
 
 
 def _occupancy(blocks: list[DetBlock]) -> np.ndarray:
@@ -1116,16 +1117,6 @@ async def extract_page(doc_id: str, page_idx: int, image: bytes, digital: bool) 
         spans.decode_wait = 0.0
         with Image.open(io.BytesIO(image)) as img:
             groups = group_crops(blocks, indices, img.size)
-            gap = await asyncio.to_thread(_coverage_gap, img, blocks)
-            if gap is not None:
-                fraction, content = gap
-                logger.info(
-                    "coverage gap doc=%s page=%d uncovered=%.0f%% content_std=%.1f — log-only, no rescue",
-                    doc_id,
-                    page_idx,
-                    fraction * 100,
-                    content,
-                )
             try:
                 payloads = await asyncio.to_thread(_cut_crops, img, blocks, groups)
             except BaseException:
