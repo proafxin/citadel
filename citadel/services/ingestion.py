@@ -715,34 +715,6 @@ async def requeue_message(stream: str, msg_id: str, fields: dict[bytes, bytes]) 
     await _requeue()(keys=[stream], args=[GROUP, msg_id, *flat])
 
 
-async def render_weights(docs: list[str]) -> dict[str, float]:
-    # REMAINING CROPS per document, which is what the share must be proportional to. density is observed
-    # (crops seen / pages finished) and refines as the document runs; a document that has finished no pages yet has no
-    # density of its own and borrows the corpus mean, so its weight is still denominated in crops and comparable.
-    # the fallback chain never reaches "all equal" — that is the ordering that measured worst
-    redis = get_redis()
-    pipe = redis.pipeline(transaction=False)
-    for doc_id in docs:
-        pipe.hmget(f"doc:{doc_id}", "page_count", "done_count", "crops_n")
-    rows = await pipe.execute()
-    stats: dict[str, tuple[float, float, float]] = {}
-    seen_crops = seen_pages = 0.0
-    for doc_id, row in zip(docs, rows, strict=True):
-        pages, done, crops = (float(value or 0) for value in row)
-        stats[doc_id] = (pages, done, crops)
-        seen_crops += crops
-        seen_pages += done
-    mean_density = seen_crops / seen_pages if seen_pages else 1.0
-    weights: dict[str, float] = {}
-    for doc_id, (pages, done, crops) in stats.items():
-        density = crops / done if done else mean_density
-        # floored at ONE crop per page: a fully-digital document owes no crops at all (its text comes from the layer),
-        # and weighting purely by crops would give it no share and never render its pages — it would simply never
-        # finish. every remaining page costs a render and a detect whatever its crop yield, so it always carries weight
-        weights[doc_id] = max(1.0, (pages - done) * max(density, 1.0))
-    return weights
-
-
 async def record_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
     # the last page fires STRUCTURE (not merge): a doc with OCR blocks may hold tables, and those are structured in the
     # structure stage before merge ever runs. tabular sheets go straight to merge — they are already structured upstream

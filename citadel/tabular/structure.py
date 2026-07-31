@@ -188,9 +188,7 @@ async def structure_tables(
         return []
     started = time.perf_counter()
     hints = header_hints or [[] for _ in candidates]
-    payload = "\n\n".join(
-        _candidate_text(grid, index, hints[index]) for index, grid in enumerate(candidates)
-    )
+    payload = "\n\n".join(_candidate_text(grid, index, hints[index]) for index, grid in enumerate(candidates))
     specs = await collect_structure_candidates(await emit_structure_candidates(payload))
     prepared: list[tuple[list[int], list[list[str]], TableStructure]] = []
     for spec in specs:

@@ -4,7 +4,6 @@ import signal
 import traceback
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from functools import lru_cache
 from typing import Any, cast
 
 from citadel.bus import get_redis
@@ -43,7 +42,6 @@ from citadel.services.ingestion import (
     reap_orphan_blobs,
     release_idle,
     render_stream,
-    render_weights,
     requeue_message,
     sample_timeline,
     shutdown,
@@ -418,55 +416,34 @@ async def _pages_room() -> int:
     return PAGES_BUFFER - unclaimed
 
 
-@lru_cache
-def get_render_credit() -> dict[str, float]:
-    # a pass has RENDER_CONCURRENCY slots — three — so a document owed 1.4% of it rounds to zero and would never be
-    # claimed at all, which is LPT by accident: the dominant document takes every slot and the rest starve until it
-    # drains. credit ACCUMULATES across passes instead, so a small share is paid late rather than never, and the
-    # long-run allocation is the proportional one even though no single pass can express it
-    return {}
-
-
 async def _claim_by_share(consumer: str, cap: _Capacity, spawn: Spawn, room: int) -> int:
-    # each document gets a slice of this pass PROPORTIONAL to the crops it still owes, largest first so that when the
-    # room is small it is the critical path that gets it. proportional is the whole point: equal share starves the
-    # dominant document (measured, +5s) and no share at all starves the model (measured, a 70s collapse)
+    # FIFO by arrival order: the earliest submitted document is drained completely before the next one is touched.
+    # table structuring only fires once a document's LAST page finishes OCR, so proportional-share scheduling — every
+    # document progressing together — made every document finish together too, clustering every table-structure SLM
+    # call at the tail of the run. FIFO instead finishes documents one at a time, so each one's structuring call fires
+    # as soon as that document is done, overlapping with the OCR of the documents still queued behind it
     redis = get_redis()
-    docs = sorted(name.decode() for name in cast("set[bytes]", await redis.smembers(RENDER_DOCS)))
-    if not docs:
-        return 0
-    weights = await render_weights(docs)
-    total = sum(weights.values()) or 1.0
-    credit = get_render_credit()
-    for gone in set(credit) - set(docs):
-        del credit[gone]  # a finished document must not carry credit back if its id is ever reused
-    for doc_id in docs:
-        credit[doc_id] = credit.get(doc_id, 0.0) + room * weights[doc_id] / total
+    docs = sorted((name.decode() for name in cast("set[bytes]", await redis.smembers(RENDER_DOCS))), key=int)
     claimed = 0
-    for doc_id in sorted(docs, key=lambda name: credit[name], reverse=True):
+    for doc_id in docs:
         if claimed >= room:
             break
-        share = min(int(credit[doc_id]), room - claimed)
-        if share <= 0:
-            continue
         stream = render_stream(doc_id)
         await ensure_group(stream)
         fresh = cast(
             "list[tuple[bytes, list[tuple[bytes, dict[bytes, bytes]]]]]",
-            await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=share),
+            await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=room - claimed),
         )
         entries = fresh[0][1] if fresh else []
         if not entries:
             # xlen counts a claimed-but-unacked entry too, so zero means drained AND finished — never merely quiet
             if not await redis.xlen(stream):
                 await redis.srem(RENDER_DOCS, doc_id)
-                credit.pop(doc_id, None)
             continue
         for msg_id, raw in entries:
             cap.take()
             spawn(msg_id.decode(), raw)
             claimed += 1
-        credit[doc_id] -= len(entries)  # spend only what was actually taken; unclaimed credit rolls to the next pass
     return claimed
 
 
@@ -554,7 +531,13 @@ async def _main() -> None:
     finally:
         for task in (stop_task, *consumers):
             task.cancel()
-        await asyncio.gather(stop_task, *consumers, return_exceptions=True)
+        # every job _spawn'd off a consumer (an in-flight page/crop/table call) outlives its consumer otherwise —
+        # shutdown() below closes the VLM client out from under it, which raises a raw RuntimeError instead of the
+        # clean CancelledError a cancelled task gets, and _done logs every one of those as a crash
+        jobs = list(_tasks)
+        for task in jobs:
+            task.cancel()
+        await asyncio.gather(stop_task, *consumers, *jobs, return_exceptions=True)
         await shutdown()
         await get_engine().dispose()
 
