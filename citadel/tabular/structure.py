@@ -175,6 +175,7 @@ async def structure_tables(
     sheet_no: int = 0,
     anchors: dict | None = None,
     header_hints: list[list[int]] | None = None,
+    label: str = "",
 ) -> list[tuple[MaterializedTable, list[int]]]:
     # THE unified stage — one call per document/sheet, for candidate tables from ANY source. the model sees every
     # candidate labelled, returns the real tables (dropping non-tables) with each table's source candidate INDEX(es) —
@@ -183,7 +184,8 @@ async def structure_tables(
     # candidate indices so the caller can place it (e.g. under its first block). no structure decided in code.
     # header_hints, when given, is one row-index list per candidate: rows the SOURCE format already marked as a
     # header (a table's own <th>/OTSL <ched> row) — a real signal, not a guess, so it rides along as a hint rather
-    # than being decided here; the model still makes the call, same as everything else in this stage
+    # than being decided here; the model still makes the call, same as everything else in this stage.
+    # label, when given, identifies the caller in the summary log line only — it plays no role in structuring
     if not candidates:
         return []
     started = time.perf_counter()
@@ -212,7 +214,8 @@ async def structure_tables(
             logger.info("table_structure dropped blocks=%s — %s", blocks, reason)
     split = sum(1 for count in block_uses.values() if count > 1)
     logger.info(
-        "table_structure candidates=%d tables=%d merged=%d split=%d secs=%.1f",
+        "table_structure%s candidates=%d tables=%d merged=%d split=%d secs=%.1f",
+        f" doc={label}" if label else "",
         len(candidates),
         len(out),
         merged,

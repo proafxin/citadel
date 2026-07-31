@@ -715,6 +715,49 @@ async def requeue_message(stream: str, msg_id: str, fields: dict[bytes, bytes]) 
     await _requeue()(keys=[stream], args=[GROUP, msg_id, *flat])
 
 
+COMPLETION_BOOST = 32.0  # a document with few pages left needs a weight floor independent of how much it once owed:
+# the density*remaining term below shrinks toward the same small floor every other near-finished document also
+# lands on, so against a document with hundreds of pages still outstanding it is negligible — effectively starving
+# a claim slot for a document that costs almost nothing to finish. this term grows as remaining pages shrink,
+# giving it enough priority to actually cross the finish line (and fire its table-structure call) instead of being
+# held back in lockstep with documents that have far more left to do
+
+
+async def render_weights(docs: list[str]) -> dict[str, float]:
+    # REMAINING CROPS per document is what the share must be proportional to, so a document that still owes many
+    # crops keeps priority over one nearing completion — density is observed (crops seen / pages finished) and
+    # refines as the document runs; a document that has finished no pages yet has no density of its own and borrows
+    # the corpus mean, so its weight is still denominated in crops and comparable. that term ALONE also holds a
+    # near-finished document back indefinitely behind a much larger one, clustering every document's completion —
+    # and therefore every document's table-structure call — at the tail of the run. the completion term corrects
+    # exactly that, without touching how documents that still have real work left are weighted against each other
+    redis = get_redis()
+    pipe = redis.pipeline(transaction=False)
+    for doc_id in docs:
+        pipe.hmget(f"doc:{doc_id}", "page_count", "done_count", "crops_n")
+    rows = await pipe.execute()
+    stats: dict[str, tuple[float, float, float]] = {}
+    seen_crops = seen_pages = 0.0
+    for doc_id, row in zip(docs, rows, strict=True):
+        pages, done, crops = (float(value or 0) for value in row)
+        stats[doc_id] = (pages, done, crops)
+        seen_crops += crops
+        seen_pages += done
+    mean_density = seen_crops / seen_pages if seen_pages else 1.0
+    weights: dict[str, float] = {}
+    for doc_id, (pages, done, crops) in stats.items():
+        density = crops / done if done else mean_density
+        remaining = pages - done
+        # floored at ONE crop per page: a fully-digital document owes no crops at all (its text comes from the
+        # layer), and weighting purely by crops would give it no share and never render its pages — it would simply
+        # never finish. every remaining page costs a render and a detect whatever its crop yield, so it always
+        # carries weight
+        density_term = max(1.0, remaining * max(density, 1.0))
+        completion_term = COMPLETION_BOOST / remaining if remaining > 0 else 0.0
+        weights[doc_id] = density_term + completion_term
+    return weights
+
+
 async def record_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
     # the last page fires STRUCTURE (not merge): a doc with OCR blocks may hold tables, and those are structured in the
     # structure stage before merge ever runs. tabular sheets go straight to merge — they are already structured upstream
@@ -1214,7 +1257,8 @@ async def recover_fillin_blocks(image: bytes, blocks: list[Block]) -> int:
     return len(flagged)
 
 
-CROP_LOG_THRESHOLD = 6  # log a page only when its re-read crops exceed this — surfaces burners, no spam over thousands
+CROP_LOG_THRESHOLD = 6  # count a page as ocr-heavy only when its re-read crops exceed this — surfaces burners in the
+# merge summary without counting every ordinary page
 
 
 async def _rescue_uncovered(doc_id: str, path: Path, page_idx: int, blocks: list[Block]) -> tuple[list[Block], int]:
@@ -1283,18 +1327,13 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     img_crops = await read_pictures(image, blocks)
     await _add_stage_seconds(doc_id, "ocr_s", time.time() - ocr_t)
     if rescued:
-        # rare and worth seeing every time: text the detector never boxed, taken from the page's own characters
-        logger.info("rescued doc=%s page=%d runs=%d — text no region covered", doc_id, page_idx, rescued)
+        # not rare on a scanned/mixed corpus — counted per document and folded into its merge summary instead of one
+        # line per page, so a book with hundreds of these doesn't flood the terminal with what is the same finding
+        # repeated: text the detector never boxed, taken from the page's own characters
+        await get_redis().hincrby(f"doc:{doc_id}", "rescued_pages", 1)
+        await get_redis().hincrby(f"doc:{doc_id}", "rescued_runs", rescued)
     if img_crops + fill_crops >= CROP_LOG_THRESHOLD:
-        logger.info(
-            "ocr-heavy doc=%s page=%d digital=%d blocks=%d img_crops=%d fill_crops=%d",
-            doc_id,
-            page_idx,
-            int(digital),
-            len(blocks),
-            img_crops,
-            fill_crops,
-        )
+        await get_redis().hincrby(f"doc:{doc_id}", "ocr_heavy_pages", 1)
     await _emit_page(doc_id, page_idx, blocks)
 
 
@@ -1346,6 +1385,10 @@ def _stage_line(doc: dict[bytes, bytes]) -> str:
         if g(key) and units[unit]
     ]
     walls += [f"crops={g('crops_n'):.0f}"]
+    if g("rescued_pages"):  # counts, not overlapping-span sums, so unlike the timings above these print raw
+        walls += [f"rescued={g('rescued_pages'):.0f}pg/{g('rescued_runs'):.0f}run"]
+    if g("ocr_heavy_pages"):
+        walls += [f"ocr_heavy={g('ocr_heavy_pages'):.0f}pg"]
     walls += [f"{name}={end - start:.1f}s" for name, start, end in tail if start and end]
     return " ".join(walls)
 
@@ -1364,6 +1407,13 @@ async def handle_structure(fields: dict[str, str]) -> None:
     # job that finishes before the rest are queued cannot see a complete set and fire merge early
     doc_id = fields["doc_id"]
     redis = get_redis()
+    proc, pages, crops = (
+        float(value or 0) for value in await redis.hmget(f"doc:{doc_id}", "t_proc", "page_count", "crops_n")
+    )
+    # ONE line per document, at the single instant that matters for scheduling: whether completions land spread
+    # across the run or clustered at the tail is exactly what this timestamp answers, directly from the log
+    elapsed = time.time() - proc if proc else 0.0
+    logger.info("ocr_complete doc=%s elapsed=%.1fs pages=%.0f crops=%.0f", doc_id, elapsed, pages, crops)
     blocks = await _read_doc_blocks(doc_id)
     prepared = prepare_document(blocks)
     await redis.set(f"structures:{doc_id}", dump_structures(prepared), ex=DOC_TTL)
@@ -1389,7 +1439,7 @@ async def handle_table_structure(fields: dict[str, str]) -> None:
     grids = [grid for grid, _ in extracted]
     header_hints = [header_rows for _, header_rows in extracted]
     structured = await structure_tables(
-        grids, header_hints=header_hints
+        grids, header_hints=header_hints, label=doc_id
     )  # every candidate at once → structure + drop non-tables + merge splits
     by_block: dict[int, list[MaterializedTable]] = {}
     for table, blocks in structured:  # each table lands on its FIRST source block; the rest yield nothing
