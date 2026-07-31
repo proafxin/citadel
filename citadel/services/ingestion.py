@@ -715,22 +715,18 @@ async def requeue_message(stream: str, msg_id: str, fields: dict[bytes, bytes]) 
     await _requeue()(keys=[stream], args=[GROUP, msg_id, *flat])
 
 
-COMPLETION_BOOST = 32.0  # a document with few pages left needs a weight floor independent of how much it once owed:
-# the density*remaining term below shrinks toward the same small floor every other near-finished document also
-# lands on, so against a document with hundreds of pages still outstanding it is negligible — effectively starving
-# a claim slot for a document that costs almost nothing to finish. this term grows as remaining pages shrink,
-# giving it enough priority to actually cross the finish line (and fire its table-structure call) instead of being
-# held back in lockstep with documents that have far more left to do
-
-
 async def render_weights(docs: list[str]) -> dict[str, float]:
     # REMAINING CROPS per document is what the share must be proportional to, so a document that still owes many
     # crops keeps priority over one nearing completion — density is observed (crops seen / pages finished) and
     # refines as the document runs; a document that has finished no pages yet has no density of its own and borrows
     # the corpus mean, so its weight is still denominated in crops and comparable. that term ALONE also holds a
     # near-finished document back indefinitely behind a much larger one, clustering every document's completion —
-    # and therefore every document's table-structure call — at the tail of the run. the completion term corrects
-    # exactly that, without touching how documents that still have real work left are weighted against each other
+    # and therefore every document's table-structure call — at the tail of the run (measured: a fixed completion
+    # bonus does not fix this — against a corpus where two documents carry 93% of the total crop volume, their
+    # density_term runs into the thousands, and a flat constant is noise against that; every small document still
+    # dribbles along at a negligible share until the giants' own weight finally shrinks, and everything left
+    # crosses the finish line together). the completion term below is scaled to the CURRENT most-demanding document
+    # instead, so a near-finished document can always compete for a real claim, whatever the corpus looks like
     redis = get_redis()
     pipe = redis.pipeline(transaction=False)
     for doc_id in docs:
@@ -744,17 +740,24 @@ async def render_weights(docs: list[str]) -> dict[str, float]:
         seen_crops += crops
         seen_pages += done
     mean_density = seen_crops / seen_pages if seen_pages else 1.0
-    weights: dict[str, float] = {}
+    density_terms: dict[str, float] = {}
+    remaining_pages: dict[str, float] = {}
     for doc_id, (pages, done, crops) in stats.items():
         density = crops / done if done else mean_density
-        remaining = pages - done
+        remaining_pages[doc_id] = pages - done
         # floored at ONE crop per page: a fully-digital document owes no crops at all (its text comes from the
         # layer), and weighting purely by crops would give it no share and never render its pages — it would simply
         # never finish. every remaining page costs a render and a detect whatever its crop yield, so it always
         # carries weight
-        density_term = max(1.0, remaining * max(density, 1.0))
-        completion_term = COMPLETION_BOOST / remaining if remaining > 0 else 0.0
-        weights[doc_id] = density_term + completion_term
+        density_terms[doc_id] = max(1.0, remaining_pages[doc_id] * max(density, 1.0))
+    scale = max(density_terms.values(), default=1.0)  # the single biggest pull in THIS pass, whatever it is
+    weights: dict[str, float] = {}
+    for doc_id in stats:
+        remaining = remaining_pages[doc_id]
+        completion_term = scale / remaining if remaining > 0 else 0.0  # equals `scale` at one page left: a fair
+        # shot at a claim alongside the corpus's most demanding document, not a fixed amount that only matters
+        # against a small corpus
+        weights[doc_id] = density_terms[doc_id] + completion_term
     return weights
 
 
