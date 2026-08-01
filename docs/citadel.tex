@@ -124,7 +124,29 @@
 		{\small\color{muted} Models iterate weekly. Applications pivot monthly.} \quad {\bfseries\color{CitadelHighlight} Infrastructure persists for decades.}
 	\end{frame}
 
-	% --- Slide 3: The Missing Architecture Layer ---
+	% --- Slide 3: Why Now ---
+	\begin{frame}
+		\frametitle{Why Now}
+		\begin{center}
+			\begin{tikzpicture}[
+				stepbox/.style={draw=muted, rounded corners, minimum width=3.5cm, minimum height=1.1cm, align=center, font=\scriptsize},
+				node distance=0.4cm
+				]
+				\node[stepbox] (a) {Foundation models\\proved reasoning works};
+				\node[stepbox, right=of a] (b) {Retrieval tried to bridge\\real data \textemdash{} and hit a\\structural ceiling};
+				\node[stepbox, right=of b] (c) {Agents multiplied how\\much data gets touched,\\multiplying the cost\\of a bad read};
+				\node[stepbox, right=of c, draw=accent, fill=CitadelBlue, thick] (d) {Enterprise adoption made\\reliability non-negotiable,\\not experimental};
+				\draw[-{Latex[length=1.5mm]}] (a)--(b);
+				\draw[-{Latex[length=1.5mm]}] (b)--(c);
+				\draw[-{Latex[length=1.5mm]}, accent, thick] (c)--(d);
+			\end{tikzpicture}
+		\end{center}
+		\vfill
+		\centering
+		{\color{CitadelHighlight}\bfseries The missing layer was survivable when AI was experimental. It stopped being optional the moment reliability became the product.}
+	\end{frame}
+
+	% --- Slide 4: The Missing Architecture Layer ---
 	\begin{frame}
 		\frametitle{The Missing Systems Tier for Enterprise Intelligence}
 		Citadel serves as the stable computational foundation layer, transforming raw inputs into invariant state.
@@ -157,7 +179,7 @@
 		\end{columns}
 	\end{frame}
 
-	% --- Slide 4: The Market (foundational dependency, not a feature) ---
+	% --- Slide 5: The Market (foundational dependency, not a feature) ---
 	\begin{frame}
 		\frametitle{The Foundational Layer Every AI Company Will Require}
 		Any AI product whose value depends on reading, structuring, or reasoning over real documents faces the same dependency \textemdash{} and a competitor built on a solved version of it carries a structural, compounding advantage.
@@ -183,10 +205,10 @@
 		\end{columns}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries This is not a market Citadel enters. Skip it once and the gap is a cost. Skip it every cycle and the gap is why competitors can't be caught.}
+		{\color{CitadelHighlight}\bfseries Payphones did not lose to a better payphone. They lost when the infrastructure underneath calling changed. Citadel is that shift, for enterprise data.}
 	\end{frame}
 
-	% --- Slide 5: REAL PROOF SLIDE (ChatGPT) ---
+	% --- Slide 6: REAL PROOF SLIDE (ChatGPT) ---
 	\begin{frame}
 		\frametitle{Not a Claim. A Measured Result.}
 		Same messy spreadsheet, one file mixing four unrelated datasets on one sheet. Asked the same question: how many tables, how many rows.
@@ -215,7 +237,7 @@
 		{\color{CitadelHighlight}\bfseries Not close. Not approximate. A model reasoning over raw bytes cannot see structure that was never extracted.}
 	\end{frame}
 
-	% --- Slide 6: REAL PROOF SLIDE (Gemini) ---
+	% --- Slide 7: REAL PROOF SLIDE (Gemini) ---
 	\begin{frame}
 		\frametitle{Not a Model Problem. A Missing Capability.}
 		Same file, given to a model that actually wrote and ran verification code against it \textemdash{} openpyxl, pandas, real execution, not guessing.
@@ -244,7 +266,7 @@
 		{\color{CitadelHighlight}\bfseries The model reasoned carefully and even verified its own numbers. The tool it reached for still cannot see a table boundary.}
 	\end{frame}
 
-	% --- Slide 7: Fragmentation / Market Collapse ---
+	% --- Slide 8: Fragmentation / Market Collapse ---
 	\begin{frame}
 		\frametitle{Collapsing the Redundant Ingestion CapEx}
 		\begin{center}
@@ -297,34 +319,10 @@
 		\end{columns}
 	\end{frame}
 
-	% --- Slide 8: What Survives the Compilation ---
-	\begin{frame}
-		\frametitle{Compiling Unstructured State into Persistent Knowledge}
-		Citadel turns raw enterprise files into a persistent asset with properties a reader can rely on:
-
-		\begin{columns}[T]
-			\column{0.49\textwidth}
-			\textbf{Nothing Is Lost}
-			\begin{itemize}
-				\item Every document keeps its own layout, hierarchy, and context \textemdash{} nothing is flattened into plain text.
-				\item Headings, footnotes, and nested sections stay connected to what they describe.
-				\item Tables stay tables \textemdash{} never collapsed into paragraphs that lose their meaning.
-			\end{itemize}
-
-			\column{0.49\textwidth}
-			\textbf{Nothing Is Untraceable}
-			\begin{itemize}
-				\item Every answer traces back to exactly where it came from in the source document.
-				\item Only real content survives \textemdash{} formatting noise never pollutes what a model reads.
-				\item Any document becomes something every downstream tool can query directly.
-			\end{itemize}
-		\end{columns}
-	\end{frame}
-
 	% --- Slide 9: Systems Attack on Chunking ---
 	\begin{frame}
 		\frametitle{Retrieval Cannot Recover What Structurally Disappeared}
-		Retrieval systems operate on representations. If the representation discards structure, downstream retrieval cannot reliably recover information discarded during representation.
+		If a representation discards structure, nothing downstream recovers it. Every answer must trace back to exactly where it came from \textemdash{} nothing flattened, nothing untraceable.
 
 		\begin{columns}[T]
 			\column{0.49\textwidth}
@@ -408,32 +406,28 @@
 		{\color{CitadelHighlight}\bfseries Vertical AI products are built on Citadel. It is the ground they stand on, not one of them.}
 	\end{frame}
 
-	% --- Slide 12: Market Wedge & Two-Sided GTM ---
+	% --- Slide 12: Market Wedge & Sequenced GTM ---
 	\begin{frame}
-		\frametitle{One Substrate, Two Buyers}
+		\frametitle{Enterprise First, Infrastructure Next}
 		\begin{columns}[T]
 			\column{0.49\textwidth}
-			\begin{block}{The Mission-Critical GTM Wedge}
-				Targeting enterprise segments where accuracy failure is catastrophic and documents are highly dense:
+			\begin{block}{Phase One: Direct to Enterprise}
 				\begin{itemize}
-					\item \textbf{Regulatory Compliance:} Asynchronous monitoring of multi-jurisdictional rules.
-					\item \textbf{Corporate Law:} Massive multi-contract structural risk analysis.
-					\item \textbf{Financial Auditing:} Cross-document reconciliation over nested multi-page matrix records.
+					\item \textbf{Legal} e.g. Massive multi-contract structural risk analysis.
+					\item \textbf{Financial} e.g. auditing cross-document reconciliation over nested multi-page records.
 					\item \textbf{Real Estate:} Title, lease, and property-record intelligence across large document sets.
+					\item \textbf{Regulatory Compliance/Due diligence}
 				\end{itemize}
 			\end{block}
 
 			\column{0.49\textwidth}
-			\begin{block}{Two Go-to-Market Surfaces}
-				\begin{itemize}
-					\item \textbf{Infrastructure:} the ingestion and retrieval layer other AI companies build their product on \textemdash{} sold as platform, not a point solution.
-					\item \textbf{Direct Product:} a private query interface deployed over a single enterprise's own documents \textemdash{} every figure derived directly from source, never guessed by a model.
-				\end{itemize}
+			\begin{block}{Phase Two: Infrastructure}
+				Once the substrate is proven directly with enterprise buyers, the same substrate opens as the ingestion and retrieval layer other AI companies build their own products on \textemdash{} sold as platform, not a point solution.
 			\end{block}
 		\end{columns}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries Same substrate, two buyers: the AI company building on it, and the enterprise querying its own data through it directly.}
+		{\color{CitadelHighlight}\bfseries One layer proven with the enterprises then opened to everyone.}
 	\end{frame}
 
 	% --- Slide 13: Defensive Landscape Matrix ---
@@ -456,7 +450,37 @@
 		\vfill
 	\end{frame}
 
-	% --- Slide 14: Team ---
+	% --- Slide 14: The Ask ---
+	\begin{frame}
+		\frametitle{The Ask}
+		Raising \textbf{\$1,000,000} on a SAFE, \$19M pre-money (\$20M post-money cap) \textemdash{} priced for a working system, not a concept.
+
+		\begin{columns}[T]
+			\column{0.49\textwidth}
+			\begin{block}{What This Round Is For}
+				\begin{itemize}
+					\item Founder, full-time.
+					\item A senior engineering hire \textemdash{} the team's first, beyond the founder.
+					\item Compute and infrastructure to scale beyond a single working system.
+					\item Legal, compliance, and IP setup for enterprise-grade deployments.
+				\end{itemize}
+			\end{block}
+
+			\column{0.49\textwidth}
+			\begin{block}{What It Buys}
+				\begin{itemize}
+					\item 18\textendash{}24 months of runway.
+					\item The technical barrier is already crossed \textemdash{} this capital converts a working system into paying design partners.
+					\item Target: signed pilots and repeatable proof this isn't just an impressive demo.
+				\end{itemize}
+			\end{block}
+		\end{columns}
+		\vfill
+		\centering
+		{\color{CitadelHighlight}\bfseries We are not raising to find out if this can be built. We already built it. We are raising to prove the market will pay for it.}
+	\end{frame}
+
+	% --- Slide 15: Team ---
 	\begin{frame}
 		\frametitle{Team}
 		\vfill
