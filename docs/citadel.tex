@@ -7,6 +7,7 @@
 \usepackage{lmodern}
 \usepackage{booktabs}
 \usepackage{tikz}
+\usepackage{graphicx}
 \usetikzlibrary{positioning,arrows.meta,calc}
 
 % ====================================================
@@ -408,49 +409,62 @@
 		\vfill
 	\end{frame}
 
-	% --- Slide 13: FIXED DEMO / VALIDATION SLIDE ---
+	% --- Slide 13: REAL PROOF SLIDE ---
 	\begin{frame}
-		\frametitle{Built Today: Live Interface Mapping \& Tracing}
-		Citadel parses and validates production-grade enterprise matrix files into executable structures automatically without application pipelines.
+		\frametitle{Not a Claim. A Measured Result.}
+		Same messy spreadsheet, one file mixing four unrelated datasets on one sheet. Asked the same question: how many tables, how many rows.
 
-		\begin{center}
-			\begin{tikzpicture}[
-				node distance=0.6cm,
-				pane/.style={draw=muted, rounded corners, minimum height=1.6cm, align=left, font=\tiny}
-				]
-				% Left Pane: Raw Document Emulation
-				\node[pane, text width=3.7cm] (raw) {
-					\textbf{[Production PDF Invoices]} \\
-					$\rightarrow$ Multi-page layout data \\
-					$\rightarrow$ Incompatible nested tables \\
-					$\rightarrow$ Rasterized layout matrix
-				};
+		\begin{columns}[T]
+			\column{0.46\textwidth}
+			\includegraphics[width=\textwidth]{images/chatgpt_test1_comparison.png}
+			\centering{\scriptsize\color{muted} ChatGPT, given the raw file}
 
-				% Center Pane: Citadel Substrate
-				\node[pane, right=of raw, draw=accent, fill=CitadelBlue, text width=4.3cm] (sub) {
-					\textbf{[Knowledge Object Graph]} \\
-					$\bullet$ Full Document Hierarchy Extraction \\
-					$\bullet$ Spatial Relationship Coordinates \\
-					$\bullet$ Cross-Reference Association Maps \\
-					$\bullet$ Immutable Provenance Tracking
-				};
-
-				% Right Pane: Execution Output
-				\node[pane, right=of sub, text width=3.9cm] (out) {
-					\textbf{[Verified Computational Output]} \\
-					\texttt{Query:} Find ledger discrepancies \\
-					\texttt{Result:} Row 12, Column 4 mismatch \\
-					\texttt{Lineage:} Page 4, Invoice \#9821
-				};
-
-				% Paths
-				\draw[-{Latex[length=2mm]}, thick] (raw) -- (sub);
-				\draw[-{Latex[length=2mm]}, accent, thick] (sub) -- (out);
-			\end{tikzpicture}
-		\end{center}
+			\column{0.5\textwidth}
+			\begin{block}{ChatGPT}
+				\centering
+				{\bfseries\color{muted} 3 tables detected} \\
+				{\scriptsize\color{muted} Missed two entire datasets (a 824-row orders table, a 359-row index table) it never reported at all.} \\
+				{\bfseries\color{muted} ``62,166 rows'' claimed for one table} \\
+				{\scriptsize\color{muted} The entire workbook, every sheet combined, has 5{,}785 rows.}
+			\end{block}
+			\begin{block}{Citadel}
+				\centering
+				{\bfseries\color{accent} 11 tables detected, correctly typed} \\
+				{\bfseries\color{accent} 5{,}733 rows, verified against source}
+			\end{block}
+		\end{columns}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries Converting raw visual layout syntax into direct traceable business data answers dynamically.}
+		{\color{CitadelHighlight}\bfseries Not close. Not approximate. A model reasoning over raw bytes cannot see structure that was never extracted.}
+	\end{frame}
+
+	% --- Slide 13b: REAL PROOF SLIDE, PART 2 (Gemini) ---
+	\begin{frame}
+		\frametitle{Not a Model Problem. A Missing Capability.}
+		Same file, given to a model that actually wrote and ran verification code against it \textemdash{} openpyxl, pandas, real execution, not guessing.
+
+		\begin{columns}[T]
+			\column{0.46\textwidth}
+			\includegraphics[width=\textwidth]{images/gemini_test1_2.png}
+			\centering{\scriptsize\color{muted} Gemini, after running its own code}
+
+			\column{0.5\textwidth}
+			\begin{block}{Gemini}
+				\centering
+				{\bfseries\color{muted} Got the raw sheet size exactly right} \\
+				{\scriptsize\color{muted} 5{,}785 rows, 2 worksheets \textemdash{} verified by real code, not hallucinated.} \\
+				{\bfseries\color{muted} Then called rows 25--5785 ``one dataset''} \\
+				{\scriptsize\color{muted} \texttt{pandas.read\_excel} reads a sheet as one flat table from the first header it finds \textemdash{} it has no concept of a second table starting underneath.}
+			\end{block}
+			\begin{block}{Citadel}
+				\centering
+				{\bfseries\color{accent} That span is 6 separate tables} \\
+				{\scriptsize\color{accent} World Development Indicators data, indicator metadata, country metadata, an unrelated sales/orders dataset, and a Fragile States Index dataset \textemdash{} correctly split, not merged.}
+			\end{block}
+		\end{columns}
+		\vfill
+		\centering
+		{\color{CitadelHighlight}\bfseries The model reasoned carefully and even verified its own numbers. The tool it reached for still cannot see a table boundary.}
 	\end{frame}
 
 	% --- Slide 14: Market Wedge & Monetization Thesis ---
