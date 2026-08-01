@@ -428,6 +428,14 @@ let a query in the window resolve over a partial inventory. Running them in this
 library's last document draining, closes both, and the summary wait is event-driven — the last summary to
 land fires a completion signal — never a poll.
 
+**The embedding index is disposable; the tree and tables are not.** Nothing about the content tree or the
+canonical tables is specific to any embedding model — they are typed, structured, model-agnostic state,
+built once by the ingestion pipeline (Part I) and never touched by the prep phase. Embedding is a pure
+reduction *over* that structure, run separately, after it. Swapping the embedding model, or the summarizing
+model, therefore means re-running the prep phase against structure that already exists — not re-ingesting a
+single source file. The expensive step (OCR, layout, table structuring) is paid once, independent of which
+model reads the result afterward.
+
 Finalize keeps a `described` status transition so the phases it reports (and the UI reading them) are
 unchanged, but nothing is generated there any more: table structure and validation happen in the table
 stage, and there is no separate per-table description — a table's search and evidence text is built

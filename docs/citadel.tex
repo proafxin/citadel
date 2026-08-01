@@ -71,7 +71,7 @@
 		\vfill
 		{\Large\bfseries\color{accent} Citadel} \\[0.15cm]
 		{\large\bfseries\color{text} The Knowledge Compilation Layer for Enterprise AI} \\[0.1cm]
-		{\small\color{muted} Making domain-specific AI infrastructure obsolete}
+		{\small\color{muted} The foundational layer every reliable AI system needs}
 
 		\vskip 0.4cm
 		\hrule height 0.5pt depth 0pt width \textwidth \color{panel}
@@ -89,34 +89,42 @@
 		\vfill
 	\end{frame}
 
-	% --- Slide 2: Macro Inflection Point (Why Now) ---
+	% --- Slide 2: The Problem (mechanism, sharp) ---
 	\begin{frame}
-		\frametitle{The Intelligence Layer Arrived Before the Knowledge Layer}
-		The core data bottlenecks of the enterprise have shifted over the last decade.
+		\frametitle{Every AI System Re-Pays the Same Hidden Cost}
+		Every AI system couples enterprise data to one model's representation \textemdash{} its weights, or its embedding space. Both approaches skip the same intermediary step, and both pay for it the same way, on every model swap.
 
 		\begin{columns}[T]
 			\column{0.49\textwidth}
-			\textbf{The Historical Baseline}
-			\begin{itemize}
-				\item Unstructured files were treated as passive, static archives.
-				\item Computation was strictly siloed within relational, manually defined database tables.
-				\item Enterprise search systems were built exclusively for human information retrieval.
-			\end{itemize}
+			\textbf{Without a Knowledge Layer}
+			\begin{center}
+				\begin{tikzpicture}[node/.style={draw=muted, rounded corners, font=\scriptsize, minimum width=4.6cm, minimum height=0.4cm}]
+					\node[node] (raw) {Raw Documents};
+					\node[node, below=0.15cm of raw] (reparse) {\color{accent}Re-run OCR, Layout, Extraction};
+					\node[node, below=0.15cm of reparse] (bake) {Baked into New Weights or Embeddings};
+					\draw[-{Latex[length=1.5mm]}] (raw)--(reparse)--(bake);
+				\end{tikzpicture}
+			\end{center}
+			\centering{\scriptsize\color{muted} Full reingestion cost, paid again on every model swap.}
 
 			\column{0.49\textwidth}
-			\textbf{The Current Convergence}
-			\begin{itemize}
-				\item Foundation models natively process deep contextual reasoning and logic.
-				\item However, models lack a persistent, queryable, and authoritative representation of enterprise state.
-				\item \textbf{The Paradigm Shift:} A dedicated knowledge compilation layer has become an architectural necessity.
-			\end{itemize}
+			\textbf{With Citadel}
+			\begin{center}
+				\begin{tikzpicture}[node/.style={draw=text, rounded corners, font=\scriptsize, minimum width=4.6cm, minimum height=0.4cm}]
+					\node[node, draw=accent, fill=CitadelBlue] (raw2) {Raw Documents};
+					\node[node, below=0.25cm of raw2] (compiled) {Compiled Once into the Knowledge Substrate};
+					\node[node, below=0.25cm of compiled] (reembed) {Re-embedded or Re-tuned From Structured Data};
+					\draw[-{Latex[length=1.5mm]}, accent] (raw2)--(compiled)--(reembed);
+				\end{tikzpicture}
+			\end{center}
+			\centering{\scriptsize\color{accent} Extraction cost paid once. A model swap touches only the substrate.}
 		\end{columns}
 		\vfill
 		\centering
-		{\color{accent}\bfseries We have built scalable reasoning models. We have not built the infrastructure layer to feed them.}
+		{\small\color{muted} Models iterate weekly. Applications pivot monthly.} \quad {\bfseries\color{CitadelHighlight} Infrastructure persists for decades.}
 	\end{frame}
 
-	% --- Slide 3: The Missing Architecture Layer (Re-architected) ---
+	% --- Slide 3: The Missing Architecture Layer ---
 	\begin{frame}
 		\frametitle{The Missing Systems Tier for Enterprise Intelligence}
 		Citadel serves as the stable computational foundation layer, transforming raw inputs into invariant state.
@@ -149,7 +157,94 @@
 		\end{columns}
 	\end{frame}
 
-	% --- Slide 4: Fragmentation / Market Collapse ---
+	% --- Slide 4: The Market (foundational dependency, not a feature) ---
+	\begin{frame}
+		\frametitle{The Foundational Layer Every AI Company Will Require}
+		Any AI product whose value depends on reading, structuring, or reasoning over real documents faces the same dependency \textemdash{} and a competitor built on a solved version of it carries a structural, compounding advantage.
+
+		\begin{columns}[T]
+			\column{0.49\textwidth}
+			\begin{block}{Not a Feature. A Survival Dependency.}
+				\begin{itemize}
+					\item An extraction error is not local \textemdash{} every downstream layer built on top of a wrong read inherits it.
+					\item As the AI market matures past novelty into reliability, the ingestion layer stops being invisible and becomes the differentiator.
+					\item \textbf{The gap compounds, it does not reset.} On every model release, a Citadel-based competitor re-embeds structured data in minutes; a competitor without it re-runs full extraction from raw source \textemdash{} the same race, run again, every cycle, widening the distance each time.
+				\end{itemize}
+			\end{block}
+
+			\column{0.49\textwidth}
+			\begin{block}{Who Already Depends On It}
+				\begin{itemize}
+					\item \textbf{New AI companies}, at the build-vs-buy decision for ingestion \textemdash{} the same default shift that made hand-rolled payments infrastructure disappear once Stripe existed.
+					\item Every vertical AI company reading real-world documents today \textemdash{} legal, financial, compliance, healthcare, and beyond.
+					\item Enterprises building internal AI and agents over their own document corpora \textemdash{} direct buyers, not only vendors.
+				\end{itemize}
+			\end{block}
+		\end{columns}
+		\vfill
+		\centering
+		{\color{CitadelHighlight}\bfseries This is not a market Citadel enters. Skip it once and the gap is a cost. Skip it every cycle and the gap is why competitors can't be caught.}
+	\end{frame}
+
+	% --- Slide 5: REAL PROOF SLIDE (ChatGPT) ---
+	\begin{frame}
+		\frametitle{Not a Claim. A Measured Result.}
+		Same messy spreadsheet, one file mixing four unrelated datasets on one sheet. Asked the same question: how many tables, how many rows.
+
+		\begin{columns}[T]
+			\column{0.46\textwidth}
+			\includegraphics[width=\textwidth]{images/chatgpt_test1_comparison.png}
+			\centering{\scriptsize\color{muted} ChatGPT, given the raw file}
+
+			\column{0.5\textwidth}
+			\begin{block}{ChatGPT}
+				\centering
+				{\bfseries\color{muted} 3 tables detected} \\
+				{\scriptsize\color{muted} Missed two entire datasets (a 824-row orders table, a 359-row index table) it never reported at all.} \\
+				{\bfseries\color{muted} ``62,166 rows'' claimed for one table} \\
+				{\scriptsize\color{muted} The entire workbook, every sheet combined, has 5{,}785 rows.}
+			\end{block}
+			\begin{block}{Citadel}
+				\centering
+				{\bfseries\color{accent} 11 tables detected, correctly typed} \\
+				{\bfseries\color{accent} 5{,}733 rows, verified against source}
+			\end{block}
+		\end{columns}
+		\vfill
+		\centering
+		{\color{CitadelHighlight}\bfseries Not close. Not approximate. A model reasoning over raw bytes cannot see structure that was never extracted.}
+	\end{frame}
+
+	% --- Slide 6: REAL PROOF SLIDE (Gemini) ---
+	\begin{frame}
+		\frametitle{Not a Model Problem. A Missing Capability.}
+		Same file, given to a model that actually wrote and ran verification code against it \textemdash{} openpyxl, pandas, real execution, not guessing.
+
+		\begin{columns}[T]
+			\column{0.46\textwidth}
+			\includegraphics[width=\textwidth]{images/gemini_test1_2.png}
+			\centering{\scriptsize\color{muted} Gemini, after running its own code}
+
+			\column{0.5\textwidth}
+			\begin{block}{Gemini}
+				\centering
+				{\bfseries\color{muted} Got the raw sheet size exactly right} \\
+				{\scriptsize\color{muted} 5{,}785 rows, 2 worksheets \textemdash{} verified by real code, not hallucinated.} \\
+				{\bfseries\color{muted} Then called rows 25--5785 ``one dataset''} \\
+				{\scriptsize\color{muted} \texttt{pandas.read\_excel} reads a sheet as one flat table from the first header it finds \textemdash{} it has no concept of a second table starting underneath.}
+			\end{block}
+			\begin{block}{Citadel}
+				\centering
+				{\bfseries\color{accent} That span is 6 separate tables} \\
+				{\scriptsize\color{accent} World Development Indicators data, indicator metadata, country metadata, an unrelated sales/orders dataset, and a Fragile States Index dataset \textemdash{} correctly split, not merged.}
+			\end{block}
+		\end{columns}
+		\vfill
+		\centering
+		{\color{CitadelHighlight}\bfseries The model reasoned carefully and even verified its own numbers. The tool it reached for still cannot see a table boundary.}
+	\end{frame}
+
+	% --- Slide 7: Fragmentation / Market Collapse ---
 	\begin{frame}
 		\frametitle{Collapsing the Redundant Ingestion CapEx}
 		\begin{center}
@@ -202,58 +297,31 @@
 		\end{columns}
 	\end{frame}
 
-	% --- Slide 5: Eliminating Domain Intelligence Stacks ---
-	\begin{frame}
-		\frametitle{One Universal Substrate Replaces Thousands of Vertical Stacks}
-		\begin{columns}[T]
-			\column{0.49\textwidth}
-			\begin{block}{The Capital-Inefficient Past}
-				\begin{itemize}
-					\item Every vertical verticalizes processing workflows.
-					\item Brittle domain assumptions are hardcoded into local application codebases.
-					\item Massive pipeline engineering overhead built across fractured point solutions.
-				\end{itemize}
-			\end{block}
-
-			\column{0.49\textwidth}
-			\begin{block}{The Citadel Architecture}
-				\begin{itemize}
-					\item Single universal knowledge compiler handles foundational data orientation.
-					\item Domain context and logic emerge dynamically directly from the underlying data.
-					\item Citadel transforms domain AI from infrastructure plays into pure application plays.
-				\end{itemize}
-			\end{block}
-		\end{columns}
-		\vfill
-		\centering
-		{\color{CitadelHighlight}\bfseries Legal, Financial, Compliance, and Ops AI become mere configurations on top of a universal computational substrate.}
-	\end{frame}
-
-	% --- Slide 6: Knowledge Compiler (The Observable Properties) ---
+	% --- Slide 8: What Survives the Compilation ---
 	\begin{frame}
 		\frametitle{Compiling Unstructured State into Persistent Knowledge}
-		Citadel compiles raw enterprise syntax into a persistent computational representation with clear, observable properties:
+		Citadel turns raw enterprise files into a persistent asset with properties a reader can rely on:
 
 		\begin{columns}[T]
 			\column{0.49\textwidth}
-			\textbf{Structure-Preserving Lineage}
+			\textbf{Nothing Is Lost}
 			\begin{itemize}
-				\item Document semantics, spatial layouts, margins, and hierarchy survive compilation completely intact.
-				\item Headings, footnotes, and nested logical block relationships are securely mapped.
-				\item Inherent spatial and structural cell matrices are structurally locked to prevent flattened textual corruption.
+				\item Every document keeps its own layout, hierarchy, and context \textemdash{} nothing is flattened into plain text.
+				\item Headings, footnotes, and nested sections stay connected to what they describe.
+				\item Tables stay tables \textemdash{} never collapsed into paragraphs that lose their meaning.
 			\end{itemize}
 
 			\column{0.49\textwidth}
-			\textbf{Deterministic Output Properties}
+			\textbf{Nothing Is Untraceable}
 			\begin{itemize}
-				\item Every generated down-stream computational element carries explicit, verifiable boundaries of origin.
-				\item Ephemeral styling and layout syntax are stripped while foundational logic is retained.
-				\item Unstructured document corpuses emerge as clean, universally machine-queryable assets.
+				\item Every answer traces back to exactly where it came from in the source document.
+				\item Only real content survives \textemdash{} formatting noise never pollutes what a model reads.
+				\item Any document becomes something every downstream tool can query directly.
 			\end{itemize}
 		\end{columns}
 	\end{frame}
 
-	% --- Slide 7: Systems Attack on Chunking ---
+	% --- Slide 9: Systems Attack on Chunking ---
 	\begin{frame}
 		\frametitle{Retrieval Cannot Recover What Structurally Disappeared}
 		Retrieval systems operate on representations. If the representation discards structure, downstream retrieval cannot reliably recover information discarded during representation.
@@ -276,8 +344,8 @@
 			\begin{center}
 				\begin{tikzpicture}[node/.style={draw=text, rounded corners, font=\scriptsize, minimum width=4.5cm, minimum height=0.4cm}]
 					\node[node, draw=accent, fill=CitadelBlue] (doc2) {Original High-Context Knowledge};
-					\node[node, below=0.25cm of doc2] (rep) {Deterministic Schema Abstraction};
-					\node[node, below=0.25cm of rep] (exec) {Lossless Executable Representation};
+					\node[node, below=0.25cm of doc2] (rep) {Nothing Discarded, Nothing Guessed};
+					\node[node, below=0.25cm of rep] (exec) {Every Structure Kept Queryable};
 					\draw[-{Latex[length=1.5mm]}, accent] (doc2)--(rep)--(exec);
 				\end{tikzpicture}
 			\end{center}
@@ -285,7 +353,7 @@
 		\vfill
 	\end{frame}
 
-	% --- Slide 8: Planning vs Execution ---
+	% --- Slide 10: Planning vs Execution ---
 	\begin{frame}
 		\frametitle{A Clear Separation of Concerns: Planning vs. Execution}
 		Large Language Models excel at resolving ambiguity and planning tasks, but collapse when handling precise state maintenance.
@@ -302,7 +370,7 @@
 			\column{0.49\textwidth}
 			\textbf{The Execution Substrate (Citadel)}
 			\begin{itemize}
-				\item Executes queries mathematically over structured assets.
+				\item Answers every figure directly from source, never from prediction.
 				\item Validates layout, table data, and cell alignment.
 				\item Eliminates computational hallucination with reproducible outputs.
 			\end{itemize}
@@ -312,28 +380,7 @@
 		{\color{CitadelHighlight}\bfseries Reasoning remains probabilistic. Knowledge execution remains deterministic.}
 	\end{frame}
 
-	% --- Slide 9: Continuous Compilation ---
-	\begin{frame}
-		\frametitle{Continuous Compilation, Amortized Intelligence}
-		Citadel shifts enterprise compute costs away from runtime evaluation. It functions explicitly as a compiler for unstructured enterprise reality.
-
-		\begin{center}
-			\begin{tabular}{lllll}
-				\toprule
-				\textbf{Stack Component} & \textbf{Analogy Tier} & \textbf{System Mapping} \\ \midrule
-				\color{accent}\textbf{Source Language} & Raw Enterprise Inputs & Multi-format documentation, matrix files, visual PDFs \\
-				\color{accent}\textbf{Compiler Pipeline} & Citadel Engine & Real-time asynchronous continuous streaming translation \\
-				\color{accent}\textbf{Intermediate Rep.} & Citadel Substrate & Persistent, structure-preserving knowledge object graph \\
-				\color{accent}\textbf{Execution Targets} & Downstream Frameworks & AI application workflows, custom agentic query loops \\
-				\bottomrule
-			\end{tabular}
-		\end{center}
-		\vfill
-		\centering
-		{\color{text!90!white}\small Continuous compilation guarantees that structural modifications to source assets update the substrate dynamically.}
-	\end{frame}
-
-	% --- Slide 10: Platform Thesis & Developer Bridge ---
+	% --- Slide 11: Platform Thesis & Developer Bridge ---
 	\begin{frame}
 		\frametitle{Collapsing Developer Friction and Pipeline Overhead}
 		By offering a single platform interface, Citadel shifts developer attention from brittle ingestion tasks to pristine software creation.
@@ -358,118 +405,12 @@
 		\end{columns}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries Citadel does not compete with vertical products. It makes building thousands of them trivial.}
+		{\color{CitadelHighlight}\bfseries Vertical AI products are built on Citadel. It is the ground they stand on, not one of them.}
 	\end{frame}
 
-	% --- Slide 11: Enterprise Data Evolution ---
+	% --- Slide 12: Market Wedge & Two-Sided GTM ---
 	\begin{frame}
-		\frametitle{The Missing Infrastructure Primitive for the AI Era}
-		Every historical computation shift succeeded only after a definitive data abstraction layer emerged.
-
-		\begin{columns}[T]
-			\column{0.5\textwidth}
-			\begin{description}
-				\item[The Internet] $\rightarrow$ universal connectivity
-				\item[Relational Databases] $\rightarrow$ structured transactions
-				\item[Data Warehouses] $\rightarrow$ historical analytics
-				\item[Search Engines] $\rightarrow$ information retrieval
-			\end{description}
-
-			\column{0.46\textwidth}
-			\begin{block}{The Native AI Era Paradigm}
-				\centering
-				{\bfseries\color{accent} Knowledge Substrate}
-				\vspace{0.15cm}
-				{\small Citadel introduces a new infrastructure primitive designed to create the missing intermediate representation between enterprise info and machine reasoning.}
-			\end{block}
-		\end{columns}
-	\end{frame}
-
-	% --- Slide 12: Mission Critical Proof Points ---
-	\begin{frame}
-		\frametitle{Chatbots Retrieve Context. Citadel Computes Over Knowledge.}
-		Citadel executes multi-document operations where absolute structural and mathematical precision is non-negotiable.
-
-		\begin{columns}[T]
-			\column{0.49\textwidth}
-			\textbf{Complex Structural Queries}
-			\begin{itemize}
-				\item \textit{"Compare contractual penalty terms across 500 vendor agreements and flag clauses violating changing regional compliance rules."}
-				\item \textit{"Audit and reconcile lines between invoice line-items, nested ledger bills, and actual bank transactions."}
-			\end{itemize}
-
-			\column{0.49\textwidth}
-			\textbf{Core Architectural Capabilities}
-			\begin{itemize}
-				\item \textbf{Document-Set Scope:} Evaluates complete functional corpuses rather than slicing single isolated pages.
-				\item \textbf{Matrix Precision:} Retains multi-dimensional cells to support direct code execution over tabular arrays.
-				\item \textbf{Auditable Lineage:} Delivers explicit, verifiable provenance for every computational output.
-			\end{itemize}
-		\end{columns}
-		\vfill
-	\end{frame}
-
-	% --- Slide 13: REAL PROOF SLIDE ---
-	\begin{frame}
-		\frametitle{Not a Claim. A Measured Result.}
-		Same messy spreadsheet, one file mixing four unrelated datasets on one sheet. Asked the same question: how many tables, how many rows.
-
-		\begin{columns}[T]
-			\column{0.46\textwidth}
-			\includegraphics[width=\textwidth]{images/chatgpt_test1_comparison.png}
-			\centering{\scriptsize\color{muted} ChatGPT, given the raw file}
-
-			\column{0.5\textwidth}
-			\begin{block}{ChatGPT}
-				\centering
-				{\bfseries\color{muted} 3 tables detected} \\
-				{\scriptsize\color{muted} Missed two entire datasets (a 824-row orders table, a 359-row index table) it never reported at all.} \\
-				{\bfseries\color{muted} ``62,166 rows'' claimed for one table} \\
-				{\scriptsize\color{muted} The entire workbook, every sheet combined, has 5{,}785 rows.}
-			\end{block}
-			\begin{block}{Citadel}
-				\centering
-				{\bfseries\color{accent} 11 tables detected, correctly typed} \\
-				{\bfseries\color{accent} 5{,}733 rows, verified against source}
-			\end{block}
-		\end{columns}
-		\vfill
-		\centering
-		{\color{CitadelHighlight}\bfseries Not close. Not approximate. A model reasoning over raw bytes cannot see structure that was never extracted.}
-	\end{frame}
-
-	% --- Slide 13b: REAL PROOF SLIDE, PART 2 (Gemini) ---
-	\begin{frame}
-		\frametitle{Not a Model Problem. A Missing Capability.}
-		Same file, given to a model that actually wrote and ran verification code against it \textemdash{} openpyxl, pandas, real execution, not guessing.
-
-		\begin{columns}[T]
-			\column{0.46\textwidth}
-			\includegraphics[width=\textwidth]{images/gemini_test1_2.png}
-			\centering{\scriptsize\color{muted} Gemini, after running its own code}
-
-			\column{0.5\textwidth}
-			\begin{block}{Gemini}
-				\centering
-				{\bfseries\color{muted} Got the raw sheet size exactly right} \\
-				{\scriptsize\color{muted} 5{,}785 rows, 2 worksheets \textemdash{} verified by real code, not hallucinated.} \\
-				{\bfseries\color{muted} Then called rows 25--5785 ``one dataset''} \\
-				{\scriptsize\color{muted} \texttt{pandas.read\_excel} reads a sheet as one flat table from the first header it finds \textemdash{} it has no concept of a second table starting underneath.}
-			\end{block}
-			\begin{block}{Citadel}
-				\centering
-				{\bfseries\color{accent} That span is 6 separate tables} \\
-				{\scriptsize\color{accent} World Development Indicators data, indicator metadata, country metadata, an unrelated sales/orders dataset, and a Fragile States Index dataset \textemdash{} correctly split, not merged.}
-			\end{block}
-		\end{columns}
-		\vfill
-		\centering
-		{\color{CitadelHighlight}\bfseries The model reasoned carefully and even verified its own numbers. The tool it reached for still cannot see a table boundary.}
-	\end{frame}
-
-	% --- Slide 14: Market Wedge & Monetization Thesis ---
-	\begin{frame}
-		\frametitle{The Initial GTM Wedge and Infrastructure Monetization Model}
+		\frametitle{One Substrate, Two Buyers}
 		\begin{columns}[T]
 			\column{0.49\textwidth}
 			\begin{block}{The Mission-Critical GTM Wedge}
@@ -478,23 +419,24 @@
 					\item \textbf{Regulatory Compliance:} Asynchronous monitoring of multi-jurisdictional rules.
 					\item \textbf{Corporate Law:} Massive multi-contract structural risk analysis.
 					\item \textbf{Financial Auditing:} Cross-document reconciliation over nested multi-page matrix records.
+					\item \textbf{Real Estate:} Title, lease, and property-record intelligence across large document sets.
 				\end{itemize}
 			\end{block}
 
 			\column{0.49\textwidth}
-			\begin{block}{Revenue Expansion Architecture}
-				Monetization directly aligns with foundational core enterprise computing scale:
+			\begin{block}{Two Go-to-Market Surfaces}
 				\begin{itemize}
-					\item \textbf{Knowledge Volume:} Scales with the underlying physical data footprint.
-					\item \textbf{Compilation Complexity:} Dynamic tier adjustments for high-density tabular matrix streaming.
-					\item \textbf{Application Execution:} Captured through multi-point endpoint query calls.
+					\item \textbf{Infrastructure:} the ingestion and retrieval layer other AI companies build their product on \textemdash{} sold as platform, not a point solution.
+					\item \textbf{Direct Product:} a private query interface deployed over a single enterprise's own documents \textemdash{} every figure derived directly from source, never guessed by a model.
 				\end{itemize}
 			\end{block}
 		\end{columns}
 		\vfill
+		\centering
+		{\color{CitadelHighlight}\bfseries Same substrate, two buyers: the AI company building on it, and the enterprise querying its own data through it directly.}
 	\end{frame}
 
-	% --- Slide 15: Defensive Landscape Matrix ---
+	% --- Slide 13: Defensive Landscape Matrix ---
 	\begin{frame}
 		\frametitle{Why Existing Architectures Cannot Scale to Citadel}
 		\begin{center}
@@ -514,50 +456,17 @@
 		\vfill
 	\end{frame}
 
-	% --- Slide 16: The Accumulated Moat ---
+	% --- Slide 14: Team ---
 	\begin{frame}
-		\frametitle{The Core Defensive Infrastructure Moat}
-		\begin{columns}[T]
-			\column{0.55\textwidth}
-			\textbf{The Moat is the Compiled Substrate, Not the Model}
-			\begin{itemize}
-				\item \textbf{Enterprise Sticky Layer:} Once an enterprise compiles its organizational knowledge into Citadel, the layer acts as an internal state engine. Changing it requires an entire infrastructure overhaul.
-				\item \textbf{Network Compound Value:} Architectural defense compounds with every connected workflow, custom script, and interface attached to the centralized knowledge interface.
-				\item \textbf{Data Security Airgap:} Secure, airgapped compilation guarantees proprietary enterprise metadata stays locked within Citadel.
-			\end{itemize}
-
-			\column{0.41\textwidth}
-			\begin{block}{The Venture Asymmetry}
-				\centering
-				\vskip 0.1cm
-				{\small Models iterate weekly.}
-				\vskip 0.1cm
-				{\small Applications pivot monthly.}
-				\vskip 0.1cm
-				{\bfseries\color{accent} Infrastructure persists for decades.}
-			\end{block}
-		\end{columns}
-		\vfill
-	\end{frame}
-
-	% --- Slide 17: Model Independence ---
-	\begin{frame}
-		\frametitle{Models Improve. Citadel Multiplies in Capability.}
-		\begin{center}
-			\begin{tikzpicture}[
-				box/.style={draw=text, rounded corners, minimum width=4.5cm, minimum height=0.6cm, align=center, font=\small}
-				]
-				\node[box] (models) {Rapidly Evolving External AI Models \\ \scriptsize (Reasoning, Multi-Modal Systems, Autonomous Agents)};
-				\node[box, below=0.45cm of models, draw=accent, fill=CitadelBlue] (citadel) {\bfseries Citadel Persistent Knowledge Substrate};
-				\node[box, below=0.45cm of citadel] (apps) {Infinite Enterprise AI Application Ecosystem};
-
-				\draw[-{Latex[length=2mm]}] (models)--(citadel);
-				\draw[-{Latex[length=2mm]}, accent] (citadel)--(apps);
-			\end{tikzpicture}
-		\end{center}
+		\frametitle{Team}
 		\vfill
 		\centering
-		{\color{accent}\bfseries As foundation models improve, Citadel inherits those advancements cleanly without rebuilding the knowledge layer.}
+		{\Large\bfseries\color{accent} Masum Billal} \\[0.1cm]
+		{\small\color{text} Founder}
+
+		\vskip 0.5cm
+		{\small\color{muted} Solo-built: ingestion pipeline, query engine, and everything else this deck shows. \\ Every result in this deck is measured against a working system, not a mockup.}
+		\vfill
 	\end{frame}
 
 \end{document}
