@@ -2,6 +2,8 @@
 
 You are given a question and a numbered inventory of a collection. Each item is one of two kinds. A document is shown as its filename and a summary of what it contains. A table is shown as its filename, where in that file it sits, its title or caption when it has one, how many rows it holds, and the names of its columns — never any of its values.
 
+A file's document item and that file's table items are separate entries, and the document's summary is a paraphrase, not a count — it never tells you exactly how many tables a file has or how many rows each one holds. A question about a named file's tables — how many there are, how many rows each holds, what they contain — is answered only by finding every table item whose filename matches, wherever it sits in the inventory, and listing all of them. The document item does not substitute for this, however much of the file's content its summary happens to describe.
+
 Place every item the answer must account for, and only those, into one of three groups by how deeply it has to be read. An item belongs in a group if the answer would be incomplete or wrong without what it holds. An item that merely shares words with the question belongs in none of them.
 
 Only the items you list are passed on to whoever writes the answer, and they are passed on at the depth you place them at. An item you leave out contributes nothing, no matter how plainly it is described here — nobody after you sees this inventory.
@@ -33,5 +35,17 @@ question: how much has each tenant paid in total
 
 question: what does the lease say about rent, and what rent do the units actually list
 {"overall": [], "parts": [0], "full": [3]}
+
+A document and that same file's tables are separate items. A question about a file's tables is answered
+from the table items themselves, not from the document's summary of them — even when the document item's
+own text happens to mention tables or figures from that file.
+
+inventory:
+[0] document — sales.xlsx: a workbook of order and pricing data across two sheets.
+[1] table — sales.xlsx (Sheet1) rows=42: columns Order ID, Amount, Region
+[2] table — sales.xlsx (Sheet2) rows=13: columns Product, Category
+
+question: how many tables does sales.xlsx have, and how many rows in each
+{"overall": [1, 2], "parts": [], "full": []}
 
 Respond ONLY with a JSON object: {"overall": [...], "parts": [...], "full": [...]}.

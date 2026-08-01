@@ -412,24 +412,48 @@ class _Coverage:
     tables: dict[int, str]  # index into the library's tables -> depth
 
 
-def _split_coverage(coverage: dict[int, str], n_docs: int) -> _Coverage:
-    # the inventory is documents then tables in one numbering, so an item's kind is decided by where its number falls.
+def _inventory(documents: list[DocRef], tables: list[TableCand]) -> tuple[list[str], list[tuple[str, int]]]:
+    # a file's document item and its own table items are placed adjacent, each document immediately followed by its
+    # tables. resolution reliably finds a file's tables only when they sit near its document entry — verified against
+    # a 114-item real inventory: documents-then-all-tables (a file's tables up to ~40 positions from its document)
+    # dropped every one of them; grouped by file, all were found. index_map recovers each inventory position's
+    # original (documents, tables) list index, since the grouped order no longer splits into two contiguous halves
+    by_document: dict[int, list[int]] = {}
+    for index, table in enumerate(tables):
+        by_document.setdefault(table.document_id, []).append(index)
+    items: list[str] = []
+    index_map: list[tuple[str, int]] = []
+    for doc_index, doc in enumerate(documents):
+        items.append(_doc_item(doc))
+        index_map.append(("doc", doc_index))
+        for table_index in by_document.get(doc.id, []):
+            items.append(_table_item(tables[table_index]))
+            index_map.append(("table", table_index))
+    return items, index_map
+
+
+def _split_coverage(coverage: dict[int, str], index_map: list[tuple[str, int]]) -> _Coverage:
     # `parts` is a document depth; a table named there asked for detail inside it, which for a table means its rows
-    documents = {index: depth for index, depth in coverage.items() if index < n_docs}
+    documents: dict[int, str] = {}
     tables: dict[int, str] = {}
     for index, depth in coverage.items():
-        if index >= n_docs:
+        if index >= len(index_map):
+            continue
+        kind, orig = index_map[index]
+        if kind == "table":
             if depth == "parts":
                 logger.warning("resolve named a table at parts item=%d — taking its rows", index)
-            tables[index - n_docs] = "full" if depth == "parts" else depth
+            tables[orig] = "full" if depth == "parts" else depth
+        else:
+            documents[orig] = depth
     return _Coverage(documents, tables)
 
 
 async def resolve(question: str, documents: list[DocRef], tables: list[TableCand], library: str) -> _Coverage:
-    items = [_doc_item(doc) for doc in documents] + [_table_item(table) for table in tables]
+    items, index_map = _inventory(documents, tables)
     if not items:
         return _Coverage({}, {})
-    return _split_coverage(await resolve_query(question, items, library), len(documents))
+    return _split_coverage(await resolve_query(question, items, library), index_map)
 
 
 async def run_tables(question: str, tables: list[TableCand], depths: dict[int, str], library: str) -> list[SqlResult]:

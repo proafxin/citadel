@@ -99,6 +99,7 @@ async def _embed(texts: list[str], longest: int) -> list[list[float]]:
 class TableCand:
     content_id: int
     table_id: int
+    document_id: int
     filename: str
     n_rows: int
     columns: list[dict]
@@ -252,6 +253,7 @@ def _table_cand(table: Table, filename: str, page_no: int | None) -> TableCand:
     return TableCand(
         table.content_id,
         table.id,
+        table.document_id,
         filename,
         table.n_rows,
         table.columns,
