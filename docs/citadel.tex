@@ -297,45 +297,7 @@
 
 
 
-	% --- Slide 10: Fragmentation / Market Collapse ---
-	\begin{frame}
-		\frametitle{Collapsing the Redundant Ingestion CapEx}
-		\begin{center}
-			\begin{tikzpicture}[
-				node distance=0.1cm and 1.6cm,
-				app/.style={draw=muted, rounded corners, minimum width=2.4cm, minimum height=0.5cm, font=\scriptsize\bfseries, align=center},
-				layer/.style={draw=muted!50, rounded corners, minimum width=2.5cm, minimum height=0.35cm, font=\tiny, align=center, fill=CitadelBlue!40}
-				]
-
-				% --- One representative stack: the same 3 layers repeat, unchanged, for every vertical ---
-				\node[app] (legal) {Legal AI};
-				\node[layer, right=of legal] (l1) {Knowledge Ingestion};
-				\node[layer, below=of l1] (l2) {Knowledge Representation};
-				\node[layer, below=of l2] (l3) {Application Logic};
-				\draw[-{Latex[length=1.5mm]}] (legal) -- (l1);
-
-				\node[font=\tiny\itshape\color{muted}, below=0.2cm of l3, align=center] (repeat) {\ldots and again, unchanged, for Financial AI, Compliance AI, every other vertical\ldots};
-
-				% --- Collapse Target ---
-				\node[draw=accent, fill=CitadelBlue, rounded corners, minimum width=3.4cm, minimum height=1.3cm, align=center, right=2.6cm of l1] (citadel) {
-					\bfseries\color{accent}\large Citadel \\[0.12cm]
-					\scriptsize Shared, Invariant Knowledge Substrate
-				};
-
-				% --- Collapse Arrow ---
-				\draw[-{Latex[length=2.5mm]}, accent, ultra thick] ($(l1.east) + (0.3, 0)$) -- ($(citadel.west) - (0.1, 0)$)
-				node[midway, above=0.1cm, font=\tiny\bfseries, color=accent] {COLLAPSE};
-
-			\end{tikzpicture}
-		\end{center}
-		\vfill
-		\begin{columns}[T]
-			\column{0.5\textwidth}\centering {\color{muted}\scriptsize \textbf{Today:} Every team rebuilds its own parsers, extraction, and retrieval tuning from scratch.}
-			\column{0.5\textwidth}\centering {\color{accent}\scriptsize \textbf{Citadel:} Infrastructure cost and developer effort both collapse into one shared, compiled substrate.}
-		\end{columns}
-	\end{frame}
-
-	% --- Slide 11: Systems Attack on Chunking ---
+	% --- Slide 10: Systems Attack on Chunking ---
 	\begin{frame}
 		\frametitle{Retrieval Cannot Recover What Structurally Disappeared}
 		If a representation discards structure, nothing downstream recovers it. Every answer must trace back to exactly where it came from \textemdash{} nothing flattened, nothing untraceable.
@@ -367,7 +329,7 @@
 		\vfill
 	\end{frame}
 
-	% --- Slide 12: Market Wedge & Sequenced GTM ---
+	% --- Slide 11: Market Wedge & Sequenced GTM ---
 	\begin{frame}
 		\frametitle{Enterprise First, Infrastructure Next}
 		\begin{columns}[T]
@@ -391,7 +353,7 @@
 		{\color{CitadelHighlight}\bfseries One layer proven with the enterprises, then opened to everyone.}
 	\end{frame}
 
-	% --- Slide 13: Business Model ---
+	% --- Slide 12: Business Model ---
 	\begin{frame}
 		\frametitle{Two Tiers, Priced on Usage}
 		\begin{columns}[T]
@@ -414,7 +376,7 @@
 		{\color{CitadelHighlight}\bfseries Priced on what it does for you, not seats or licenses.}
 	\end{frame}
 
-	% --- Slide 14: The Ask ---
+	% --- Slide 13: The Ask ---
 	\begin{frame}
 		\frametitle{The Ask}
 		Raising \textbf{\$3,000,000} for \textbf{10\%} of the company (\$30M post-money) \textemdash{} priced for a working system, not a concept.
@@ -445,7 +407,7 @@
 		{\color{CitadelHighlight}\bfseries We already built it. We are raising to prove the market has demand for it.}
 	\end{frame}
 
-	% --- Slide 15: Team ---
+	% --- Slide 14: Team ---
 	\begin{frame}
 		\frametitle{Team}
 		\vfill
