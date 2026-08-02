@@ -49,6 +49,7 @@ from citadel.services.ingestion import (
     shutdown,
 )
 from citadel.services.paddle import log_crop_sizes
+from citadel.services.query import STREAM_RESOLVE_BATCH, record_resolve_batch, resolve_batch_job
 from citadel.services.slm import read_replies
 from config import CPU_EIGHTH, CPU_THIRD, configure_logging, get_settings
 
@@ -393,6 +394,30 @@ async def _batch_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
     await record_summary(int(fields["library_id"]))
 
 
+async def _resolve_batch_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
+    stream = STREAM_RESOLVE_BATCH
+    fields = await _decode_or_settle(stream, msg_id, raw)
+    if fields is None:
+        return
+    work = asyncio.create_task(resolve_batch_job(fields))
+    await asyncio.wait({work})
+    error = work.exception()
+    if error is None:
+        await _settle(stream, msg_id)
+        # unlike record_summary's idempotent DB-backed check, this counter is a plain Redis DECR — it must fire
+        # exactly once per batch, so it only runs here (final success) or from the give-up branch below, never on a
+        # requeue in between
+        await record_resolve_batch(int(fields["library_id"]))
+    else:
+        logger.error(
+            "resolve batch failed library=%s batch=%s\n%s",
+            fields.get("library_id", "?"),
+            fields.get("batch_no", "?"),
+            _tb(error),
+        )
+        await _retry_or_fail(stream, msg_id, raw, lambda: record_resolve_batch(int(fields["library_id"])))
+
+
 # ---- normalize: read `ingest`, convert, write `normalized`. one dedicated libreoffice profile per job
 async def normalize() -> None:
     cap = _Capacity(NORMALIZE_CONCURRENCY)
@@ -541,13 +566,20 @@ async def batch() -> None:
     await _drive(STREAM_BATCH, None, lambda mid, raw: _spawn(_batch_job(mid, raw)))
 
 
+# ---- resolve_batch: read `resolve_batch`, one job per query resolve batch. UNBOUNDED like batch/table_structure —
+# each job hands its call to the slm stream and writes the reply back, so the batching and concurrency are vllm's
+# to decide, not a client-side cap
+async def resolve_batches() -> None:
+    await _drive(STREAM_RESOLVE_BATCH, None, lambda mid, raw: _spawn(_resolve_batch_job(mid, raw)))
+
+
 async def _main() -> None:
     await reap_orphan_blobs()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    stages = (normalize, paginate, render, ocr, structure, table_structure, merge, batch)
+    stages = (normalize, paginate, render, ocr, structure, table_structure, merge, batch, resolve_batches)
     consumers = [asyncio.create_task(stage()) for stage in stages]
     consumers.extend((asyncio.create_task(read_replies()), asyncio.create_task(sample_timeline())))
     stop_task = asyncio.create_task(stop.wait())

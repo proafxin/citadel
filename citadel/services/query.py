@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 import time
@@ -7,6 +8,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from itertools import starmap
 from typing import Any
+from typing import cast as type_cast
 
 from sqlalchemy import BigInteger, Boolean, Date, DateTime, Numeric, Select, Text, case, cast, func, select, text
 from sqlalchemy.dialects import postgresql
@@ -15,6 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import TypeEngine
 
+from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
 from citadel.llm import (
     RESOLVE_BUDGET,
@@ -513,30 +516,129 @@ def _pack_documents(
     return batches
 
 
-async def resolve(
-    question: str, documents: list[DocRef], tables: list[TableCand], labels: dict[int, str], library: str
-) -> _Coverage:
-    # the library is packed into as few resolve calls as fit one call each — one when the whole thing already fits,
-    # more only once it doesn't. every batch's job is emitted onto the shared SLM stream BEFORE any reply is awaited —
-    # the same emit-then-collect shape validate_tables already uses — so batches sit on the stream together, handled
-    # by the one shared, globally-pooled consumer, rather than the caller serializing them one at a time
-    batches = _pack_documents(documents, tables, labels, question, library)
-    logger.info("resolve batches=%d documents=%d tables=%d", len(batches), len(documents), len(tables))
-    jobs: list[tuple[list[tuple[str, int]], int, str]] = []
-    for batch in batches:
+STREAM_RESOLVE_BATCH = "resolve_batch"  # one job per resolve batch — the model call itself, dispatched like a
+# document's own batch-summary job: durable and redeliverable on the shared bus, never held in-process by the
+# request that emitted it
+
+
+def _resolve_pending_key(library_id: int) -> str:
+    return f"resolve:pending:{library_id}"
+
+
+def _resolve_results_key(library_id: int) -> str:
+    return f"resolve:results:{library_id}"
+
+
+def _resolve_done_stream(library_id: int) -> str:
+    return f"resolve:done:{library_id}"
+
+
+async def emit_resolve_batches(
+    library_id: int,
+    question: str,
+    library: str,
+    batches: list[list[DocRef]],
+    tables: list[TableCand],
+    labels: dict[int, str],
+) -> int:
+    # the completion stream and result hash are cleared, and the pending count is set, BEFORE any job is dispatched —
+    # so a stale entry from an earlier query against this library is never mistaken for this one's, and no batch can
+    # possibly finish and decrement before the counter holds the real total. only one query is ever in flight per
+    # library by design, so library_id alone is a safe scope for all three keys
+    redis = get_redis()
+    await redis.delete(_resolve_done_stream(library_id))
+    await redis.delete(_resolve_results_key(library_id))
+    jobs: list[tuple[int, list[str], list[tuple[str, int]]]] = []
+    for batch_no, batch in enumerate(batches):
         items, index_map = _inventory(batch, tables, labels)
-        if not items:
-            continue
-        job_id = await emit_resolve(question, items, library)
-        jobs.append((index_map, len(items), job_id))
+        if items:
+            jobs.append((batch_no, items, index_map))
+    await redis.set(_resolve_pending_key(library_id), len(jobs))
+    for batch_no, items, index_map in jobs:
+        await redis.xadd(
+            STREAM_RESOLVE_BATCH,
+            {
+                "library_id": str(library_id),
+                "batch_no": str(batch_no),
+                "question": question,
+                "library": library,
+                "items": json.dumps(items),
+                "index_map": json.dumps(index_map),
+            },
+        )
+    return len(jobs)
+
+
+async def resolve_batch_job(fields: dict[str, str]) -> None:
+    # runs in the worker, one call per dispatched batch: the actual model call plus the coverage it resolves to,
+    # persisted under this batch's own field so the last batch to finish can merge every batch's result
+    library_id = int(fields["library_id"])
+    items = json.loads(fields["items"])
+    index_map = [(kind, index) for kind, index in json.loads(fields["index_map"])]
+    job_id = await emit_resolve(fields["question"], items, fields["library"])
+    doc_coverage, table_coverage = await collect_resolve(job_id, len(items))
+    coverage = _split_coverage(doc_coverage, table_coverage, index_map)
+    payload = json.dumps({"documents": coverage.documents, "tables": coverage.tables})
+    await get_redis().hset(_resolve_results_key(library_id), fields["batch_no"], payload)
+
+
+async def record_resolve_batch(library_id: int) -> None:
+    # counter-and-fire, called EXACTLY ONCE per batch — on its final success or its final give-up, never on a mere
+    # requeue. this differs from record_summary's DB-backed check on purpose: that check re-derives "pending" from
+    # persisted state each time, so calling it again after a requeue is harmless; a Redis DECR is not idempotent, so
+    # decrementing on a requeue (whose batch will run again later) would let the count reach zero early and merge an
+    # incomplete result. whichever call sees the count reach zero merges every batch's persisted coverage and fires
+    # the completion stream this library's query is blocked on
+    redis = get_redis()
+    remaining = await redis.decr(_resolve_pending_key(library_id))
+    if remaining != 0:
+        return
+    raw_results = await redis.hgetall(_resolve_results_key(library_id))
     merged_documents: dict[int, str] = {}
     merged_tables: dict[int, str] = {}
-    for index_map, count, job_id in jobs:
-        doc_coverage, table_coverage = await collect_resolve(job_id, count)
-        coverage = _split_coverage(doc_coverage, table_coverage, index_map)
-        merged_documents.update(coverage.documents)
-        merged_tables.update(coverage.tables)
-    return _Coverage(merged_documents, merged_tables)
+    for raw in raw_results.values():
+        parsed = json.loads(raw)
+        merged_documents.update({int(index): depth for index, depth in parsed["documents"].items()})
+        merged_tables.update({int(index): depth for index, depth in parsed["tables"].items()})
+    await redis.xadd(
+        _resolve_done_stream(library_id),
+        {"documents": json.dumps(merged_documents), "tables": json.dumps(merged_tables)},
+    )
+
+
+async def wait_resolve(library_id: int, dispatched: int) -> _Coverage:
+    # the last batch to land fires the completion stream; block on it instead of polling or holding any job handle
+    # ourselves. reading from "0" is race-free — the entry persists, so a fire that happened before this read is
+    # still seen
+    if dispatched == 0:
+        return _Coverage({}, {})
+    entries = type_cast(
+        "list[tuple[bytes, list[tuple[bytes, dict[bytes, bytes]]]]]",
+        await get_redis().xread({_resolve_done_stream(library_id): "0"}, block=0),
+    )
+    _, messages = entries[0]
+    _, raw = messages[0]
+    documents = {int(index): depth for index, depth in json.loads(raw[b"documents"]).items()}
+    tables = {int(index): depth for index, depth in json.loads(raw[b"tables"]).items()}
+    return _Coverage(documents, tables)
+
+
+async def resolve(
+    library_id: int,
+    question: str,
+    documents: list[DocRef],
+    tables: list[TableCand],
+    labels: dict[int, str],
+    library: str,
+) -> _Coverage:
+    # the library is packed into as few resolve calls as fit one call each — one when the whole thing already fits,
+    # more only once it doesn't. each batch is dispatched as its own durable job on the shared bus, exactly like a
+    # document's own batch-summary job — never held or awaited in-process by this call. whichever batch finishes last
+    # merges every batch's persisted result and fires the completion stream this call blocks on (see wait_resolve)
+    batches = _pack_documents(documents, tables, labels, question, library)
+    logger.info("resolve batches=%d documents=%d tables=%d", len(batches), len(documents), len(tables))
+    dispatched = await emit_resolve_batches(library_id, question, library, batches, tables, labels)
+    return await wait_resolve(library_id, dispatched)
 
 
 async def run_tables(
@@ -786,7 +888,7 @@ async def answer(question: str, library_id: int) -> AsyncIterator[str]:
     documents = await load_library_documents(library_id)
     tables = await load_all_tables(library_id)
     labels = _table_labels(tables)
-    coverage = await resolve(question, documents, tables, labels, library)
+    coverage = await resolve(library_id, question, documents, tables, labels, library)
     covered_docs = [documents[index] for index in sorted(coverage.documents)]
     covered_tables = [tables[index] for index in sorted(coverage.tables)]
     depths = {documents[index].id: depth for index, depth in coverage.documents.items()}
