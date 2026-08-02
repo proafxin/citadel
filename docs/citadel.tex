@@ -71,7 +71,7 @@
 		\vfill
 		{\Large\bfseries\color{accent} Citadel} \\[0.15cm]
 		{\large\bfseries\color{text} The Knowledge Compilation Layer for Enterprise AI} \\[0.1cm]
-		{\small\color{muted} The foundational layer every reliable AI system needs}
+		{\small\color{muted} Every AI system re-pays the same hidden extraction cost, on every model swap \textemdash{} Citadel pays it once.}
 
 		\vskip 0.4cm
 		\hrule height 0.5pt depth 0pt width \textwidth \color{panel}
@@ -89,42 +89,7 @@
 		\vfill
 	\end{frame}
 
-	% --- Slide 2: The Problem (mechanism, sharp) ---
-	\begin{frame}
-		\frametitle{Every AI System Re-Pays the Same Hidden Cost}
-		Every AI system couples enterprise data to one model's representation \textemdash{} its weights, or its embedding space. Both approaches skip the same intermediary step, and both pay for it the same way, on every model swap.
-
-		\begin{columns}[T]
-			\column{0.49\textwidth}
-			\textbf{Without a Knowledge Layer}
-			\begin{center}
-				\begin{tikzpicture}[node/.style={draw=muted, rounded corners, font=\scriptsize, minimum width=4.6cm, minimum height=0.4cm}]
-					\node[node] (raw) {Raw Documents};
-					\node[node, below=0.15cm of raw] (reparse) {\color{accent}Re-run OCR, Layout, Extraction};
-					\node[node, below=0.15cm of reparse] (bake) {Baked into New Weights or Embeddings};
-					\draw[-{Latex[length=1.5mm]}] (raw)--(reparse)--(bake);
-				\end{tikzpicture}
-			\end{center}
-			\centering{\scriptsize\color{muted} Full reingestion cost, paid again on every model swap.}
-
-			\column{0.49\textwidth}
-			\textbf{With Citadel}
-			\begin{center}
-				\begin{tikzpicture}[node/.style={draw=text, rounded corners, font=\scriptsize, minimum width=4.6cm, minimum height=0.4cm}]
-					\node[node, draw=accent, fill=CitadelBlue] (raw2) {Raw Documents};
-					\node[node, below=0.25cm of raw2] (compiled) {Compiled Once into the Knowledge Substrate};
-					\node[node, below=0.25cm of compiled] (reembed) {Re-embedded or Re-tuned From Structured Data};
-					\draw[-{Latex[length=1.5mm]}, accent] (raw2)--(compiled)--(reembed);
-				\end{tikzpicture}
-			\end{center}
-			\centering{\scriptsize\color{accent} Extraction cost paid once. A model swap touches only the substrate.}
-		\end{columns}
-		\vfill
-		\centering
-		{\small\color{muted} Models iterate weekly. Applications pivot monthly.} \quad {\bfseries\color{CitadelHighlight} Infrastructure persists for decades.}
-	\end{frame}
-
-	% --- Slide 3: Why Now ---
+	% --- Slide 2: Why Now ---
 	\begin{frame}
 		\frametitle{Why Now}
 		\begin{center}
@@ -146,7 +111,7 @@
 		{\color{CitadelHighlight}\bfseries The missing layer was survivable when AI was experimental. It stopped being optional the moment reliability became the product.}
 	\end{frame}
 
-	% --- Slide 4: The Missing Architecture Layer ---
+	% --- Slide 3: The Missing Architecture Layer ---
 	\begin{frame}
 		\frametitle{The Missing Systems Tier for Enterprise Intelligence}
 		Citadel serves as the stable computational foundation layer, transforming raw inputs into invariant state.
@@ -179,7 +144,7 @@
 		\end{columns}
 	\end{frame}
 
-	% --- Slide 5: The Market (foundational dependency, not a feature) ---
+	% --- Slide 4: The Market (foundational dependency, not a feature) ---
 	\begin{frame}
 		\frametitle{The Foundational Layer Every AI Company Will Require}
 		Any AI product whose value depends on reading, structuring, or reasoning over real documents faces the same dependency \textemdash{} and a competitor built on a solved version of it carries a structural, compounding advantage.
@@ -207,7 +172,7 @@
 		{\color{CitadelHighlight}\bfseries Payphones did not lose to a better payphone. They lost when the infrastructure underneath calling changed. Citadel is that shift, for enterprise data.}
 	\end{frame}
 
-	% --- Slide 6: REAL PROOF SLIDE (ChatGPT) ---
+	% --- Slide 5: REAL PROOF SLIDE (ChatGPT) ---
 	\begin{frame}
 		\frametitle{Not a Claim. A Measured Result.}
 		One messy spreadsheet, four unrelated datasets on one sheet. Asked: how many tables, how many rows.
@@ -230,7 +195,7 @@
 		{\color{CitadelHighlight}\bfseries Not close. A model reasoning over raw bytes cannot see structure that was never extracted.}
 	\end{frame}
 
-	% --- Slide 7: REAL PROOF SLIDE (Gemini) ---
+	% --- Slide 6: REAL PROOF SLIDE (Gemini) ---
 	\begin{frame}
 		\frametitle{Not a Model Problem. A Missing Capability.}
 		Same file, given to a model that wrote and ran its own verification code \textemdash{} real execution, not guessing.
@@ -253,7 +218,7 @@
 		{\color{CitadelHighlight}\bfseries It verified its own numbers. It still cannot see a table boundary.}
 	\end{frame}
 
-	% --- Slide 8: REAL PROOF SLIDE (Citadel) ---
+	% --- Slide 7: REAL PROOF SLIDE (Citadel) ---
 	\begin{frame}
 		\frametitle{What Citadel Actually Returns}
 		Same file, same question \textemdash{} answered from stored structure, not raw bytes.
@@ -276,7 +241,7 @@
 		{\color{CitadelHighlight}\bfseries Not a better guess. The structure was already there.}
 	\end{frame}
 
-	% --- Slide 9: A Harder Test, Not an Easier One ---
+	% --- Slide 8: A Harder Test, Not an Easier One ---
 	\begin{frame}
 		\frametitle{A Harder Test, Not an Easier One}
 		ChatGPT and Gemini were handed this one spreadsheet, alone, with nothing else to search. Citadel answered the same question from a library of roughly 30 files \textemdash{} and neither tool can even accept that scale in the first place.
@@ -297,7 +262,7 @@
 
 
 
-	% --- Slide 10: Systems Attack on Chunking ---
+	% --- Slide 9: Systems Attack on Chunking ---
 	\begin{frame}
 		\frametitle{Retrieval Cannot Recover What Structurally Disappeared}
 		If a representation discards structure, nothing downstream recovers it. Every answer must trace back to exactly where it came from \textemdash{} nothing flattened, nothing untraceable.
@@ -329,7 +294,7 @@
 		\vfill
 	\end{frame}
 
-	% --- Slide 11: Market Wedge & Sequenced GTM ---
+	% --- Slide 10: Market Wedge & Sequenced GTM ---
 	\begin{frame}
 		\frametitle{Enterprise First, Infrastructure Next}
 		\begin{columns}[T]
@@ -353,7 +318,7 @@
 		{\color{CitadelHighlight}\bfseries One layer proven with the enterprises, then opened to everyone.}
 	\end{frame}
 
-	% --- Slide 12: Business Model ---
+	% --- Slide 11: Business Model ---
 	\begin{frame}
 		\frametitle{Two Tiers, Priced on Usage}
 		\begin{columns}[T]
@@ -376,7 +341,7 @@
 		{\color{CitadelHighlight}\bfseries Priced on what it does for you, not seats or licenses.}
 	\end{frame}
 
-	% --- Slide 13: The Ask ---
+	% --- Slide 12: The Ask ---
 	\begin{frame}
 		\frametitle{The Ask}
 		Raising \textbf{\$3,000,000} for \textbf{10\%} of the company (\$30M post-money) \textemdash{} priced for a working system, not a concept.
@@ -407,7 +372,7 @@
 		{\color{CitadelHighlight}\bfseries We already built it. We are raising to prove the market has demand for it.}
 	\end{frame}
 
-	% --- Slide 14: Team ---
+	% --- Slide 13: Team ---
 	\begin{frame}
 		\frametitle{Team}
 		\vfill
