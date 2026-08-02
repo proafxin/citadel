@@ -156,11 +156,11 @@
 	% --- Slide 5: Defensive Moat / Missing Abstraction ---
 	\begin{frame}
 		\frametitle{Why Existing Infrastructure Cannot Solve This}
-
+		Take excel as an example.
 		\begin{columns}[T]
 			\column{0.32\textwidth}
 			\begin{block}{Frontier Model Vendors}
-				\textbf{(OpenAI, Google, Anthropic)}
+				\textbf{(OpenAI, Google, Anthropic, Meta, etc.)}
 				\begin{itemize}\scriptsize
 					\item \textbf{Incentive:} Token consumption \& compute scale.
 					\item \textbf{Abstraction:} Text token streams \& context windows.
@@ -169,28 +169,30 @@
 			\end{block}
 
 			\column{0.32\textwidth}
-			\begin{block}{Cloud Data Platforms}
-				\textbf{(Snowflake, Databricks)}
+			\begin{block}{Notable attempts}
 				\begin{itemize}\scriptsize
-					\item \textbf{Incentive:} SQL warehouse storage \& query compute.
-					\item \textbf{Abstraction:} Rigid schemas \& Parquet tables.
-					\item \textbf{Blindspot:} Require pre-cleaned relational data; fail on messy multi-document corpora.
+					\item TaBERT by Facebook AI
+					\item TAPAS, TARL by Google
+					\item TUTA, TaPEx by Microsoft
+					\item LLMs and embedding
 				\end{itemize}
+				Mistake: force excels/tables into transformers
 			\end{block}
 
 			\column{0.32\textwidth}
-			\begin{block}{Citadel Knowledge Layer}
-				\textbf{(The Compilation Standard)}
+			\begin{block}{Failures and Reason}
 				\begin{itemize}\scriptsize
-					\item \textbf{Incentive:} Lossless structural representation.
-					\item \textbf{Abstraction:} Canonical Knowledge Substrate.
-					\item \textbf{Moat:} Sits directly between raw enterprise storage and generative reasoning engines.
+					\item Quadratic attention
+					\item Tables are not language
+					\item Retrieval mismatch
+					\item Context explosion
+					\item Different attack methods, same failure
 				\end{itemize}
 			\end{block}
 		\end{columns}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries Citadel owns the missing abstraction between raw storage and generative reasoning.}
+		{\color{CitadelHighlight}\bfseries Citadel owns the missing abstraction between raw storage and generative reasoning avoiding the root failure cause altogether.}
 	\end{frame}
 
 	% --- Slide 6: The Theoretical Core ---
