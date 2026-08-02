@@ -17,12 +17,15 @@ from sqlalchemy.types import TypeEngine
 
 from citadel.db import get_sessionmaker
 from citadel.llm import (
+    RESOLVE_BUDGET,
     STRUCT_MAX_TOKENS,
     SYNTH_MAX_TOKENS,
+    collect_resolve,
     count_tokens,
     count_tokens_batch,
+    emit_resolve,
     merge_evidence,
-    resolve_query,
+    resolve_prompt_tokens,
     synthesize,
     write_queries,
 )
@@ -134,8 +137,8 @@ def _schema(columns: list[dict], sample_rows: list[list]) -> str:
     return "\n".join(lines)
 
 
-def _schema_block(index: int, table: TableCand) -> str:
-    return f"t{index} ({_table_label(table)}) rows={table.n_rows}\n{_schema(table.columns, table.sample_rows)}"
+def _schema_block(index: int, table: TableCand, labels: dict[int, str]) -> str:
+    return f"t{index} ({_table_label(table, labels)}) rows={table.n_rows}\n{_schema(table.columns, table.sample_rows)}"
 
 
 def _table_locator(table: TableCand) -> str:
@@ -147,16 +150,36 @@ def _table_locator(table: TableCand) -> str:
     return f"p{table.page_no}" if table.page_no is not None else ""
 
 
-def _table_label(table: TableCand) -> str:
-    # the ONE name a table answers to, on both its description and any result computed from it. it is built from real
-    # source identity rather than the per-request t0..tn labels, because the answer cites these labels back and a
-    # request-local index means nothing to a reader. it stays file + locator and nothing else: a label is parsed back
-    # out of the answer to check citations, so anything with a comma in it would break that read
+def _base_table_label(table: TableCand) -> str:
     locator = _table_locator(table)
     return f"{table.filename} ({locator})" if locator else table.filename
 
 
-def _table_render(table: TableCand) -> str:
+def _table_labels(tables: list[TableCand]) -> dict[int, str]:
+    # the ONE name each table answers to, on its inventory item, its description, and any result computed from it —
+    # built from real source identity, not the per-request t0..tn labels, because the answer cites these labels back
+    # and a request-local index means nothing to a reader. two tables sharing a file+sheet (or file+page) would
+    # otherwise share this identity too, so a group of colliding tables is disambiguated by a stable ordinal appended
+    # to the base label; a table with no collision keeps the bare label. computed once over the WHOLE per-request
+    # table list, before coverage is known, so a table's identity is the same at resolve time and at synthesis time
+    groups: dict[str, list[TableCand]] = {}
+    for table in tables:
+        groups.setdefault(_base_table_label(table), []).append(table)
+    labels: dict[int, str] = {}
+    for base, group in groups.items():
+        if len(group) == 1:
+            labels[group[0].table_id] = base
+            continue
+        for ordinal, table in enumerate(sorted(group, key=lambda t: t.table_id), start=1):
+            labels[table.table_id] = f"{base} #{ordinal}"
+    return labels
+
+
+def _table_label(table: TableCand, labels: dict[int, str]) -> str:
+    return labels[table.table_id]
+
+
+def _table_render(table: TableCand, labels: dict[int, str]) -> str:
     # a table's description as the ANSWER needs it, and no more: which file it came from, where in it, what it is, how
     # big. no schema, no samples, no dtypes — nothing here writes SQL any more, the columns that matter already arrive
     # as the result's own header row, and a sample value would just be a concrete-looking number beside the real result,
@@ -164,7 +187,7 @@ def _table_render(table: TableCand) -> str:
     meta = table.metadata
     described = [str(meta[key]) for key in ("title", "caption") if meta.get(key)]
     described.extend(str(note) for note in meta.get("notes") or [])
-    head = f"[{_table_label(table)}] rows={table.n_rows}"
+    head = f"[{_table_label(table, labels)}] rows={table.n_rows}"
     return f"{head} {' | '.join(described)}" if described else head
 
 
@@ -182,16 +205,16 @@ def _col_name(tables: list[TableCand], table: int, col: int) -> str:
     return f"c{col}"
 
 
-def _readable_sql(tables: list[TableCand], sql: str) -> str:
+def _readable_sql(tables: list[TableCand], sql: str, labels: dict[int, str]) -> str:
     # rewrite the executed query into what a reader can follow: every `tN.cM` becomes its header name and every table
     # reference becomes the table's own label. no internal position ids survive, and the WHERE that produced the value
     # is now stated in the reader's own vocabulary — this is the provenance a lone aggregate value cannot carry itself
     sql = _COL_REF.sub(lambda m: _col_name(tables, int(m[1]), int(m[2])), sql)
-    return _TABLE_REF.sub(lambda m: _table_label(tables[int(m[1])]) if int(m[1]) < len(tables) else m[0], sql)
+    return _TABLE_REF.sub(lambda m: _table_label(tables[int(m[1])], labels) if int(m[1]) < len(tables) else m[0], sql)
 
 
-def _sources(tables: list[TableCand], refs: list[int]) -> list[str]:
-    return list(dict.fromkeys(_table_label(tables[index]) for index in refs))
+def _sources(tables: list[TableCand], refs: list[int], labels: dict[int, str]) -> list[str]:
+    return list(dict.fromkeys(_table_label(tables[index], labels) for index in refs))
 
 
 def _row_file_sources(columns: list[str], rows: list[list]) -> list[str]:
@@ -216,12 +239,14 @@ def _all_files(tables: list[TableCand]) -> list[str]:
     return list(dict.fromkeys(table.filename for table in tables))
 
 
-def _result_sources(tables: list[TableCand], refs: list[int], columns: list[str], rows: list[list]) -> list[str]:
+def _result_sources(
+    tables: list[TableCand], refs: list[int], columns: list[str], rows: list[list], labels: dict[int, str]
+) -> list[str]:
     # what the result traces back to. a tN query sources from the tables it read. a query that reads no tN takes its
     # origin from the files its rows name, or — when it names none — every file this request was built from. a computed
     # figure is never left origin-less
     if refs:
-        return _sources(tables, refs)
+        return _sources(tables, refs, labels)
     return _row_file_sources(columns, rows) or _all_files(tables)
 
 
@@ -234,7 +259,7 @@ async def _run_sql(session: AsyncSession, tables: list[TableCand], sql: str) -> 
     return list(result.keys()), [list(row) for row in result.fetchall()]
 
 
-async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
+async def _execute(tables: list[TableCand], sql: str, labels: dict[int, str]) -> SqlResult | None:
     sql = sql.strip().rstrip(";").strip()
     try:
         async with get_sessionmaker()() as session, session.begin():
@@ -243,19 +268,21 @@ async def _execute(tables: list[TableCand], sql: str) -> SqlResult | None:
         logger.warning("sql failed sql=%s\n%s", sql, traceback.format_exc())
         return None
     refs = _refs(tables, sql)
-    sources = _result_sources(tables, refs, columns, rows)
+    sources = _result_sources(tables, refs, columns, rows, labels)
     logger.info("resolve sources=%s rows=%d sql=%s", sources, len(rows), sql)
     return SqlResult(
-        ", ".join(sources) or "computed result", columns, rows, len(rows), refs, _readable_sql(tables, sql)
+        ", ".join(sources) or "computed result", columns, rows, len(rows), refs, _readable_sql(tables, sql, labels)
     )
 
 
-async def _aggregate(question: str, tables: list[TableCand], library: str = "") -> list[SqlResult]:
-    blocks = list(starmap(_schema_block, enumerate(tables)))
+async def _aggregate(
+    question: str, tables: list[TableCand], labels: dict[int, str], library: str = ""
+) -> list[SqlResult]:
+    blocks = [_schema_block(index, table, labels) for index, table in enumerate(tables)]
     plan = await write_queries(question, blocks, library) if tables else QueryPlan()
     results: list[SqlResult] = []
     for sql in plan.queries:
-        resolved = await _execute(tables, sql)
+        resolved = await _execute(tables, sql, labels)
         if resolved is not None:
             results.append(resolved)
     logger.info("aggregate tables=%d sqls=%d ran=%d", len(tables), len(plan.queries), len(results))
@@ -395,14 +422,14 @@ def _doc_item(doc: DocRef) -> str:
     return f"document — {doc.filename}: {doc.summary}"
 
 
-def _table_item(table: TableCand) -> str:
+def _table_item(table: TableCand, labels: dict[int, str]) -> str:
     # a table's identity: where it sits, what it is called, how many rows it holds, what its columns are named. no
     # dtypes and no sample values — those are the width-scaled part, bought later for the few tables that earn them.
-    # the row count stays: it is one number we hold, and how big a table is is itself something a question can be about
-    locator = _table_locator(table)
+    # the row count stays: it is one number we hold, and how big a table is is itself something a question can be
+    # about. the label is the SAME identity string synthesis will later show for this table, disambiguated up front
     named = [str(table.metadata[key]) for key in ("title", "caption") if table.metadata.get(key)]
     columns = ", ".join(str(column.get("header") or "?") for column in table.columns)
-    head = f"table — {table.filename}{f' ({locator})' if locator else ''} rows={table.n_rows}"
+    head = f"table — {_table_label(table, labels)} rows={table.n_rows}"
     return f"{head}: {' | '.join(named)}. columns {columns}" if named else f"{head}: columns {columns}"
 
 
@@ -412,7 +439,9 @@ class _Coverage:
     tables: dict[int, str]  # index into the library's tables -> depth
 
 
-def _inventory(documents: list[DocRef], tables: list[TableCand]) -> tuple[list[str], list[tuple[str, int]]]:
+def _inventory(
+    documents: list[DocRef], tables: list[TableCand], labels: dict[int, str]
+) -> tuple[list[str], list[tuple[str, int]]]:
     # a file's document item and its own table items are placed adjacent, each document immediately followed by its
     # tables. resolution reliably finds a file's tables only when they sit near its document entry — verified against
     # a 114-item real inventory: documents-then-all-tables (a file's tables up to ~40 positions from its document)
@@ -427,42 +456,98 @@ def _inventory(documents: list[DocRef], tables: list[TableCand]) -> tuple[list[s
         items.append(_doc_item(doc))
         index_map.append(("doc", doc_index))
         for table_index in by_document.get(doc.id, []):
-            items.append(_table_item(tables[table_index]))
+            items.append(_table_item(tables[table_index], labels))
             index_map.append(("table", table_index))
     return items, index_map
 
 
-def _split_coverage(coverage: dict[int, str], index_map: list[tuple[str, int]]) -> _Coverage:
-    # `parts` is a document depth; a table named there asked for detail inside it, which for a table means its rows
+def _split_coverage(
+    doc_coverage: dict[int, str], table_coverage: dict[int, str], index_map: list[tuple[str, int]]
+) -> _Coverage:
+    # documents and tables now arrive in separate, kind-scoped objects — a table cannot be named into a document-only
+    # depth, or vice versa, because the schema itself has no slot for it. the only way either dict can name the wrong
+    # kind is a stale/out-of-range position, so a kind mismatch here is dropped, never coerced into the nearest depth
     documents: dict[int, str] = {}
     tables: dict[int, str] = {}
-    for index, depth in coverage.items():
+    for index, depth in doc_coverage.items():
         if index >= len(index_map):
             continue
         kind, orig = index_map[index]
-        if kind == "table":
-            if depth == "parts":
-                logger.warning("resolve named a table at parts item=%d — taking its rows", index)
-            tables[orig] = "full" if depth == "parts" else depth
-        else:
-            documents[orig] = depth
+        if kind != "doc":
+            logger.warning("resolve named a table as a document item=%d depth=%s — dropped", index, depth)
+            continue
+        documents[orig] = depth
+    for index, depth in table_coverage.items():
+        if index >= len(index_map):
+            continue
+        kind, orig = index_map[index]
+        if kind != "table":
+            logger.warning("resolve named a document as a table item=%d depth=%s — dropped", index, depth)
+            continue
+        tables[orig] = depth
     return _Coverage(documents, tables)
 
 
-async def resolve(question: str, documents: list[DocRef], tables: list[TableCand], library: str) -> _Coverage:
-    items, index_map = _inventory(documents, tables)
-    if not items:
-        return _Coverage({}, {})
-    return _split_coverage(await resolve_query(question, items, library), index_map)
+def _pack_documents(
+    documents: list[DocRef], tables: list[TableCand], labels: dict[int, str], question: str, library: str
+) -> list[list[DocRef]]:
+    # a document and its own tables are one atomic unit — never split across batches, since a file's tables are only
+    # reliably enumerated when the model sees them together with that file's document entry (see _inventory's own
+    # note). batches are packed first-fit, by the exact same token accounting the resolve call itself is measured by:
+    # a document joins the running batch if the whole batch still fits one call once it's added; a document that alone
+    # exceeds the budget becomes its own (oversized) batch rather than being dropped or split from its own tables —
+    # the same call that would have run against the whole library still runs, just against one document instead
+    batches: list[list[DocRef]] = []
+    current: list[DocRef] = []
+    for doc in documents:
+        candidate = [*current, doc]
+        items, _ = _inventory(candidate, tables, labels)
+        tokens = resolve_prompt_tokens(question, items, library)
+        if current and tokens > RESOLVE_BUDGET:
+            batches.append(current)
+            current = [doc]
+        else:
+            current = candidate
+    if current:
+        batches.append(current)
+    return batches
 
 
-async def run_tables(question: str, tables: list[TableCand], depths: dict[int, str], library: str) -> list[SqlResult]:
+async def resolve(
+    question: str, documents: list[DocRef], tables: list[TableCand], labels: dict[int, str], library: str
+) -> _Coverage:
+    # the library is packed into as few resolve calls as fit one call each — one when the whole thing already fits,
+    # more only once it doesn't. every batch's job is emitted onto the shared SLM stream BEFORE any reply is awaited —
+    # the same emit-then-collect shape validate_tables already uses — so batches sit on the stream together, handled
+    # by the one shared, globally-pooled consumer, rather than the caller serializing them one at a time
+    batches = _pack_documents(documents, tables, labels, question, library)
+    logger.info("resolve batches=%d documents=%d tables=%d", len(batches), len(documents), len(tables))
+    jobs: list[tuple[list[tuple[str, int]], int, str]] = []
+    for batch in batches:
+        items, index_map = _inventory(batch, tables, labels)
+        if not items:
+            continue
+        job_id = await emit_resolve(question, items, library)
+        jobs.append((index_map, len(items), job_id))
+    merged_documents: dict[int, str] = {}
+    merged_tables: dict[int, str] = {}
+    for index_map, count, job_id in jobs:
+        doc_coverage, table_coverage = await collect_resolve(job_id, count)
+        coverage = _split_coverage(doc_coverage, table_coverage, index_map)
+        merged_documents.update(coverage.documents)
+        merged_tables.update(coverage.tables)
+    return _Coverage(merged_documents, merged_tables)
+
+
+async def run_tables(
+    question: str, tables: list[TableCand], depths: dict[int, str], labels: dict[int, str], library: str
+) -> list[SqlResult]:
     # the table channel now runs over the tables the question was resolved as needing values FROM, and only those: they
     # arrive with full schema and samples, which is the view worth paying for once the set is small
-    queried = [tables[index] for index in sorted(depths) if depths[index] == "full"]
+    queried = [tables[index] for index in sorted(depths) if depths[index] == "data"]
     if not queried:
         return []
-    return await _aggregate(question, queried, library)
+    return await _aggregate(question, queried, labels, library)
 
 
 def _batch_cite(batch: BatchRef) -> str:
@@ -512,16 +597,19 @@ async def _deeper_texts(depth: str, batches: list[BatchRef]) -> list[str]:
 
 
 def _upgrade_order(documents: list[DocRef], depths: dict[int, str]) -> list[tuple[DocRef, tuple[str, ...], bool]]:
-    # `full` before `parts`: the deeper ask is the one the answer turns on, so it gets first claim on what is spare.
+    # `wording` before `parts`: the deeper ask is the one the answer turns on, so it gets first claim on what is spare.
     # each ask carries its own way DOWN — a document whose wording will not fit is still owed the summaries of its
     # parts, and must never drop to its own one-line summary just because the deepest rung was unaffordable.
     # then, with whatever is STILL spare, every remaining covered document is carried one rung deeper than it asked
     # for — a summary is the cheapest form of a document, not the most faithful one, and an unspent budget buys nothing
-    ladders = {"full": ("full", "parts"), "parts": ("parts",)}
+    ladders = {"wording": ("wording", "parts"), "parts": ("parts",)}
     asked: list[tuple[DocRef, tuple[str, ...], bool]] = [
-        (doc, ladders[depth], False) for depth in ("full", "parts") for doc in documents if depths.get(doc.id) == depth
+        (doc, ladders[depth], False)
+        for depth in ("wording", "parts")
+        for doc in documents
+        if depths.get(doc.id) == depth
     ]
-    return asked + [(doc, ("parts",), True) for doc in documents if depths.get(doc.id, "overall") == "overall"]
+    return asked + [(doc, ("parts",), True) for doc in documents if depths.get(doc.id, "overview") == "overview"]
 
 
 async def _upgrade(
@@ -531,7 +619,7 @@ async def _upgrade(
         # a document's depth is priced from what it stored at ingestion — its blocks from content_tokens, its parts
         # from their summary tokens — so an unaffordable rung is rejected before anything is read, and the rung below
         # is reached without paying to load the rung above
-        stored = doc.content_tokens if depth == "full" else sum(batch.summary_tokens for batch in batches)
+        stored = doc.content_tokens if depth == "wording" else sum(batch.summary_tokens for batch in batches)
         if stored > allowance + floor_cost:
             continue
         texts = await _deeper_texts(depth, batches)
@@ -594,26 +682,38 @@ def _cite_file(label: str) -> str:
     return re.sub(r"\s+p\d.*$", "", re.sub(r"\s*\([^)]*\)\s*$", "", label)).strip()
 
 
-def _evidence_files(passages: list[str], results: list[str]) -> set[str]:
+def _evidence_files(passages: list[str]) -> set[str]:
     files: set[str] = set()
-    for text in passages:
-        match = _CITE.match(text)
+    for passage in passages:
+        match = _CITE.match(passage)
         if match:
             files.add(_cite_file(match.group(1)))
-    for text in results:  # a result label is a comma-joined list of its source filenames
-        match = _CITE.match(text)
-        if match:
-            files.update(_cite_file(part) for part in match.group(1).split(", "))
     return files
 
 
-def _check_citations(response: str, evidence_files: set[str]) -> None:
-    # every citation in the answer must point at a document we actually gave the model. one that does not is a
-    # fabricated source — the clearest hallucination signal we can check automatically
-    cited = {_cite_file(label) for label in _CITE.findall(response)}
-    fabricated = sorted(cited - evidence_files)
+def _result_fallback_files(results: list[SqlResult], table_labels: set[str]) -> set[str]:
+    # a computed result whose query named no tN could not be tied to a specific table's disambiguated label — it cites
+    # by bare filename instead (`_row_file_sources`/`_all_files`). those parts aren't in `table_labels` and still need
+    # the normalized document/file check, exactly as a passage citation does
+    return {_cite_file(part) for result in results for part in result.label.split(", ") if part not in table_labels}
+
+
+def _check_citations(response: str, evidence_files: set[str], table_labels: set[str]) -> None:
+    # every citation in the answer must point at evidence we actually gave the model. a table citation is checked by
+    # EXACT match against its real, disambiguated label — no parsing, no collision risk. everything else (documents,
+    # and any result that could only cite by bare filename) is checked against the normalized file set, as before.
+    # one that matches neither is a fabricated source — the clearest hallucination signal we can check automatically
+    cited = set(_CITE.findall(response))
+    fabricated = sorted(
+        label for label in cited if label not in table_labels and _cite_file(label) not in evidence_files
+    )
     if fabricated:
-        logger.error("HALLUCINATION cited sources not in evidence=%s | evidence=%s", fabricated, sorted(evidence_files))
+        logger.error(
+            "HALLUCINATION cited sources not in evidence=%s | files=%s | tables=%s",
+            fabricated,
+            sorted(evidence_files),
+            sorted(table_labels),
+        )
     logger.info("answer chars=%d cited_files=%d fabricated=%d", len(response), len(cited), len(fabricated))
     logger.debug("answer:\n%s", response)
 
@@ -665,10 +765,11 @@ async def _assemble(
     tables: list[TableCand],
     depths: dict[int, str],
     results: list[SqlResult],
+    labels: dict[int, str],
 ) -> _Assembled:
     # the floor of BOTH channels is priced before a single row is fitted: every covered table's description and every
     # covered document's summary. what is left over is what computed rows may take, and what they leave is depth
-    describe = [_table_render(table) for table in tables]
+    describe = [_table_render(table, labels) for table in tables]
     floor = [_doc_summary_text(doc) for doc in documents]
     reserved = sum(count_tokens(block) for block in describe) + sum(await asyncio.to_thread(count_tokens_batch, floor))
     channel = _table_channel(results, describe, max(SYNTH_BUDGET - reserved, 0))
@@ -684,11 +785,12 @@ async def answer(question: str, library_id: int) -> AsyncIterator[str]:
     library = await load_library_name(library_id)
     documents = await load_library_documents(library_id)
     tables = await load_all_tables(library_id)
-    coverage = await resolve(question, documents, tables, library)
+    labels = _table_labels(tables)
+    coverage = await resolve(question, documents, tables, labels, library)
     covered_docs = [documents[index] for index in sorted(coverage.documents)]
     covered_tables = [tables[index] for index in sorted(coverage.tables)]
     depths = {documents[index].id: depth for index, depth in coverage.documents.items()}
-    results = await run_tables(question, tables, coverage.tables, library)
+    results = await run_tables(question, tables, coverage.tables, labels, library)
     logger.info(
         "coverage documents=%d/%d tables=%d/%d results=%d rows=%s",
         len(covered_docs),
@@ -698,11 +800,12 @@ async def answer(question: str, library_id: int) -> AsyncIterator[str]:
         len(results),
         [result.total for result in results],
     )
-    built = await _assemble(question, library_id, covered_docs, covered_tables, depths, results)
-    evidence_files = _evidence_files(built.passages, built.rendered)
+    built = await _assemble(question, library_id, covered_docs, covered_tables, depths, results, labels)
+    table_labels = {labels[table.table_id] for table in covered_tables}
+    evidence_files = _evidence_files(built.passages) | _result_fallback_files(results, table_labels)
     _log_evidence(question, started, built.passages, results, built.channel)
     parts: list[str] = []
     async for token in synthesize(question, built.passages, built.rendered):
         parts.append(token)
         yield token
-    _check_citations("".join(parts), evidence_files)
+    _check_citations("".join(parts), evidence_files, table_labels)

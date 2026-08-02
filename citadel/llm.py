@@ -234,51 +234,84 @@ _QUERIES_SCHEMA = {
 _RESOLVE_SCHEMA = {
     "type": "object",
     "properties": {
-        "overall": {"type": "array", "items": {"type": "integer"}},
-        "parts": {"type": "array", "items": {"type": "integer"}},
-        "full": {"type": "array", "items": {"type": "integer"}},
+        "documents": {
+            "type": "object",
+            "properties": {
+                "overview": {"type": "array", "items": {"type": "integer"}},
+                "parts": {"type": "array", "items": {"type": "integer"}},
+                "wording": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["overview", "parts", "wording"],
+        },
+        "tables": {
+            "type": "object",
+            "properties": {
+                "metadata": {"type": "array", "items": {"type": "integer"}},
+                "data": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["metadata", "data"],
+        },
     },
-    "required": ["overall", "parts", "full"],
+    "required": ["documents", "tables"],
 }
 
-_DEPTHS = ("full", "parts", "overall")  # deepest first: an item named twice is taken at the deepest naming
+# deepest first: an item named twice within its own kind is taken at the deepest naming. tables have no `parts` — a
+# table is either known by what it is (metadata) or read for its values (data), never a document-shaped middle rung
+_DOC_DEPTHS = ("wording", "parts", "overview")
+_TABLE_DEPTHS = ("data", "metadata")
 
 
 def _depth_indices(data: dict, key: str, count: int) -> list[int]:
     return [index for index in data.get(key, []) if isinstance(index, int) and 0 <= index < count]
 
 
-def _coverage(data: dict, count: int) -> dict[int, str]:
+def _kind_coverage(node: dict, depths: tuple[str, ...], count: int) -> dict[int, str]:
     coverage: dict[int, str] = {}
-    for depth in _DEPTHS:
-        for index in _depth_indices(data, depth, count):
+    for depth in depths:
+        for index in _depth_indices(node, depth, count):
             coverage.setdefault(index, depth)
     return coverage
 
 
-async def resolve_query(query: str, items: list[str], library: str = "") -> dict[int, str]:
-    # the whole library at one grain — every document by its summary, every table by its identity and columns — read
-    # against the question in ONE call. what comes back is which items the answer must account for and how deeply each
-    # has to be read; everything downstream executes that, and nothing downstream decides membership again
+def _resolve_prompt(query: str, items: list[str], library: str) -> str:
     listing = "\n\n".join(f"[{index}] {item}" for index, item in enumerate(items))
-    prompt = f"{load_prompt('resolve_query')}\nlibrary: {library}\nquestion: {query}\ninventory:\n{listing}"
+    return f"{load_prompt('resolve_query')}\nlibrary: {library}\nquestion: {query}\ninventory:\n{listing}"
+
+
+def resolve_prompt_tokens(query: str, items: list[str], library: str = "") -> int:
+    # exposed so a caller can size a batch of items BEFORE calling emit_resolve — the same accounting that call itself
+    # uses, so a batch built to fit this is guaranteed to fit the real call
+    return count_tokens(_resolve_prompt(query, items, library))
+
+
+async def emit_resolve(query: str, items: list[str], library: str = "") -> str:
+    # one grain — every document by its summary, every table by its identity and columns — read against the question
+    # in ONE call. what comes back is which items the answer must account for and how deeply each has to be read;
+    # everything downstream executes that, and nothing downstream decides membership again. `items` here is whatever
+    # the caller packed into one call — the whole library when it fits, one batch of it otherwise (see query.resolve).
+    # split emit/collect, exactly like validate_tables below: every batch's job is queued before any reply is awaited,
+    # so batches sit on the shared stream together rather than one at a time behind the caller's own await
+    prompt = _resolve_prompt(query, items, library)
     tokens = count_tokens(prompt)
     if tokens > RESOLVE_BUDGET:
         logger.warning("resolve inventory does not fit one call tokens=%d budget=%d", tokens, RESOLVE_BUDGET)
-    started = time.time()
-    data = await call_slm(prompt, _RESOLVE_SCHEMA, interactive=True)
-    coverage = _coverage(data, len(items))
+    return await emit_slm(prompt, _RESOLVE_SCHEMA, interactive=True)
+
+
+async def collect_resolve(job_id: str, count: int) -> tuple[dict[int, str], dict[int, str]]:
+    data = await collect_slm(job_id)
+    doc_coverage = _kind_coverage(data.get("documents", {}), _DOC_DEPTHS, count)
+    table_coverage = _kind_coverage(data.get("tables", {}), _TABLE_DEPTHS, count)
     logger.info(
-        "resolve items=%d prompt_tokens=%d covered=%d %s %.1fs",
-        len(items),
-        tokens,
-        len(coverage),
-        {depth: sum(1 for value in coverage.values() if value == depth) for depth in _DEPTHS},
-        time.time() - started,
+        "resolve items=%d covered=%d %s",
+        count,
+        len(doc_coverage) + len(table_coverage),
+        {depth: sum(1 for value in doc_coverage.values() if value == depth) for depth in _DOC_DEPTHS}
+        | {depth: sum(1 for value in table_coverage.values() if value == depth) for depth in _TABLE_DEPTHS},
     )
-    if not coverage:
+    if not doc_coverage and not table_coverage:
         logger.warning("resolve covered nothing raw=%s", data)
-    return coverage
+    return doc_coverage, table_coverage
 
 
 _VALIDATE_SCHEMA = {
