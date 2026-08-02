@@ -65,13 +65,14 @@
 \author{Masum Billal}
 
 \begin{document}
+
+	% --- Slide 1: Title ---
 	\maketitle
 
-
-	% --- Slide 2: The Problem (mechanism, sharp) ---
+	% --- Slide 2: The Problem ---
 	\begin{frame}
 		\frametitle{Every AI System Re-Pays the Same Hidden Cost}
-		Every AI system couples enterprise data to one model's representation \textemdash{} its weights, or its embedding space. Both approaches skip the same intermediary step, and both pay for it the same way, on every model swap.
+		Every AI system couples enterprise data to one model's representation \textemdash{} its weights or its embedding space. Both approaches skip the same intermediary step, and both pay for it the same way on every model swap.
 
 		\begin{columns}[T]
 			\column{0.49\textwidth}
@@ -91,12 +92,12 @@
 			\begin{center}
 				\begin{tikzpicture}[node/.style={draw=text, rounded corners, font=\scriptsize, minimum width=4.6cm, minimum height=0.4cm}]
 					\node[node, draw=accent, fill=CitadelBlue] (raw2) {Raw Documents};
-					\node[node, below=0.25cm of raw2] (compiled) {Compiled Once into the Knowledge Substrate};
-					\node[node, below=0.25cm of compiled] (reembed) {Re-embedded or Re-tuned From Structured Data};
+					\node[node, below=0.25cm of raw2] (compiled) {Compiled Once into Knowledge Substrate};
+					\node[node, below=0.25cm of compiled] (reembed) {Re-embedded / Queried from Structured Substrate};
 					\draw[-{Latex[length=1.5mm]}, accent] (raw2)--(compiled)--(reembed);
 				\end{tikzpicture}
 			\end{center}
-			\centering{\scriptsize\color{accent} Extraction cost paid once. A model swap touches only the substrate.}
+			\centering{\scriptsize\color{accent} Extraction cost paid once. Model swaps touch only the substrate.}
 		\end{columns}
 		\vfill
 		\centering
@@ -105,7 +106,7 @@
 
 	% --- Slide 3: Why Now ---
 	\begin{frame}
-		\frametitle{Why Now}
+		\frametitle{Why Now: The Bottleneck Shifted from Models to Data Representation}
 		\begin{center}
 			\begin{tikzpicture}[
 				stepbox/.style={draw=muted, rounded corners, minimum width=3.5cm, minimum height=1.1cm, align=center, font=\scriptsize},
@@ -113,7 +114,7 @@
 				]
 				\node[stepbox] (a) {Foundation models\\proved reasoning works};
 				\node[stepbox, right=of a] (b) {Retrieval tried to bridge\\real data \textemdash{} and hit a\\structural ceiling};
-				\node[stepbox, right=of b] (c) {Agents multiplied how\\much data gets touched,\\multiplying the cost\\of a bad read};
+				\node[stepbox, right=of b] (c) {Agents multiplied how\\much data gets touched,\\multiplying error cost};
 				\node[stepbox, right=of c, draw=accent, fill=CitadelBlue, thick] (d) {Enterprise adoption made\\reliability non-negotiable,\\not experimental};
 				\draw[-{Latex[length=1.5mm]}] (a)--(b);
 				\draw[-{Latex[length=1.5mm]}] (b)--(c);
@@ -125,78 +126,74 @@
 		{\color{CitadelHighlight}\bfseries The missing layer was survivable when AI was experimental. It stopped being optional the moment reliability became the product.}
 	\end{frame}
 
-	% --- Slide 4: The Market (foundational dependency, not a feature) ---
+	% --- Slide 4: Market Positioning ---
 	\begin{frame}
-		\frametitle{The Foundational Layer Every AI Company Will Require}
-		Any AI product reasoning over real documents faces the same dependency \textemdash{} and a competitor built on a solved version of it holds a compounding advantage.
+		\frametitle{The Foundational Layer Every AI Infrastructure Requires}
+		AI systems reasoning over real documents face the same dependency issue. An application built on a compiled knowledge substrate holds a compounding execution advantage.
 
 		\begin{columns}[T]
 			\column{0.49\textwidth}
 			\begin{block}{Not a Feature. A Survival Dependency.}
 				\begin{itemize}
-					\item Every downstream layer inherits extraction.
-					\item \textbf{The gap compounds.} A Citadel-based company re-embeds in minutes on any change; one without it re-runs extraction.
+					\item Downstream uses lossy extraction.
+					\item \textbf{The gap compounds:} A Citadel-backed system re-embeds in minutes on any schema or model change; legacy systems re-extract from scratch.
 				\end{itemize}
 			\end{block}
 
 			\column{0.49\textwidth}
-			\begin{block}{Who Already Depends On It}
+			\begin{block}{Who Relies On This}
 				\begin{itemize}
-					\item \textbf{New AI companies}, at the build-vs-buy decision for ingestion.
-					\item Enterprises building internal AI over their own document corpora.
+					\item \textbf{Enterprise AI Teams:} Building mission-critical agents over unstructured document stores.
+					\item \textbf{Vertical AI Vendors:} Needing zero-hallucination data pipelines for legal, finance, and regulatory compliance.
 				\end{itemize}
 			\end{block}
 		\end{columns}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries Payphones lost to mobiles that changed the infrastructure, not better payphones. Models compete on reasoning. Citadel changes what to reason over.}
+		{\color{CitadelHighlight}\bfseries Models compete on reasoning. Citadel changes what they are able to reason over.}
 	\end{frame}
 
-	% --- Slide 5: REAL PROOF SLIDE (ChatGPT) ---
+	% --- Slide 5: Defensive Moat / Missing Abstraction ---
 	\begin{frame}
-		\includegraphics[width=\textwidth, height=\textheight,keepaspectratio]{images/chatgpt_test1_comparison.png}
-	\end{frame}
-	\begin{frame}
-		\includegraphics[width=\textwidth, height=\textheight,keepaspectratio]{images/chatgpt_uber.png}
-	\end{frame}
+		\frametitle{Why Existing Infrastructure Cannot Solve This}
 
-	% --- Slide 6: REAL PROOF SLIDE (Gemini) ---
-	\begin{frame}
-		\includegraphics[width=\textwidth, height=\textheight, keepaspectratio]{images/gemini_test1_2.png}
-	\end{frame}
+		\begin{columns}[T]
+			\column{0.32\textwidth}
+			\begin{block}{Frontier Model Vendors}
+				\textbf{(OpenAI, Google, Anthropic)}
+				\begin{itemize}\scriptsize
+					\item \textbf{Incentive:} Token consumption \& compute scale.
+					\item \textbf{Abstraction:} Text token streams \& context windows.
+					\item \textbf{Blindspot:} Force structured tables into uncompiled token sequences.
+				\end{itemize}
+			\end{block}
 
-	% --- Slide 7: REAL PROOF SLIDE (Citadel) ---
-	\begin{frame}
-		\includegraphics[width=\textwidth, height=\textheight, keepaspectratio]{images/citadel_test1.png}
-	\end{frame}
+			\column{0.32\textwidth}
+			\begin{block}{Cloud Data Platforms}
+				\textbf{(Snowflake, Databricks)}
+				\begin{itemize}\scriptsize
+					\item \textbf{Incentive:} SQL warehouse storage \& query compute.
+					\item \textbf{Abstraction:} Rigid schemas \& Parquet tables.
+					\item \textbf{Blindspot:} Require pre-cleaned relational data; fail on messy multi-document corpora.
+				\end{itemize}
+			\end{block}
 
-	\begin{frame}
-		\includegraphics[width=\textwidth, height=\textheight, keepaspectratio]{images/ciadel_overview.png}
-	\end{frame}
-
-	% --- Slide 8: A Harder Test, Not an Easier One ---
-	\begin{frame}
-		\frametitle{A Harder Test, Not an Easier One}
-
-		\begin{tabular}{lccc}
-			\toprule
-			Comparison & \textbf{ChatGPT} & \textbf{Gemini} & \textbf{Citadel} \\
-			\midrule
-			Files given & 1 excel+1 800 pg & 1+4 pdf & 29 multimodal\\
-			Tables & 3 & 6 & 12 \\
-			Rows (ground truth: 5733) & 60k+ & 5785 & 5733 (verified) \\
-			Corpus accepted & hard platform limits & hard platform limits & unlimited \\
-			Table query & Isolated to 1 excel & Isolated & All files\\
-			\bottomrule
-		\end{tabular}
+			\column{0.32\textwidth}
+			\begin{block}{Citadel Knowledge Layer}
+				\textbf{(The Compilation Standard)}
+				\begin{itemize}\scriptsize
+					\item \textbf{Incentive:} Lossless structural representation.
+					\item \textbf{Abstraction:} Canonical Knowledge Substrate.
+					\item \textbf{Moat:} Sits directly between raw enterprise storage and generative reasoning engines.
+				\end{itemize}
+			\end{block}
+		\end{columns}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries Citadel solved the harder problem of searching the full corpus and matched the verified ground truth.}
+		{\color{CitadelHighlight}\bfseries Citadel owns the missing abstraction between raw storage and generative reasoning.}
 	\end{frame}
 
-
-
-	% --- Slide 9: Systems Attack on Chunking ---
+	% --- Slide 6: The Theoretical Core ---
 	\begin{frame}
 		\frametitle{Retrieval Cannot Recover What Structurally Disappeared}
 		If a representation discards structure, nothing downstream recovers it. Every answer must trace back to exactly where it came from \textemdash{} nothing flattened, nothing untraceable.
@@ -222,102 +219,265 @@
 					\node[node, below=0.15cm of doc2] (rep) {Entire Corpus Retained};
 					\node[node, below=0.15cm of rep] (guess) {Nothing Discarded, Nothing Guessed};
 					\node[node, below=0.15cm of guess] (exec) {Every Structure Kept Queryable};
+					\draw[-{Latex[length=1.5mm]}, accent] (doc2)--(rep)--(guess)--(exec);
 				\end{tikzpicture}
 			\end{center}
 		\end{columns}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries Citadel gracefully handles large libraries rather than discarding evidence, compiling everything before reasoning.}
+		{\color{CitadelHighlight}\bfseries Citadel gracefully handles large document corpora, compiling everything before reasoning.}
 	\end{frame}
 
-	% --- Slide 10: Market Wedge & Sequenced GTM ---
+	% --- Slide 7: REAL PROOF SLIDE (ChatGPT - Failure Mode 1) ---
 	\begin{frame}
-		\frametitle{Enterprise First, Infrastructure Next}
+		\frametitle{Proof of Failure: Unstructured Context Loss (ChatGPT)}
+		\begin{center}
+			\includegraphics[width=0.95\textwidth, height=0.62\textheight, keepaspectratio]{images/chatgpt_test1_comparison.png}
+		\end{center}
+		\vspace{-0.2cm}
+		\begin{block}{\scriptsize Failure Analysis: ChatGPT}
+			{\tiny
+				\textbf{Test:} Tabular aggregation query across uploaded files (1 Excel + 809-page Number Theory book).\\
+				\textbf{Failure:} System hallucinated \textbf{60,000+ non-existent rows} (Ground Truth: 5,733 rows).\\
+				\textbf{Root Cause:} Standard context windowing and ungrounded text inference lose structural continuity across document boundaries.
+			}
+		\end{block}
+	\end{frame}
+
+	% --- Slide 8: REAL PROOF SLIDE (ChatGPT - Document Description Failure) ---
+	\begin{frame}
+		\frametitle{Proof of Failure: Corpus Description Collapse (ChatGPT)}
+		\begin{center}
+			\includegraphics[width=0.95\textwidth, height=0.62\textheight, keepaspectratio]{images/chatgpt_uber.png}
+		\end{center}
+		\vspace{-0.2cm}
+		\begin{block}{\scriptsize Failure Analysis: ChatGPT Overview Query}
+			{\tiny
+				\textbf{Test:} Isolated Excel file uploaded first, followed by an 809-page Number Theory textbook; prompted with \textit{``What are these documents about?''}.\\
+				\textbf{Failure:} System completely failed to respond accurately or describe the uploaded files.\\
+				\textbf{Root Cause:} Ingesting massive uncompiled PDF volumes alongside tabular data overloads context processing, causing parsing collapse.
+			}
+		\end{block}
+	\end{frame}
+
+	% --- Slide 9: REAL PROOF SLIDE (Gemini Failure) ---
+	\begin{frame}
+		\frametitle{Proof of Failure: Cross-File Schema Join Failure (Gemini)}
+		\begin{center}
+			\includegraphics[width=0.95\textwidth, height=0.62\textheight, keepaspectratio]{images/gemini_test1_2.png}
+		\end{center}
+		\vspace{-0.2cm}
+		\begin{block}{\scriptsize Failure Analysis: Gemini}
+			{\tiny
+				\textbf{Test:} Stepwise ingestion (Excel file uploaded isolated first, followed by 4 PDFs).\\
+				\textbf{Failure:} Successfully described files, but returned \textbf{5,785 rows} on the query (Ground Truth: 5,733).\\
+				\textbf{Root Cause:} While capable of file-level summaries, semantic retrieval over uncompiled text fails exact cross-file table joins.
+			}
+		\end{block}
+	\end{frame}
+
+	% --- Slide 10: REAL PROOF SLIDE (Citadel Success) ---
+	\begin{frame}
+		\frametitle{Proof of Execution: Citadel Ground Truth Execution}
+		\begin{center}
+			\includegraphics[width=0.95\textwidth, height=0.62\textheight, keepaspectratio]{images/citadel_test1.png}
+		\end{center}
+		\vspace{-0.2cm}
+		\begin{block}{\scriptsize Citadel Execution Mode}
+			{\tiny
+				\textbf{Test:} 29 multimodal document corpus ingested simultaneously (including the 809-page Number Theory PDF).\\
+				\textbf{Result:} \textbf{5,733 / 5,733 rows verified}. Bounded factual execution.\\
+				\textbf{Mechanism:} Compiled into a canonical substrate $\rightarrow$ executed structural query directly over preserved schema across all 29 files. Zero generative hallucination: factual outputs originate directly from the substrate.
+			}
+		\end{block}
+	\end{frame}
+
+	% --- Slide 11: The Hardware & Representation Advantage ---
+	\begin{frame}
+		\frametitle{Representation Beats Parameter Scale}
+
+		\begin{center}
+			\small
+			\begin{tabular}{lccc}
+				\toprule
+				\textbf{Metric / System} & \textbf{ChatGPT (Frontier)} & \textbf{Gemini (Frontier)} & \textbf{Citadel (Local Node)} \\
+				\midrule
+				\textbf{Compute Context} & Enterprise Cluster & Enterprise Cluster & \textbf{Single 5090 Laptop} \\
+				\textbf{Model Scale} & $\sim$1T+ Parameters & Trillion Scale & \textbf{9B Local Model} \\
+				\textbf{Tables} & 3 (isolated) & 6 (isolated) & \textbf{12 (All files)} \\
+				\textbf{Rows} & \color{accent}60k+ & \color{accent}5,785 & \textbf{5,733/5,733}\\
+				\textbf{Row Status} & Fabricated & Structurally Drifted & Same as ground truth\\
+				\bottomrule
+			\end{tabular}
+		\end{center}
+		\vfill
+		\begin{block}{\scriptsize Infrastructure Takeaway}
+			{\tiny
+				\textbf{Takeaway:} Intelligence scale cannot recover structure destroyed during ingestion. By compiling documents into a deterministic substrate, Citadel enables a local 9B model running on consumer hardware to outperform trillion-parameter frontier systems on complex enterprise data.
+			}
+		\end{block}
+	\end{frame}
+
+	% --- Slide 12: Unlocking Mission-Critical AI Workflows ---
+	\begin{frame}
+		\frametitle{Value Capture: From AI Assistance to Delegated Execution}
+		Enterprises do not pay top dollar for text summaries. They pay to automate high-liability workflows where errors carry massive financial or regulatory consequences.
+
 		\begin{columns}[T]
 			\column{0.49\textwidth}
-			\begin{block}{Phase One: Direct to Enterprise}
+			\begin{block}{Current Bottleneck: Assistance Only}
 				\begin{itemize}
-					\item \textbf{Legal} \textemdash{} multi-contract structural risk analysis.
-					\item \textbf{Financial} \textemdash{} cross-document reconciliation audits.
-					\item \textbf{Real Estate} \textemdash{} title, lease, and property-record intelligence.
-					\item \textbf{Regulatory} compliance and due diligence.
+					\item Models produce probabilistic drafts.
+					\item Humans must manually re-verify every row and source clause.
+					\item \textbf{Result:} High human labor cost remains intact due to liability risk.
 				\end{itemize}
 			\end{block}
 
 			\column{0.49\textwidth}
-			\begin{block}{Phase Two: Infrastructure}
-				Once proven directly with enterprise buyers, the same substrate opens as the ingestion and retrieval layer other AI companies build on \textemdash{} sold as platform, not a point solution.
-			\end{block}
-		\end{columns}
-		\vfill
-		\centering
-		{\color{CitadelHighlight}\bfseries One layer proven with the enterprises, then opened to everyone.}
-	\end{frame}
-
-	% --- Slide 11: Business Model ---
-	\begin{frame}
-		\frametitle{Two Tiers, Priced on Usage}
-		\begin{columns}[T]
-			\column{0.49\textwidth}
-			\begin{block}{Structure}
-				Lossless ingestion into SQL-queryable tables. No retrieval, no Q\&A \textemdash{} the raw substrate itself, billed on volume ingested and retained.
-			\end{block}
-
-			\column{0.49\textwidth}
-			\begin{block}{Search}
-				Everything in Structure, plus retrieval and natural-language Q\&A over it \textemdash{} billed on volume plus queries executed.
-			\end{block}
-		\end{columns}
-		\vspace{0.3cm}
-		\centering
-		\small Annual enterprise contracts in Phase One \textemdash{} metered API access once the substrate opens as infrastructure in Phase Two.
-		\vfill
-		\centering
-		\normalsize
-		{\color{CitadelHighlight}\bfseries Priced on what it does for you, not seats or licenses.}
-	\end{frame}
-
-	% --- Slide 12: The Ask ---
-	\begin{frame}
-		\frametitle{The Ask}
-		Raising \textbf{\$3,000,000} for \textbf{10\%} of the company (\$30M post-money) \textemdash{} priced for a working system, not a concept.
-
-		\begin{columns}[T]
-			\column{0.49\textwidth}
-			\begin{block}{What This Round Is For}
+			\begin{block}{The Citadel Unlock: Delegated Workflows}
 				\begin{itemize}
-					\item Founder, full-time.
-					\item First 1-3 hires beyond the founder.
-					\item Compute and infrastructure to deploy into real cloud infra and onboard real users.
-					\item Legal, compliance, and IP setup for enterprise-grade deployments.
-				\end{itemize}
-			\end{block}
-
-			\column{0.49\textwidth}
-			\begin{block}{What It Buys}
-				\begin{itemize}
-					\item 18\textendash{}24 months of runway.
-					\item The technical barrier is already crossed \textemdash{} this capital converts a working system into paying design partners.
-					\item Target: signed pilots, hardware/dedicated cloud, human and other resources, production engineering
+					\item \textbf{M\&A Due Diligence:} Cross-contract risk auditing with full row provenance.
+					\item \textbf{Financial Audits:} Zero-loss reconciliation across hundreds of filings.
+					\item \textbf{Regulatory Compliance:} Verifiable, zero-hallucination compliance queries.
 				\end{itemize}
 			\end{block}
 		\end{columns}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries We already built it. We are raising to prove the market has demand for it.}
+		{\color{CitadelHighlight}\bfseries Citadel converts AI from a probabilistic assistant into an accountable enterprise worker.}
 	\end{frame}
 
-	% --- Slide 13: Team ---
+	% --- Slide 13: Sequenced GTM Strategy ---
 	\begin{frame}
-		\frametitle{Team}
+		\frametitle{GTM: Land in High-Liability Workflows, Expand to Platform}
+
+		\begin{center}
+			\begin{tikzpicture}[
+				stepbox/.style={draw=muted, rounded corners, minimum width=4.0cm, minimum height=1.2cm, align=center, font=\scriptsize},
+				node distance=0.6cm
+				]
+				\node[stepbox, draw=accent, fill=CitadelBlue] (phase1) {\textbf{Phase 1: High-Value Wedge}\\M\&A, Audit \& Due Diligence\\ \color{muted}Solve high-liability, high-ACV workflows};
+				\node[stepbox, right=of phase1] (phase2) {\textbf{Phase 2: Customer Data Layer}\\Enterprise Knowledge Substrate\\ \color{muted}Become the internal system of record};
+				%\node[stepbox, right=of phase2] (phase3) {\textbf{Phase 3: Platform Monopoly}\\Standard Ingestion Engine\\ \color{muted}Open metered APIs for enterprise AI apps};
+
+				\draw[-{Latex[length=2mm]}, accent, thick] (phase1)--(phase2);
+				%\draw[-{Latex[length=2mm]}, thick] (phase2)--(phase3);
+			\end{tikzpicture}
+		\end{center}
+		\vfill
+		\begin{columns}[T]
+			\column{0.49\textwidth}
+			\textbf{Why Legal/M\&A First?}
+			\begin{itemize}\small
+				\item Highest density of complex tables, nested PDFs, and formulas.
+				\item Errors carry direct financial/regulatory liability.
+				\item High initial willingness to pay (\$250k+ ACVs).
+			\end{itemize}
+
+			\column{0.49\textwidth}
+			\textbf{The Platform Flywheel}
+			\begin{itemize}\small
+				\item Substrate deployment creates lock-in across enterprise document stores.
+				\item Every new internal enterprise AI application reuses the existing Citadel substrate.
+			\end{itemize}
+		\end{columns}
+	\end{frame}
+
+	% --- Slide 14: Enterprise Unit Economics ---
+	\begin{frame}
+		\frametitle{Business Model: Enterprise Pricing \& Unit Economics}
+
+		\begin{columns}[T]
+			\column{0.49\textwidth}
+			\begin{block}{Phase 1: Enterprise Licensing (Direct Value)}
+				\begin{itemize}
+					\item \textbf{Base Platform Fee:} \$150,000 / year (Includes core ingestion engine \& 1M pages compiled).
+					\item \textbf{Volume Expansion:} \$0.05 – \$0.15 per additional compiled page retained.
+					\item \textbf{Target ACV:} \textbf{\$250,000 – \$500,000} per enterprise node.
+				\end{itemize}
+			\end{block}
+
+			\column{0.49\textwidth}
+			\begin{block}{Phase 2: Platform Metering (API Scale)}
+				\begin{itemize}
+					\item \textbf{Substrate Ingestion:} Billed on raw volume ingested and retained.
+					\item \textbf{Query Execution:} Billed per deterministic query/retrieval call executed by downstream LLM agents.
+				\end{itemize}
+			\end{block}
+		\end{columns}
+		\vspace{0.2cm}
+		\centering
+		\begin{block}{\scriptsize Path to \$50M ARR}
+			{\centering\small \textbf{100 Enterprise Customers} $\times$ \textbf{\$500k Average ACV} = \textbf{\$50M ARR} \par}
+		\end{block}
+	\end{frame}
+
+	% --- Slide 15: The Ask ---
+	\begin{frame}
+		\frametitle{The Ask: Capitalizing Enterprise Deployment}
+		Raising \textbf{\$3,000,000} for \textbf{10\%} equity (\$30M post-money valuation) \textemdash{} priced for a working system, not a concept.
+
+		\begin{columns}[T]
+			\column{0.49\textwidth}
+			\begin{block}{What This Capital Funds}
+				\begin{itemize}
+					\item Full-time founder engineering focus.
+					\item First hires: 2x Senior Systems Engineers, 1x Enterprise GTM Architect.
+					\item High-availability cloud infrastructure for enterprise pilots.
+					\item Security, SOC2 compliance, and IP protection for enterprise deployments.
+				\end{itemize}
+			\end{block}
+
+			\column{0.49\textwidth}
+			\begin{block}{Milestones (18\textendash{}24 Months)}
+				\begin{itemize}
+					\item Technical risk fully retired \textemdash{} working core converts into enterprise deployments.
+					\item Secure 5–10 paying enterprise design partners in legal/financial audits.
+					\item Target: \$1M–\$2M ARR baseline entering Series A.
+				\end{itemize}
+			\end{block}
+		\end{columns}
 		\vfill
 		\centering
-		{\Large\bfseries\color{accent} Masum Billal} \\[0.1cm]
-		{\small\color{text} Founder}
+		{\color{CitadelHighlight}\bfseries We already built the core architecture. We are raising to scale enterprise execution.}
+	\end{frame}
 
-		\vskip 0.5cm
-		{\small\color{muted} Solo-built: ingestion pipeline, query engine, and everything else this deck shows. \\ Every result in this deck is measured against a working system, not a mockup.}
+	% --- Slide 16: Founder & Execution Roadmap ---
+	\begin{frame}
+		\frametitle{Team \& Scaling}
+
+		\begin{block}{\scriptsize Founder-Market Fit: First-Principles Systems Engineering}
+			{\tiny
+				\textbf{Masum Billal} \textemdash{} Founder \& Primary Architect
+				\begin{itemize}
+					\item \textbf{Identified Upstream Failure:} Recognized that standard RAG architectures suffer from structural information loss prior to model inference.
+					\item \textbf{End-to-End Execution:} Architected the entire Citadel stack: multi-file schema parser, canonical knowledge substrate, and deterministic SQL engine.
+					\item \textbf{Proven Leverage:} Built a working substrate that out-executes trillion-parameter cloud architectures on a single local GPU.
+				\end{itemize}
+			}
+		\end{block}
+
+		\vspace{0.1cm}
+
+		\begin{columns}[T]
+			\column{0.49\textwidth}
+			\begin{block}{\scriptsize Phase 0: Systems Architecture (Completed)}
+				{\tiny
+					Solo-built ingestion engine, multi-file table parser, canonical substrate, and deterministic query pipeline. Every benchmark in this deck runs on working code.
+				}
+			\end{block}
+
+			\column{0.49\textwidth}
+			\begin{block}{\scriptsize Phase 1: Enterprise Scaling (This Round)}
+				{\tiny
+					Transitioning to enterprise deployments: expanding cloud reliability, onboarding initial design partners, and industrializing customer data integrations.
+				}
+			\end{block}
+		\end{columns}
+
 		\vfill
+		\centering
+		{\tiny\color{CitadelHighlight}\bfseries Built the missing abstraction layer from first principles.}
 	\end{frame}
 
 \end{document}
