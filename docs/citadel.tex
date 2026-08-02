@@ -154,90 +154,44 @@
 
 	% --- Slide 5: REAL PROOF SLIDE (ChatGPT) ---
 	\begin{frame}
-		\frametitle{Not a Claim. A Measured Result.}
-		One messy spreadsheet, four unrelated datasets on one sheet. Asked: how many tables, how many rows.
-
-		\begin{columns}[T]
-			\column{0.46\textwidth}
-			\includegraphics[width=\textwidth, height=0.55\textheight, keepaspectratio]{images/chatgpt_test1_comparison.png}
-
-			\column{0.5\textwidth}
-			\begin{block}{ChatGPT, given the raw file}
-				\centering
-				{\bfseries\color{muted} 3 tables detected} \\
-				{\scriptsize\color{muted} Missed two entire datasets it never reported at all.} \\[0.2cm]
-				{\bfseries\color{muted} ``62,166 rows'' claimed for one table} \\
-				{\scriptsize\color{muted} The whole workbook has 5{,}785 rows.}
-			\end{block}
-		\end{columns}
-		\vfill
-		\centering
-		{\color{CitadelHighlight}\bfseries Not close. A model reasoning over raw bytes cannot see structure that was never extracted.}
+		\includegraphics[width=\textwidth, height=\textheight,keepaspectratio]{images/chatgpt_test1_comparison.png}
+	\end{frame}
+	\begin{frame}
+		\includegraphics[width=\textwidth, height=\textheight,keepaspectratio]{images/chatgpt_uber.png}
 	\end{frame}
 
 	% --- Slide 6: REAL PROOF SLIDE (Gemini) ---
 	\begin{frame}
-		\frametitle{Not a Model Problem. A Missing Capability.}
-		Same file, given to a model that wrote and ran its own verification code \textemdash{} real execution, not guessing.
-
-		\begin{columns}[T]
-			\column{0.46\textwidth}
-			\includegraphics[width=\textwidth, height=0.55\textheight, keepaspectratio]{images/gemini_test1_2.png}
-
-			\column{0.5\textwidth}
-			\begin{block}{Gemini, after running its own code}
-				\centering
-				{\bfseries\color{muted} Got the raw sheet size exactly right} \\
-				{\scriptsize\color{muted} 5{,}785 rows, 2 worksheets \textemdash{} verified by code, not hallucinated.} \\[0.2cm]
-				{\bfseries\color{muted} Then called rows 25--5785 ``one dataset''} \\
-				{\scriptsize\color{muted} A sheet reads as one flat table from its first header \textemdash{} no concept of a second table starting underneath.}
-			\end{block}
-		\end{columns}
-		\vfill
-		\centering
-		{\color{CitadelHighlight}\bfseries It verified its own numbers. It still cannot see a table boundary.}
+		\includegraphics[width=\textwidth, height=\textheight, keepaspectratio]{images/gemini_test1_2.png}
 	\end{frame}
 
 	% --- Slide 7: REAL PROOF SLIDE (Citadel) ---
 	\begin{frame}
-		\frametitle{What Citadel Actually Returns}
-		Same file, same question \textemdash{} answered from stored structure, not raw bytes.
+		\includegraphics[width=\textwidth, height=\textheight, keepaspectratio]{images/citadel_test1.png}
+	\end{frame}
 
-		\begin{columns}[T]
-			\column{0.46\textwidth}
-			\includegraphics[width=\textwidth, height=0.55\textheight, keepaspectratio]{images/citadel_test1.png}
-
-			\column{0.5\textwidth}
-			\begin{block}{Citadel, given the same file}
-				\centering
-				{\bfseries\color{accent} 12 tables detected, correctly typed} \\
-				{\scriptsize\color{accent} Every stacked region found and split \textemdash{} nothing merged, nothing missed.} \\[0.2cm]
-				{\bfseries\color{accent} 5{,}733 rows, verified against source} \\
-				{\scriptsize\color{accent} Every count checked cell-for-cell against the original file.}
-			\end{block}
-		\end{columns}
-		\vfill
-		\centering
-		{\color{CitadelHighlight}\bfseries Not a better guess. The structure was already there.}
+	\begin{frame}
+		\includegraphics[width=\textwidth, height=\textheight, keepaspectratio]{images/ciadel_overview.png}
 	\end{frame}
 
 	% --- Slide 8: A Harder Test, Not an Easier One ---
 	\begin{frame}
 		\frametitle{A Harder Test, Not an Easier One}
-		ChatGPT and Gemini were handed this one spreadsheet, alone, with nothing else to search. Citadel answered the same question from a library of roughly 30 files \textemdash{} and neither tool can even accept that scale in the first place.
 
-		\begin{center}
-			\renewcommand{\arraystretch}{1.5}
-			\begin{tabular}{lccc}
-				& \textbf{ChatGPT} & \textbf{Gemini} & \textbf{Citadel} \\
-				\hline
-				Files given & 1, in isolation & 1, in isolation & \textasciitilde{}30, had to find it \\
-				Files/size supported & hard platform limits & hard platform limits & unlimited \\
-			\end{tabular}
-		\end{center}
+		\begin{tabular}{lccc}
+			\toprule
+			Comparison & \textbf{ChatGPT} & \textbf{Gemini} & \textbf{Citadel} \\
+			\midrule
+			Files given & 1 excel+1 800 pg & 1+4 pdf & 29 multimodal\\
+			Tables & 3 & 6 & 12 \\
+			Rows (ground truth: 5733) & 60k+ & 5785 & 5733 (verified) \\
+			Searchable Corpus& hard platform limits & hard platform limits & unlimited \\
+			Table query & Isolated to 1 excel & Isolated & All files\\
+			\bottomrule
+		\end{tabular}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries Citadel had the harder job \textemdash{} find it, then read it, at a scale the others cannot even accept \textemdash{} and still got every number right.}
+		{\color{CitadelHighlight}\bfseries Citadel solved the much harder problem at unprecedented scale including a single pdf of 800+ pages: searching the full corpus and still matched the verified ground truth.}
 	\end{frame}
 
 
@@ -342,8 +296,7 @@
 				\begin{itemize}
 					\item 18\textendash{}24 months of runway.
 					\item The technical barrier is already crossed \textemdash{} this capital converts a working system into paying design partners.
-					\item Target: signed pilots and repeatable proof this isn't just an impressive demo.
-					\item Hardware, cloud, human and all other resources
+					\item Target: signed pilots, hardware/dedicated cloud, human and other resources, production engineering
 				\end{itemize}
 			\end{block}
 		\end{columns}
