@@ -211,7 +211,7 @@
 	% --- Slide 6: REAL PROOF SLIDE (ChatGPT) ---
 	\begin{frame}
 		\frametitle{Not a Claim. A Measured Result.}
-		Same messy spreadsheet, one file mixing four unrelated datasets on one sheet. Asked the same question: how many tables, how many rows.
+		Same messy spreadsheet, one file mixing four unrelated datasets on one sheet. Asked: how many tables, how many rows.
 
 		\begin{columns}[T]
 			\column{0.46\textwidth}
@@ -222,14 +222,9 @@
 			\begin{block}{ChatGPT}
 				\centering
 				{\bfseries\color{muted} 3 tables detected} \\
-				{\scriptsize\color{muted} Missed two entire datasets (a 824-row orders table, a 359-row index table) it never reported at all.} \\
+				{\scriptsize\color{muted} Missed two entire datasets it never reported at all.} \\[0.2cm]
 				{\bfseries\color{muted} ``62,166 rows'' claimed for one table} \\
 				{\scriptsize\color{muted} The entire workbook, every sheet combined, has 5{,}785 rows.}
-			\end{block}
-			\begin{block}{Citadel}
-				\centering
-				{\bfseries\color{accent} 11 tables detected, correctly typed} \\
-				{\bfseries\color{accent} 5{,}733 rows, verified against source}
 			\end{block}
 		\end{columns}
 		\vfill
@@ -251,14 +246,9 @@
 			\begin{block}{Gemini}
 				\centering
 				{\bfseries\color{muted} Got the raw sheet size exactly right} \\
-				{\scriptsize\color{muted} 5{,}785 rows, 2 worksheets \textemdash{} verified by real code, not hallucinated.} \\
+				{\scriptsize\color{muted} 5{,}785 rows, 2 worksheets \textemdash{} verified by real code, not hallucinated.} \\[0.2cm]
 				{\bfseries\color{muted} Then called rows 25--5785 ``one dataset''} \\
 				{\scriptsize\color{muted} \texttt{pandas.read\_excel} reads a sheet as one flat table from the first header it finds \textemdash{} it has no concept of a second table starting underneath.}
-			\end{block}
-			\begin{block}{Citadel}
-				\centering
-				{\bfseries\color{accent} That span is 6 separate tables} \\
-				{\scriptsize\color{accent} World Development Indicators data, indicator metadata, country metadata, an unrelated sales/orders dataset, and a Fragile States Index dataset \textemdash{} correctly split, not merged.}
 			\end{block}
 		\end{columns}
 		\vfill
@@ -266,48 +256,76 @@
 		{\color{CitadelHighlight}\bfseries The model reasoned carefully and even verified its own numbers. The tool it reached for still cannot see a table boundary.}
 	\end{frame}
 
-	% --- Slide 8: Fragmentation / Market Collapse ---
+	% --- Slide 8: REAL PROOF SLIDE (Citadel) ---
+	\begin{frame}
+		\frametitle{What Citadel Actually Returns}
+		Same file, same question \textemdash{} answered from structure that was extracted once and stored, not reasoned about from raw bytes.
+
+		\begin{columns}[T]
+			\column{0.46\textwidth}
+			\includegraphics[width=\textwidth]{images/citadel_test1.png}
+			\centering{\scriptsize\color{muted} Citadel, given the same file}
+
+			\column{0.5\textwidth}
+			\begin{block}{Citadel}
+				\centering
+				{\bfseries\color{accent} 12 tables detected, correctly typed} \\
+				{\scriptsize\color{accent} Every stacked region on the sheet found and split \textemdash{} nothing merged, nothing missed.} \\[0.2cm]
+				{\bfseries\color{accent} 5{,}733 rows, verified against source} \\
+				{\scriptsize\color{accent} Every count checked cell-for-cell against the original file.}
+			\end{block}
+		\end{columns}
+		\vfill
+		\centering
+		{\color{CitadelHighlight}\bfseries Not a better guess. The structure was already there \textemdash{} Citadel just never threw it away.}
+	\end{frame}
+
+	% --- Slide 9: Side-by-side recap ---
+	\begin{frame}
+		\frametitle{Same File. Same Question. Three Answers.}
+		\begin{center}
+			\renewcommand{\arraystretch}{1.4}
+			\begin{tabular}{lccc}
+				& \textbf{ChatGPT} & \textbf{Gemini} & \textbf{Citadel} \\
+				\hline
+				Tables found & 3 & merged into one span & 12 \\
+				Row count & ``62{,}166'' (one table) & 5{,}785 (raw sheet, correct) & 5{,}733 (verified per table) \\
+				Table boundaries & not detected & not detected & correctly split \\
+			\end{tabular}
+		\end{center}
+		\vfill
+		\centering
+		{\color{CitadelHighlight}\bfseries Reasoning over bytes finds a sheet. Structure was already there \textemdash{} Citadel is the only one that kept it.}
+	\end{frame}
+
+
+	% --- Slide 10: Fragmentation / Market Collapse ---
 	\begin{frame}
 		\frametitle{Collapsing the Redundant Ingestion CapEx}
 		\begin{center}
 			\begin{tikzpicture}[
-				node distance=0.08cm and 1.1cm,
+				node distance=0.1cm and 1.6cm,
 				app/.style={draw=muted, rounded corners, minimum width=2.4cm, minimum height=0.5cm, font=\scriptsize\bfseries, align=center},
 				layer/.style={draw=muted!50, rounded corners, minimum width=2.5cm, minimum height=0.35cm, font=\tiny, align=center, fill=CitadelBlue!40}
 				]
 
-				% --- Stack 1: Legal ---
+				% --- One representative stack: the same 3 layers repeat, unchanged, for every vertical ---
 				\node[app] (legal) {Legal AI};
 				\node[layer, right=of legal] (l1) {Knowledge Ingestion};
 				\node[layer, below=of l1] (l2) {Knowledge Representation};
 				\node[layer, below=of l2] (l3) {Application Logic};
-
-				% --- Stack 2: Finance ---
-				\node[app, below=0.9cm of legal] (finance) {Financial AI};
-				\node[layer, right=of finance] (f1) {Knowledge Ingestion};
-				\node[layer, below=of f1] (f2) {Knowledge Representation};
-				\node[layer, below=of f2] (f3) {Application Logic};
-
-				% --- Stack 3: Compliance ---
-				\node[app, below=0.9cm of finance] (compliance) {Compliance AI};
-				\node[layer, right=of compliance] (c1) {Knowledge Ingestion};
-				\node[layer, below=of c1] (c2) {Knowledge Representation};
-				\node[layer, below=of c2] (c3) {Application Logic};
-
-				% --- Orderly Entry Arrows ---
 				\draw[-{Latex[length=1.5mm]}] (legal) -- (l1);
-				\draw[-{Latex[length=1.5mm]}] (finance) -- (f1);
-				\draw[-{Latex[length=1.5mm]}] (compliance) -- (c1);
 
-				% --- Centered Collapse Target ---
-				\node[draw=accent, fill=CitadelBlue, rounded corners, minimum width=3.2cm, minimum height=1.6cm, align=center, right=4.8cm of f1] (citadel) {
-					\bfseries\color{accent} Citadel \\
-					\vspace{0.1cm}
-					\scriptsize Shared, Invariant \\ Knowledge Substrate
+				\node[font=\tiny\itshape\color{muted}, below=0.2cm of l3, align=center] (repeat) {\ldots and again, unchanged, for Financial AI, Compliance AI, every other vertical\ldots};
+
+				% --- Collapse Target ---
+				\node[draw=accent, fill=CitadelBlue, rounded corners, minimum width=3.4cm, minimum height=1.3cm, align=center, right=2.6cm of l1] (citadel) {
+					\bfseries\color{accent}\large Citadel \\[0.12cm]
+					\scriptsize Shared, Invariant Knowledge Substrate
 				};
 
-				% --- Massive Collapse Arrow ---
-				\draw[-{Latex[length=2.5mm]}, accent, ultra thick] ($(f1.east) + (0.4, -0.2)$) -- ($(citadel.west) - (0.1, 0)$)
+				% --- Collapse Arrow ---
+				\draw[-{Latex[length=2.5mm]}, accent, ultra thick] ($(l1.east) + (0.3, 0)$) -- ($(citadel.west) - (0.1, 0)$)
 				node[midway, above=0.1cm, font=\tiny\bfseries, color=accent] {COLLAPSE};
 
 			\end{tikzpicture}
@@ -319,7 +337,7 @@
 		\end{columns}
 	\end{frame}
 
-	% --- Slide 9: Systems Attack on Chunking ---
+	% --- Slide 11: Systems Attack on Chunking ---
 	\begin{frame}
 		\frametitle{Retrieval Cannot Recover What Structurally Disappeared}
 		If a representation discards structure, nothing downstream recovers it. Every answer must trace back to exactly where it came from \textemdash{} nothing flattened, nothing untraceable.
@@ -351,7 +369,7 @@
 		\vfill
 	\end{frame}
 
-	% --- Slide 10: Planning vs Execution ---
+	% --- Slide 12: Planning vs Execution ---
 	\begin{frame}
 		\frametitle{A Clear Separation of Concerns: Planning vs. Execution}
 		Large Language Models excel at resolving ambiguity and planning tasks, but collapse when handling precise state maintenance.
@@ -378,7 +396,7 @@
 		{\color{CitadelHighlight}\bfseries Reasoning remains probabilistic. Knowledge execution remains deterministic.}
 	\end{frame}
 
-	% --- Slide 11: Platform Thesis & Developer Bridge ---
+	% --- Slide 13: Platform Thesis & Developer Bridge ---
 	\begin{frame}
 		\frametitle{Collapsing Developer Friction and Pipeline Overhead}
 		By offering a single platform interface, Citadel shifts developer attention from brittle ingestion tasks to pristine software creation.
@@ -406,7 +424,7 @@
 		{\color{CitadelHighlight}\bfseries Vertical AI products are built on Citadel. It is the ground they stand on, not one of them.}
 	\end{frame}
 
-	% --- Slide 12: Market Wedge & Sequenced GTM ---
+	% --- Slide 14: Market Wedge & Sequenced GTM ---
 	\begin{frame}
 		\frametitle{Enterprise First, Infrastructure Next}
 		\begin{columns}[T]
@@ -436,7 +454,7 @@
 		{\color{CitadelHighlight}\bfseries One layer proven with the enterprises then opened to everyone.}
 	\end{frame}
 
-	% --- Slide 13: Defensive Landscape Matrix ---
+	% --- Slide 15: Defensive Landscape Matrix ---
 	\begin{frame}
 		\frametitle{Why Existing Architectures Cannot Scale to Citadel}
 		\begin{center}
@@ -456,7 +474,7 @@
 		\vfill
 	\end{frame}
 
-	% --- Slide 14: The Ask ---
+	% --- Slide 16: The Ask ---
 	\begin{frame}
 		\frametitle{The Ask}
 		Raising \textbf{\$1,000,000} on a SAFE, \$19M pre-money (\$20M post-money cap) \textemdash{} priced for a working system, not a concept.
@@ -486,7 +504,7 @@
 		{\color{CitadelHighlight}\bfseries We are not raising to find out if this can be built. We already built it. We are raising to prove the market will pay for it.}
 	\end{frame}
 
-	% --- Slide 15: Team ---
+	% --- Slide 17: Team ---
 	\begin{frame}
 		\frametitle{Team}
 		\vfill
