@@ -134,8 +134,8 @@
 			\column{0.49\textwidth}
 			\begin{block}{Not a Feature. A Survival Dependency.}
 				\begin{itemize}
-					\item An extraction error is not local \textemdash{} every downstream layer inherits it.
-					\item \textbf{The gap compounds, it does not reset.} Each model release, a Citadel-based competitor re-embeds in minutes; one without it re-runs extraction from scratch.
+					\item Every downstream layer inherits extraction.
+					\item \textbf{The gap compounds.} A Citadel-based company re-embeds in minutes on any change; one without it re-runs extraction.
 				\end{itemize}
 			\end{block}
 
@@ -149,7 +149,7 @@
 		\end{columns}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries Payphones did not lose to a better payphone. They lost when the infrastructure underneath calling changed.}
+		{\color{CitadelHighlight}\bfseries Payphones lost to mobiles that changed the infrastructure, not better payphones. Models compete on reasoning. Citadel changes what to reason over.}
 	\end{frame}
 
 	% --- Slide 5: REAL PROOF SLIDE (ChatGPT) ---
@@ -185,13 +185,13 @@
 			Files given & 1 excel+1 800 pg & 1+4 pdf & 29 multimodal\\
 			Tables & 3 & 6 & 12 \\
 			Rows (ground truth: 5733) & 60k+ & 5785 & 5733 (verified) \\
-			Searchable Corpus& hard platform limits & hard platform limits & unlimited \\
+			Corpus accepted & hard platform limits & hard platform limits & unlimited \\
 			Table query & Isolated to 1 excel & Isolated & All files\\
 			\bottomrule
 		\end{tabular}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries Citadel solved the much harder problem at unprecedented scale including a single pdf of 800+ pages: searching the full corpus and still matched the verified ground truth.}
+		{\color{CitadelHighlight}\bfseries Citadel solved the harder problem of searching the full corpus and matched the verified ground truth.}
 	\end{frame}
 
 
@@ -219,13 +219,15 @@
 			\begin{center}
 				\begin{tikzpicture}[node/.style={draw=text, rounded corners, font=\scriptsize, minimum width=4.5cm, minimum height=0.4cm}]
 					\node[node, draw=accent, fill=CitadelBlue] (doc2) {Original High-Context Knowledge};
-					\node[node, below=0.25cm of doc2] (rep) {Nothing Discarded, Nothing Guessed};
-					\node[node, below=0.25cm of rep] (exec) {Every Structure Kept Queryable};
-					\draw[-{Latex[length=1.5mm]}, accent] (doc2)--(rep)--(exec);
+					\node[node, below=0.15cm of doc2] (rep) {Entire Corpus Retained};
+					\node[node, below=0.15cm of rep] (guess) {Nothing Discarded, Nothing Guessed};
+					\node[node, below=0.15cm of guess] (exec) {Every Structure Kept Queryable};
 				\end{tikzpicture}
 			\end{center}
 		\end{columns}
 		\vfill
+		\centering
+		{\color{CitadelHighlight}\bfseries Citadel gracefully handles large libraries rather than discarding evidence, compiling everything before reasoning.}
 	\end{frame}
 
 	% --- Slide 10: Market Wedge & Sequenced GTM ---
