@@ -61,35 +61,49 @@
 % Metadata
 % ====================================================
 \title{Citadel}
+\subtitle{The Knowledge Compilation Layer for Enterprise AI}
 \author{Masum Billal}
 
 \begin{document}
 	\maketitle
 
-	% --- Slide 1: Unified Title Frame ---
-	\begin{frame}[plain]
-		\vfill
-		{\Large\bfseries\color{accent} Citadel} \\[0.15cm]
-		{\large\bfseries\color{text} The Knowledge Compilation Layer for Enterprise AI} \\[0.1cm]
-		{\small\color{muted} Every AI system re-pays the same hidden extraction cost, on every model swap \textemdash{} Citadel pays it once.}
 
-		\vskip 0.4cm
-		\hrule height 0.5pt depth 0pt width \textwidth \color{panel}
-		\vskip 0.3cm
+	% --- Slide 2: The Problem (mechanism, sharp) ---
+	\begin{frame}
+		\frametitle{Every AI System Re-Pays the Same Hidden Cost}
+		Every AI system couples enterprise data to one model's representation \textemdash{} its weights, or its embedding space. Both approaches skip the same intermediary step, and both pay for it the same way, on every model swap.
 
 		\begin{columns}[T]
 			\column{0.49\textwidth}
-			\textbf{\color{accent}\small The Architectural Void} \\
-			{\color{text!85!white}\scriptsize Enterprise knowledge remains trapped inside human-centric visual formats (PDFs, spreadsheets, reports). Existing systems optimize for storing and retrieving artifacts, not executing over knowledge.}
+			\textbf{Without a Knowledge Layer}
+			\begin{center}
+				\begin{tikzpicture}[node/.style={draw=muted, rounded corners, font=\scriptsize, minimum width=4.6cm, minimum height=0.4cm}]
+					\node[node] (raw) {Raw Documents};
+					\node[node, below=0.15cm of raw] (reparse) {\color{accent}Re-run OCR, Layout, Extraction};
+					\node[node, below=0.15cm of reparse] (bake) {Baked into New Weights or Embeddings};
+					\draw[-{Latex[length=1.5mm]}] (raw)--(reparse)--(bake);
+				\end{tikzpicture}
+			\end{center}
+			\centering{\scriptsize\color{muted} Full reingestion cost, paid again on every model swap.}
 
 			\column{0.49\textwidth}
-			\textbf{\color{accent}\small The Universal Primitive} \\
-			{\color{accent}\scriptsize Citadel introduces the missing system layer: compiling unstructured syntax into a persistent, high-fidelity computational substrate so that AI applications can seamlessly execute native data workflows.}
+			\textbf{With Citadel}
+			\begin{center}
+				\begin{tikzpicture}[node/.style={draw=text, rounded corners, font=\scriptsize, minimum width=4.6cm, minimum height=0.4cm}]
+					\node[node, draw=accent, fill=CitadelBlue] (raw2) {Raw Documents};
+					\node[node, below=0.25cm of raw2] (compiled) {Compiled Once into the Knowledge Substrate};
+					\node[node, below=0.25cm of compiled] (reembed) {Re-embedded or Re-tuned From Structured Data};
+					\draw[-{Latex[length=1.5mm]}, accent] (raw2)--(compiled)--(reembed);
+				\end{tikzpicture}
+			\end{center}
+			\centering{\scriptsize\color{accent} Extraction cost paid once. A model swap touches only the substrate.}
 		\end{columns}
 		\vfill
+		\centering
+		{\small\color{muted} Models iterate weekly. Applications pivot monthly.} \quad {\bfseries\color{CitadelHighlight} Infrastructure persists for decades.}
 	\end{frame}
 
-	% --- Slide 2: Why Now ---
+	% --- Slide 3: Why Now ---
 	\begin{frame}
 		\frametitle{Why Now}
 		\begin{center}
@@ -111,65 +125,31 @@
 		{\color{CitadelHighlight}\bfseries The missing layer was survivable when AI was experimental. It stopped being optional the moment reliability became the product.}
 	\end{frame}
 
-	% --- Slide 3: The Missing Architecture Layer ---
-	\begin{frame}
-		\frametitle{The Missing Systems Tier for Enterprise Intelligence}
-		Citadel serves as the stable computational foundation layer, transforming raw inputs into invariant state.
-		\begin{center}
-			\begin{tikzpicture}[
-				box/.style={
-					draw=text,
-					rounded corners,
-					minimum width=6.2cm,
-					minimum height=0.6cm,
-					align=center,
-					font=\small
-				}
-				]
-				\node[box] (apps) {Downstream Enterprise AI Workflows \& Custom Interfaces};
-				\node[box, below=0.25cm of apps] (llm) {Reasoning Layer (LLMs) \\ \scriptsize Probabilistic reasoning engine $\cdot$ Not an authoritative database};
-				\node[box, below=0.25cm of llm, draw=accent, fill=CitadelBlue, thick] (missing) {\bfseries\color{accent} Knowledge Substrate Layer (Citadel)};
-				\node[box, below=0.25cm of missing] (storage) {Enterprise Reality \\ \scriptsize Multi-format documentation, structural data, multi-modal files};
-
-				\draw[-{Latex[length=2mm]}] (storage)--(missing);
-				\draw[-{Latex[length=2mm]}, accent, thick] (missing)--(llm);
-				\draw[-{Latex[length=2mm]}] (llm)--(apps);
-			\end{tikzpicture}
-		\end{center}
-		\vfill
-		\begin{columns}[T]
-			\column{0.33\textwidth} \centering {\color{muted}\small Raw data contains fragments.}
-			\column{0.33\textwidth} \centering {\color{accent}\bfseries Citadel acts as the deterministic state engine.}
-			\column{0.33\textwidth} \centering {\color{muted}\small Models execute reasoning over it.}
-		\end{columns}
-	\end{frame}
-
 	% --- Slide 4: The Market (foundational dependency, not a feature) ---
 	\begin{frame}
 		\frametitle{The Foundational Layer Every AI Company Will Require}
-		Any AI product whose value depends on reading, structuring, or reasoning over real documents faces the same dependency \textemdash{} and a competitor built on a solved version of it carries a structural, compounding advantage.
+		Any AI product reasoning over real documents faces the same dependency \textemdash{} and a competitor built on a solved version of it holds a compounding advantage.
 
 		\begin{columns}[T]
 			\column{0.49\textwidth}
 			\begin{block}{Not a Feature. A Survival Dependency.}
 				\begin{itemize}
-					\item An extraction error is not local \textemdash{} every downstream layer built on top of a wrong read inherits it.
-					\item As the AI market matures past novelty into reliability, the ingestion layer stops being invisible and becomes the differentiator.
-					\item \textbf{The gap compounds, it does not reset.} On every model release, a Citadel-based competitor re-embeds structured data in minutes; a competitor without it re-runs full extraction from raw source \textemdash{} the same race, run again, every cycle, widening the distance each time.
+					\item An extraction error is not local \textemdash{} every downstream layer inherits it.
+					\item \textbf{The gap compounds, it does not reset.} Each model release, a Citadel-based competitor re-embeds in minutes; one without it re-runs extraction from scratch.
 				\end{itemize}
 			\end{block}
 
 			\column{0.49\textwidth}
 			\begin{block}{Who Already Depends On It}
 				\begin{itemize}
-					\item \textbf{New AI companies}, at the build-vs-buy decision for ingestion \textemdash{} the same default shift that made hand-rolled payments infrastructure disappear once Stripe existed.
-					\item Enterprises building internal AI and agents over their own document corpora \textemdash{} direct buyers, not only vendors.
+					\item \textbf{New AI companies}, at the build-vs-buy decision for ingestion.
+					\item Enterprises building internal AI over their own document corpora.
 				\end{itemize}
 			\end{block}
 		\end{columns}
 		\vfill
 		\centering
-		{\color{CitadelHighlight}\bfseries Payphones did not lose to a better payphone. They lost when the infrastructure underneath calling changed. Citadel is that shift, for enterprise data.}
+		{\color{CitadelHighlight}\bfseries Payphones did not lose to a better payphone. They lost when the infrastructure underneath calling changed.}
 	\end{frame}
 
 	% --- Slide 5: REAL PROOF SLIDE (ChatGPT) ---
