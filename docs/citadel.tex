@@ -351,38 +351,40 @@
 
 	% --- Slide 13: Sequenced GTM Strategy ---
 	\begin{frame}
-		\frametitle{GTM: Land in High-Liability Workflows, Expand to Platform}
+		\frametitle{GTM: Land in High-Liability Workflows, Expand as Infrastructure}
 
 		\begin{center}
 			\begin{tikzpicture}[
-				stepbox/.style={draw=muted, rounded corners, minimum width=4.0cm, minimum height=1.2cm, align=center, font=\scriptsize},
-				node distance=0.6cm
+				stepbox/.style={draw=muted, rounded corners, minimum width=4.5cm, minimum height=1.1cm, align=center, font=\scriptsize},
+				node distance=0.8cm
 				]
 				\node[stepbox, draw=accent, fill=CitadelBlue] (phase1) {\textbf{Phase 1: High-Value Wedge}\\M\&A, Audit \& Due Diligence\\ \color{muted}Solve high-liability, high-ACV workflows};
-				\node[stepbox, right=of phase1] (phase2) {\textbf{Phase 2: Customer Data Layer}\\Enterprise Knowledge Substrate\\ \color{muted}Become the internal system of record};
-				%\node[stepbox, right=of phase2] (phase3) {\textbf{Phase 3: Platform Monopoly}\\Standard Ingestion Engine\\ \color{muted}Open metered APIs for enterprise AI apps};
+				\node[stepbox, right=of phase1] (phase2) {\textbf{Phase 2: Execution Infrastructure}\\The Mid-Stack Standard\\ \color{muted}Connect enterprise storage to model reasoning};
 
 				\draw[-{Latex[length=2mm]}, accent, thick] (phase1)--(phase2);
-				%\draw[-{Latex[length=2mm]}, thick] (phase2)--(phase3);
 			\end{tikzpicture}
 		\end{center}
 		\vfill
 		\begin{columns}[T]
 			\column{0.49\textwidth}
-			\textbf{Why Legal/M\&A First?}
-			\begin{itemize}\small
-				\item Highest density of complex tables, nested PDFs, and formulas.
-				\item Errors carry direct financial/regulatory liability.
-				\item High initial willingness to pay (\$250k+ ACVs).
-			\end{itemize}
+			\begin{block}{\small Phase 1: Application Wedge}
+				\begin{itemize}\scriptsize
+					\item Land in legal, finance, and M\&A audit where errors carry direct liability.
+					\item High willingness to pay (\$250k+ ACVs) creates immediate revenue and proves substrate execution on complex tables/PDFs.
+				\end{itemize}
+			\end{block}
 
 			\column{0.49\textwidth}
-			\textbf{The Platform Flywheel}
-			\begin{itemize}\small
-				\item Substrate deployment creates lock-in across enterprise document stores.
-				\item Every new internal enterprise AI application reuses the existing Citadel substrate.
-			\end{itemize}
+			\begin{block}{\small Phase 2: Enabling Infrastructure}
+				\begin{itemize}\scriptsize
+					\item \textbf{Sits Between, Not Against:} Citadel does not replace Databricks (storage) or OpenAI (reasoning).
+					\item \textbf{The Network Analogy:} Just as cellular networks enabled mobile calling everywhere, Citadel provides the underlying infrastructure for any model to execute over enterprise storage.
+				\end{itemize}
+			\end{block}
 		\end{columns}
+		\vfill
+		\centering
+		{\color{CitadelHighlight}\bfseries Citadel does not replace the storage or the model—it is the infrastructure that connects them.}
 	\end{frame}
 
 	% --- Slide 14: Enterprise Unit Economics ---
