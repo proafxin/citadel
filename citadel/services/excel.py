@@ -252,6 +252,23 @@ def find_regions(sheet: SheetExtraction) -> list[Region]:
     return regions
 
 
+def _title_hint_rows(region: Region) -> list[int]:
+    # a lone bold cell with the rest of its row empty is a common, deliberate spreadsheet convention for a section
+    # title or label ("Calculated Values:") — a real signal from the source format, not a guess, the same kind of
+    # thing the header hint already carries for markup/PDF tables. `region.cells` already excludes empty cells and is
+    # already scoped to the region's own column span, so a row with exactly one populated cell here has no other
+    # content anywhere in the region's width. flagged here, not decided: the model still makes the call
+    by_row: dict[int, list[Cell]] = {}
+    for cell in region.cells:
+        by_row.setdefault(cell.row, []).append(cell)
+    hints: list[int] = []
+    for row, cells in by_row.items():
+        populated = [cell for cell in cells if cell_value(cell) not in {None, ""}]
+        if len(populated) == 1 and populated[0].bold:
+            hints.append(row - region.min_row)
+    return sorted(hints)
+
+
 def region_comments(region: Region) -> list[str]:
     ordered = sorted(region.cells, key=lambda cell: (cell.row, cell.col))
     return [cell.comment for cell in ordered if cell.comment]
@@ -340,6 +357,7 @@ async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, Sheet
     # resolve to text here. nothing about table structure is decided in this code
     text: list[SheetItem] = []
     grids: list[list[list[str]]] = []
+    title_hints: list[list[int]] = []
     cells: list[Cell] = []
     for region in find_regions(sheet):
         grid = region_grid(sheet, region)
@@ -351,6 +369,7 @@ async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, Sheet
             text.append(SheetText(sheet_no=sheet.sheet_no, text=body))
             continue
         grids.append(grid)
+        title_hints.append(_title_hint_rows(region))
         cells.extend(region.cells)
     items: list[SheetItem] = list(text)
     if grids:
@@ -360,6 +379,6 @@ async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, Sheet
             "max_row": max(cell.row for cell in cells),
             "max_col": max(cell.col for cell in cells),
         }
-        structured = await structure_tables(grids, sheet_no=sheet.sheet_no, anchors=anchors)
+        structured = await structure_tables(grids, sheet_no=sheet.sheet_no, anchors=anchors, title_hints=title_hints)
         items.extend(table for table, _blocks in structured)
     return list(enumerate(items, start=1))
