@@ -9,7 +9,7 @@ from citadel.llm import (
 )
 from citadel.schemas.table import Crosstab, Dimension, KeyColumn, TableStructure
 from citadel.tabular.flag import column_kinds, payload_rows
-from citadel.tabular.materialize import MaterializedTable, materialize
+from citadel.tabular.materialize import MaterializedTable, _plausible_header_rows, materialize
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +121,15 @@ def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
         # above) and `title` is what signals the exclusion instead. its own row is taken to be row 0 of the block,
         # the same place a lone label naming the whole block is expected to sit everywhere else in this stage
         data_start = 1
+    # applied here, not only in materialize._materialize_relational, so _drop_contained_specs (which runs on this
+    # data_start/data_end, before materialize is ever called) sees the same corrected range that will actually be
+    # produced — otherwise a rejected header row's pull-back is invisible to containment detection and a spec that
+    # only looks non-overlapping on paper survives as a duplicate of the rows the correction folds into another spec
+    plausible_rows = _plausible_header_rows(grid, header_rows)
+    rejected_rows = set(header_rows) - set(plausible_rows)
+    if rejected_rows:
+        data_start = min(data_start, *rejected_rows)
+    header_rows = plausible_rows
     data_end = max(data_start, min(int(spec.get("row_end", height - 1)), max(height - 1, 0)))
     columns = ([str(name) for name in spec.get("columns", [])] or None) if header_rows else None
     crosstab = _crosstab(spec, width) if spec.get("layout") == "crosstab" else None
@@ -150,16 +159,28 @@ def _contained(inner: TableStructure, outer: TableStructure) -> bool:
     )
 
 
+def _index_comparable(blocks_i: list[int], blocks_j: list[int]) -> bool:
+    # data_start/data_end are row indices into the grid stack_candidates builds by concatenating these blocks IN
+    # ORDER — comparable between two specs only when one block list is a leading prefix of the other, so index 0
+    # means the same physical starting row for both (an identical list is trivially a prefix of itself, so this
+    # covers the same-block case too). any other pairing stacks a different set of rows in a different order, and
+    # their indices mean nothing next to each other
+    shorter, longer = (blocks_i, blocks_j) if len(blocks_i) <= len(blocks_j) else (blocks_j, blocks_i)
+    return longer[: len(shorter)] == shorter
+
+
 def _drop_contained_specs(
     prepared: list[tuple[list[int], list[list[str]], TableStructure]],
 ) -> list[tuple[list[int], list[list[str]], TableStructure]]:
-    # two specs can share a block without the model coordinating their row ranges against each other — nothing
-    # upstream re-checks it. a range strictly inside another one from the SAME block is the same rows claimed twice;
+    # two specs can share rows without the model coordinating their ranges against each other — nothing upstream
+    # re-checks it, and this is not limited to specs sharing the identical block list: a spec covering just the
+    # block a bigger spec starts with claims the same rows just as much as an exact block match would. a range
+    # strictly inside another one, from block lists whose indices are comparable, is the same rows claimed twice;
     # keep the larger, more complete table and drop the one it subsumes
     dropped: set[int] = set()
     for i, (blocks_i, _, structure_i) in enumerate(prepared):
         for j, (blocks_j, _, structure_j) in enumerate(prepared):
-            if i != j and blocks_i == blocks_j and _contained(structure_i, structure_j):
+            if i != j and _index_comparable(blocks_i, blocks_j) and _contained(structure_i, structure_j):
                 dropped.add(i)
     return [item for index, item in enumerate(prepared) if index not in dropped]
 
@@ -217,7 +238,16 @@ async def structure_tables(
             logger.info("table_structure dropped spec blocks=%r — no valid block index", spec.get("blocks"))
             continue
         grid = candidates[blocks[0]] if len(blocks) == 1 else stack_candidates([candidates[i] for i in blocks])
-        prepared.append((blocks, grid, _table_from_spec(spec, grid)))
+        structure = _table_from_spec(spec, grid)
+        logger.info(
+            "table_structure spec blocks=%s data=%d-%d header_rows=%s title=%r",
+            blocks,
+            structure.data_start,
+            structure.data_end,
+            structure.header_rows,
+            structure.title,
+        )
+        prepared.append((blocks, grid, structure))
     out: list[tuple[MaterializedTable, list[int]]] = []
     merged = 0
     block_uses: Counter[int] = Counter()
