@@ -91,9 +91,33 @@ def _is_data_token(cell: str) -> bool:
 
 _AGGREGATION_RE = re.compile(r"\b(?:total|subtotal|net|sum|balance|average|mean)\b", re.IGNORECASE)
 _NULL_EQUIVALENT_CELL = {"n/a", "na", "nd", "n.d.", "tbd", "none", "null", "-", "--"}
+_NARROW_WIDTH = 3  # mirrors structure.py's SPARSE_HEADER_MIN_WIDTH — below this, the sparse-row header check never
+# rejects anything (any row passes), so a narrow table's header claim has no protection except what follows here
 
 
-def _plausible_header_rows(grid: list[list[str]], header_rows: list[int]) -> list[int]:
+def _is_numeric_cell(value: str) -> bool:
+    text = value.strip()
+    return _lossless_int(text) or _lossless_decimal(text)
+
+
+def _looks_like_neighbor_data(grid: list[list[str]], row: int, width: int) -> bool:
+    # scoped to narrow (<3 col) tables only — a wide header (years, indices) is already covered by the sparse-row
+    # check above and must never be touched here, since a genuine wide header legitimately shares its columns'
+    # numeric kind. the signal is local, not column-wide, so it never needs to know what a "normal" value looks like
+    # for this column in general: it only asks whether THIS row already carries a number in the same position where
+    # the row right after it — the row the model is about to call data — also carries one. a real header cell there
+    # is always a word ("Value", "Amount"), never a number; a data row promoted to header still has one ("60" next
+    # to "70"), which is the tell
+    if width >= _NARROW_WIDTH:
+        return False
+    next_row = row + 1
+    if next_row >= len(grid):
+        return False
+    span = range(min(width, len(grid[row]), len(grid[next_row])))
+    return any(_is_numeric_cell(grid[row][col]) and _is_numeric_cell(grid[next_row][col]) for col in span)
+
+
+def _plausible_header_rows(grid: list[list[str]], header_rows: list[int], width: int) -> list[int]:
     # a header NAMES the columns; it is never the data itself. emails and ISO dates are never column names, so a
     # predicted header row made mostly of them is a data row the model promoted (its cells then get space-joined into
     # "103 104" / two emails). a DECIMAL is likewise never a column name — a label-beside-a-value row from a key-value
@@ -103,7 +127,8 @@ def _plausible_header_rows(grid: list[list[str]], header_rows: list[int]) -> lis
     # populated cell is a real total row, not a header for one — the exact "NET OPERATING REVENUES" case a stored row
     # already has to survive as data, not vanish into a column name. a null-equivalent placeholder ("N/A", "nd")
     # anywhere in the row is the same signal in general form: a header is never a stand-in for a missing value, only
-    # data is.
+    # data is. finally, on a narrow table, a claimed header that itself carries a number where the row right after it
+    # does too ("S" | 60, next to "K" | 70) is the same data-row-promoted-to-header mistake in general form.
     kept: list[int] = []
     for row in header_rows:
         cells = [cell for cell in (grid[row] if row < len(grid) else []) if cell.strip()]
@@ -114,6 +139,8 @@ def _plausible_header_rows(grid: list[list[str]], header_rows: list[int]) -> lis
         if cells and _AGGREGATION_RE.search(cells[0]):
             continue
         if any(cell.strip().lower() in _NULL_EQUIVALENT_CELL for cell in cells):
+            continue
+        if _looks_like_neighbor_data(grid, row, width):
             continue
         kept.append(row)
     return kept
@@ -262,6 +289,79 @@ def _dedupe_headers(
     return resolved
 
 
+def _duplicates_header(row: list[str], headers: list[str | None]) -> bool:
+    populated = [(cell.strip(), headers[index]) for index, cell in enumerate(row) if cell.strip()]
+    if not populated:
+        return False
+    return all(name is not None and cell.lower() == name.strip().lower() for cell, name in populated)
+
+
+def _drop_duplicate_header_rows(
+    collected: list[list[str]], sections: list[list[str | None]], headers: list[str | None]
+) -> tuple[list[list[str]], list[list[str | None]]]:
+    # a multi-row header the model only partly recognized leaves its unclaimed rows sitting in the data — one of
+    # them is often the header text itself, repeating verbatim in exactly the columns whose names it defines.
+    # general and language-agnostic: a row only counts as the header leaking through when EVERY cell it actually
+    # populates matches that column's own resolved name, never a coincidental single-cell match
+    keep = [index for index, row in enumerate(collected) if not _duplicates_header(row, headers)]
+    if len(keep) == len(collected):
+        return collected, sections
+    logger.info("materialize dropped %d duplicate-header row(s) leaked into data", len(collected) - len(keep))
+    return [collected[i] for i in keep], [sections[i] for i in keep]
+
+
+_SUM_EPSILON = 1e-6
+
+
+def _to_float(value: str) -> float | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+_MIN_AGGREGATE_COLUMNS = 2  # a match in just one column is too easily coincidental to trust
+
+
+def _is_trailing_total(rows: list[list[str]]) -> bool:
+    # a Grand Total / Total Result row is, by definition, the one row whose own values equal the sum of every other
+    # row above it in the same columns — a mathematical signature, not a keyword, so it holds in any language or
+    # phrasing and never conflicts with a genuine "Total Revenue" line item (one value among many, not itself a
+    # column-wise sum of its neighbors). only the LAST row is ever checked: a trailing total is a strong, near-
+    # universal spreadsheet convention, and checking any other position risks trimming a real mid-table subtotal
+    if len(rows) < _MIN_AGGREGATE_COLUMNS:
+        return False
+    *body, last = rows
+    numeric_checks = matches = 0
+    for col in range(len(last)):
+        populated = [row[col] for row in body if col < len(row) and row[col].strip()]
+        if not populated:
+            continue
+        values = [v for cell in populated if (v := _to_float(cell)) is not None]
+        if len(values) < len(populated):  # a column mixing text and numbers is not part of a real aggregate row
+            continue
+        candidate = _to_float(last[col]) if col < len(last) else None
+        if candidate is None:
+            continue
+        numeric_checks += 1
+        total = sum(values)
+        if abs(candidate - total) <= _SUM_EPSILON * max(1.0, abs(total)):
+            matches += 1
+    return numeric_checks >= _MIN_AGGREGATE_COLUMNS and matches == numeric_checks
+
+
+def _drop_trailing_total(
+    collected: list[list[str]], sections: list[list[str | None]]
+) -> tuple[list[list[str]], list[list[str | None]]]:
+    if not _is_trailing_total(collected):
+        return collected, sections
+    logger.info("materialize dropped trailing aggregate row (matches sum of the rows above it)")
+    return collected[:-1], sections[:-1]
+
+
 def _materialize_relational(
     grid: list[list[str]],
     structure: TableStructure,
@@ -271,14 +371,13 @@ def _materialize_relational(
     anchors: dict | None,
 ) -> MaterializedTable:
     count = structure.col_end - structure.col_start + 1
-    header_rows = _plausible_header_rows(grid, structure.header_rows or [])
+    header_rows = _plausible_header_rows(grid, structure.header_rows or [], max((len(row) for row in grid), default=0))
     # a rejected header row is data the model ate — pull data_start back so those rows are kept as rows, not lost
     rejected = set(structure.header_rows or []) - set(header_rows)
     data_start = min([structure.data_start, *rejected]) if rejected else structure.data_start
     collected, sections, section_names = _collect_sections(
         grid, data_start, structure.data_end, structure.col_start, count, structure.section_rows or []
     )
-    dtypes = [dtype_of([raw[index] for raw in collected]) for index in range(count)]
     # SLM-resolved names win when present (it handles implied/merged/multi-row headers) — but only over a header row
     # that survived validation: a name resolved from a row that turned out to be data is not a name for anything
     if structure.columns and header_rows:
@@ -288,6 +387,9 @@ def _materialize_relational(
     else:
         headers = [_grid_header(grid, header_rows, structure.col_start + index) for index in range(count)]
     headers = _dedupe_headers(grid, header_rows, structure.col_start, headers)
+    collected, sections = _drop_duplicate_header_rows(collected, sections, headers)
+    collected, sections = _drop_trailing_total(collected, sections)
+    dtypes = [dtype_of([raw[index] for raw in collected]) for index in range(count)]
     columns = [
         Column(header=_clean_name(headers[index]) or f"col{index}", dtype=dtypes[index]) for index in range(count)
     ]
