@@ -7,7 +7,7 @@ requires-python = ">=3.13"
 authors = [{ name = "Masum Billal", email = "billalmasum93@gmail.com" }]
 
 dependencies = [
-    "alembic>=1.18.5",
+    "alembic>=1.19.0",
     "asyncpg>=0.31.0",
     "beautifulsoup4>=4.15.0",
     "cachetools>=7.1.7",
