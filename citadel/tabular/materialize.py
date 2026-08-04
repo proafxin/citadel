@@ -89,19 +89,31 @@ def _is_data_token(cell: str) -> bool:
     return bool(_EMAIL_RE.match(value) or _ISO_DATE_RE.match(value))
 
 
+_AGGREGATION_RE = re.compile(r"\b(?:total|subtotal|net|sum|balance|average|mean)\b", re.IGNORECASE)
+_NULL_EQUIVALENT_CELL = {"n/a", "na", "nd", "n.d.", "tbd", "none", "null", "-", "--"}
+
+
 def _plausible_header_rows(grid: list[list[str]], header_rows: list[int]) -> list[int]:
     # a header NAMES the columns; it is never the data itself. emails and ISO dates are never column names, so a
     # predicted header row made mostly of them is a data row the model promoted (its cells then get space-joined into
     # "103 104" / two emails). a DECIMAL is likewise never a column name — a label-beside-a-value row from a key-value
     # block ("st | 0.11", "KB | 69.04") is data the model promoted, so ANY decimal cell disqualifies the row. bare
     # INTEGERS are deliberately NOT a data signal: wide sheets legitimately use years as headers (... | 1960 | 1961),
-    # and rejecting those would destroy a correct schema.
+    # and rejecting those would destroy a correct schema. an aggregation word ("Total", "Net") in the row's first
+    # populated cell is a real total row, not a header for one — the exact "NET OPERATING REVENUES" case a stored row
+    # already has to survive as data, not vanish into a column name. a null-equivalent placeholder ("N/A", "nd")
+    # anywhere in the row is the same signal in general form: a header is never a stand-in for a missing value, only
+    # data is.
     kept: list[int] = []
     for row in header_rows:
         cells = [cell for cell in (grid[row] if row < len(grid) else []) if cell.strip()]
         if cells and any(_lossless_decimal(cell.strip()) for cell in cells):
             continue
         if cells and sum(1 for cell in cells if _is_data_token(cell)) * 2 > len(cells):
+            continue
+        if cells and _AGGREGATION_RE.search(cells[0]):
+            continue
+        if any(cell.strip().lower() in _NULL_EQUIVALENT_CELL for cell in cells):
             continue
         kept.append(row)
     return kept

@@ -14,6 +14,7 @@ from citadel.tabular.materialize import MaterializedTable, _plausible_header_row
 logger = logging.getLogger(__name__)
 
 _MAX_CELL = 40  # a shown cell is truncated here — the model needs the shape and the label, not a whole paragraph
+_MIN_SEQUENCE_RUN = 3  # below this, any two numbers trivially "form a sequence" by definition — not a real signal
 
 
 def _row_line(index: int, row: list[str], width: int) -> str:
@@ -76,6 +77,44 @@ def stack_candidates(grids: list[list[list[str]]]) -> list[list[str]]:
     return [[row[index] if index < len(row) else "" for index in range(width)] for grid in grids for row in grid]
 
 
+def _numeric_value(cell: str) -> float | None:
+    text = cell.strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _sequence_hint_rows(grid: list[list[str]], width: int) -> list[int]:
+    # a run of adjacent cells stepping by a constant difference (1, 2, 3, 4 or 1990, 1991, 1992, ...) is how a wide
+    # table spells out a dimension across columns instead of naming it once — years, indices, buckets. the row
+    # holding it is a header for that dimension (see crosstab, in the prompt), not a data row, even though every one
+    # of its cells is a plain number and would otherwise read exactly like the data beneath it
+    hints: list[int] = []
+    for row_index, row in enumerate(grid):
+        longest = run_length = 0
+        run_step: float | None = None
+        last: float | None = None
+        for col in range(width):
+            value = _numeric_value(row[col]) if col < len(row) else None
+            if value is None:
+                run_length, run_step, last = 0, None, None
+                continue
+            if last is None:
+                run_length, run_step = 1, None
+            elif run_step == value - last:
+                run_length += 1
+            else:
+                run_length, run_step = 2, value - last
+            last = value
+            longest = max(longest, run_length)
+        if longest >= _MIN_SEQUENCE_RUN:
+            hints.append(row_index)
+    return hints
+
+
 def _candidate_text(
     grid: list[list[str]], index: int, header_hint: list[int] | None = None, title_hint: list[int] | None = None
 ) -> str:
@@ -89,9 +128,16 @@ def _candidate_text(
     title_line = ""
     if title_hint:
         rows = ", ".join(str(row) for row in title_hint)
-        title_line = f"; row(s) {rows} came from the source formatted as a lone bold label, not data"
+        title_line = f"; row(s) {rows} are a lone label in the source (bold, parenthetical, or footnote), not data"
+    sequence_hint = _sequence_hint_rows(grid, width)
+    sequence_line = ""
+    if sequence_hint:
+        rows = ", ".join(str(row) for row in sequence_hint)
+        sequence_line = f"; row(s) {rows} step in a steady numeric sequence across their columns"
     body = _payload_text(grid, payload_rows(grid), width)
-    return f"{index}: {len(grid)} rows, {width} cols; column kinds: {hint}{header_line}{title_line}\n{body}"
+    return (
+        f"{index}: {len(grid)} rows, {width} cols; column kinds: {hint}{header_line}{title_line}{sequence_line}\n{body}"
+    )
 
 
 def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:

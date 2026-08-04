@@ -252,19 +252,34 @@ def find_regions(sheet: SheetExtraction) -> list[Region]:
     return regions
 
 
+_FOOTNOTE_MARKERS = ("*", "†", "‡", "§")
+
+
+def _is_note_like(text: str) -> bool:
+    value = text.strip()
+    if value.startswith("(") and value.endswith(")"):
+        return True
+    return value.startswith(_FOOTNOTE_MARKERS)
+
+
 def _title_hint_rows(region: Region) -> list[int]:
     # a lone bold cell with the rest of its row empty is a common, deliberate spreadsheet convention for a section
     # title or label ("Calculated Values:") — a real signal from the source format, not a guess, the same kind of
-    # thing the header hint already carries for markup/PDF tables. `region.cells` already excludes empty cells and is
-    # already scoped to the region's own column span, so a row with exactly one populated cell here has no other
-    # content anywhere in the region's width. flagged here, not decided: the model still makes the call
+    # thing the header hint already carries for markup/PDF tables. a lone cell shaped like a note — wrapped in
+    # parentheses, or led by a footnote marker — carries the same convention through its own text instead of
+    # formatting, so it counts even without bold. `region.cells` already excludes empty cells and is already scoped
+    # to the region's own column span, so a row with exactly one populated cell here has no other content anywhere
+    # in the region's width. flagged here, not decided: the model still makes the call
     by_row: dict[int, list[Cell]] = {}
     for cell in region.cells:
         by_row.setdefault(cell.row, []).append(cell)
     hints: list[int] = []
     for row, cells in by_row.items():
         populated = [cell for cell in cells if cell_value(cell) not in {None, ""}]
-        if len(populated) == 1 and populated[0].bold:
+        if len(populated) != 1:
+            continue
+        cell = populated[0]
+        if cell.bold or _is_note_like(str(cell_value(cell))):
             hints.append(row - region.min_row)
     return sorted(hints)
 
