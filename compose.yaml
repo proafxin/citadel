@@ -111,7 +111,7 @@ services:
       - --quantization
       - fp8
       - --kv-cache-dtype
-      - fp8
+      - auto
       # 0.30 was sized when the OCR model owned the card. it left 1.79GiB of KV = 94,854 tokens, and vLLM's own boot
       # line said what that means: "Maximum concurrency for 32,768 tokens per request: 2.89x". the filter packs each
       # call up to BUDGET (~30k tokens) and runs 32 of them at once — so ~3 ran and 29 queued, every query, invisibly.
