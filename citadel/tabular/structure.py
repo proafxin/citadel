@@ -29,7 +29,7 @@ def stack_candidates(grids: list[list[list[str]]]) -> list[list[str]]:
     return [[row[index] if index < len(row) else "" for index in range(width)] for grid in grids for row in grid]
 
 
-_MAX_ADJACENT = 200
+_MAX_ADJACENT = 400
 
 
 def _candidate_text(grid: list[list[str]], index: int, adjacent: str = "") -> str:
