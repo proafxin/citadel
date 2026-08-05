@@ -25,7 +25,7 @@ services:
       # and we are not short of it. this is the model we switched to FOR fidelity, and a quantization error in a table
       # corrupts a cell, which is the one thing the whole design refuses to let a model do.
       - --gpu-memory-utilization
-      - "0.25"
+      - "0.20"
       # the KV cache is SIZED here rather than left to the memory profiler, which measured whatever happened to be free
       # at boot and so varied with how far the other models had got loading: one boot took 1.98GiB, another 4.08GiB.
       # 8000 x 16 = 128,000 tokens. measured peak over a 2,175-page run (14,446 crops on the densest book) was ~77k, with
