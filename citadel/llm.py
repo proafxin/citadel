@@ -111,7 +111,6 @@ _STRUCTURE_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "blocks": {"type": "array", "items": {"type": "integer"}},
-                    "layout": {"type": "string", "enum": ["relational", "crosstab"]},
                     "transposed": {"type": "boolean"},
                     "header_rows": {"type": "array", "items": {"type": "integer"}},
                     "row_end": {"type": "integer"},
@@ -119,37 +118,11 @@ _STRUCTURE_SCHEMA = {
                     "col_end": {"type": "integer"},
                     "columns": {"type": "array", "items": {"type": "string"}},
                     "section_rows": {"type": "array", "items": {"type": "integer"}},
-                    "crosstab": {
-                        "type": "object",
-                        "properties": {
-                            "key_columns": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {"name": {"type": "string"}, "col": {"type": "integer"}},
-                                    "required": ["name", "col"],
-                                },
-                            },
-                            "dimensions": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {"name": {"type": "string"}, "header_row": {"type": "integer"}},
-                                    "required": ["name", "header_row"],
-                                },
-                            },
-                            "value_name": {"type": "string"},
-                            "value_col_start": {"type": "integer"},
-                            "value_col_end": {"type": "integer"},
-                        },
-                        "required": ["key_columns", "dimensions", "value_name", "value_col_start", "value_col_end"],
-                    },
                     "title": {"type": "string"},
                     "notes": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": [
                     "blocks",
-                    "layout",
                     "transposed",
                     "header_rows",
                     "row_end",

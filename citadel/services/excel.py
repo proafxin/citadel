@@ -244,31 +244,6 @@ def find_regions(sheet: SheetExtraction) -> list[Region]:
     return regions
 
 
-_FOOTNOTE_MARKERS = ("*", "†", "‡", "§")
-
-
-def _is_note_like(text: str) -> bool:
-    value = text.strip()
-    if value.startswith("(") and value.endswith(")"):
-        return True
-    return value.startswith(_FOOTNOTE_MARKERS)
-
-
-def _title_hint_rows(region: Region) -> list[int]:
-    by_row: dict[int, list[Cell]] = {}
-    for cell in region.cells:
-        by_row.setdefault(cell.row, []).append(cell)
-    hints: list[int] = []
-    for row, cells in by_row.items():
-        populated = [cell for cell in cells if cell_value(cell) not in {None, ""}]
-        if len(populated) != 1:
-            continue
-        cell = populated[0]
-        if cell.bold or _is_note_like(str(cell_value(cell))):
-            hints.append(row - region.min_row)
-    return sorted(hints)
-
-
 def region_comments(region: Region) -> list[str]:
     ordered = sorted(region.cells, key=lambda cell: (cell.row, cell.col))
     return [cell.comment for cell in ordered if cell.comment]
@@ -346,7 +321,6 @@ def _pivot_covers(region: Region, pivots: list[SheetPivot]) -> bool:
 async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, SheetItem]]:
     text: list[SheetItem] = []
     grids: list[list[list[str]]] = []
-    title_hints: list[list[int]] = []
     cells: list[Cell] = []
     for region in find_regions(sheet):
         grid = region_grid(sheet, region)
@@ -358,7 +332,6 @@ async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, Sheet
             text.append(SheetText(sheet_no=sheet.sheet_no, text=body))
             continue
         grids.append(grid)
-        title_hints.append(_title_hint_rows(region))
         cells.extend(region.cells)
     items: list[SheetItem] = list(text)
     if grids:
@@ -368,6 +341,6 @@ async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, Sheet
             "max_row": max(cell.row for cell in cells),
             "max_col": max(cell.col for cell in cells),
         }
-        structured = await structure_tables(grids, sheet_no=sheet.sheet_no, anchors=anchors, title_hints=title_hints)
+        structured = await structure_tables(grids, sheet_no=sheet.sheet_no, anchors=anchors)
         items.extend(table for table, _blocks in structured)
     return list(enumerate(items, start=1))

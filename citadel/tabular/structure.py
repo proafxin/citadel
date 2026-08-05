@@ -6,14 +6,13 @@ from citadel.llm import (
     collect_structure_candidates,
     emit_structure_candidates,
 )
-from citadel.schemas.table import Crosstab, Dimension, KeyColumn, TableStructure
+from citadel.schemas.table import TableStructure
 from citadel.tabular.flag import column_kinds, payload_rows
 from citadel.tabular.materialize import MaterializedTable, materialize
 
 logger = logging.getLogger(__name__)
 
 _MAX_CELL = 40
-_MIN_SEQUENCE_RUN = 3
 
 
 def _row_line(index: int, row: list[str], width: int) -> str:
@@ -25,95 +24,17 @@ def _payload_text(grid: list[list[str]], indices: list[int], width: int) -> str:
     return "\n".join(_row_line(index, grid[index], width) for index in indices)
 
 
-def _crosstab(table: dict, width: int) -> Crosstab | None:
-    spec = table.get("crosstab")
-    if not isinstance(spec, dict):
-        return None
-    keys = [
-        KeyColumn(name=str(k["name"]), col=int(k["col"]))
-        for k in spec.get("key_columns", [])
-        if isinstance(k, dict) and 0 <= int(k.get("col", -1)) < width
-    ]
-    dims = [
-        Dimension(name=str(d["name"]), header_row=int(d["header_row"]))
-        for d in spec.get("dimensions", [])
-        if isinstance(d, dict) and int(d.get("header_row", -1)) >= 0
-    ]
-    start = max(0, min(int(spec.get("value_col_start", 0)), width - 1))
-    end = max(start, min(int(spec.get("value_col_end", width - 1)), width - 1))
-    if not dims:
-        return None
-    return Crosstab(
-        key_columns=keys,
-        dimensions=dims,
-        value_name=str(spec.get("value_name") or "value"),
-        value_col_start=start,
-        value_col_end=end,
-    )
-
-
 def stack_candidates(grids: list[list[list[str]]]) -> list[list[str]]:
     width = max((len(row) for grid in grids for row in grid), default=0)
     return [[row[index] if index < len(row) else "" for index in range(width)] for grid in grids for row in grid]
 
 
-def _numeric_value(cell: str) -> float | None:
-    text = cell.strip()
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _sequence_hint_rows(grid: list[list[str]], width: int) -> list[int]:
-    hints: list[int] = []
-    for row_index, row in enumerate(grid):
-        longest = run_length = 0
-        run_step: float | None = None
-        last: float | None = None
-        for col in range(width):
-            value = _numeric_value(row[col]) if col < len(row) else None
-            if value is None:
-                run_length, run_step, last = 0, None, None
-                continue
-            if last is None:
-                run_length, run_step = 1, None
-            elif run_step == value - last:
-                run_length += 1
-            else:
-                run_length, run_step = 2, value - last
-            last = value
-            longest = max(longest, run_length)
-        if longest >= _MIN_SEQUENCE_RUN:
-            hints.append(row_index)
-    return hints
-
-
-def _candidate_text(
-    grid: list[list[str]], index: int, header_hint: list[int] | None = None, title_hint: list[int] | None = None
-) -> str:
+def _candidate_text(grid: list[list[str]], index: int) -> str:
     width = max((len(row) for row in grid), default=0)
     kinds = column_kinds(grid)
     hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))
-    header_line = ""
-    if header_hint:
-        rows = ", ".join(str(row) for row in header_hint)
-        header_line = f"; row(s) {rows} came from the source already marked as a header"
-    title_line = ""
-    if title_hint:
-        rows = ", ".join(str(row) for row in title_hint)
-        title_line = f"; row(s) {rows} are a lone label in the source (bold, parenthetical, or footnote), not data"
-    sequence_hint = _sequence_hint_rows(grid, width)
-    sequence_line = ""
-    if sequence_hint:
-        rows = ", ".join(str(row) for row in sequence_hint)
-        sequence_line = f"; row(s) {rows} step in a steady numeric sequence across their columns"
     body = _payload_text(grid, payload_rows(grid), width)
-    return (
-        f"{index}: {len(grid)} rows, {width} cols; column kinds: {hint}{header_line}{title_line}{sequence_line}\n{body}"
-    )
+    return f"{index}: {len(grid)} rows, {width} cols; column kinds: {hint}\n{body}"
 
 
 def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
@@ -140,12 +61,10 @@ def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
         data_start = 1
     data_end = max(data_start, min(int(spec.get("row_end", height - 1)), max(height - 1, 0)))
     columns = ([str(name) for name in spec.get("columns", [])] or None) if header_rows else None
-    crosstab = _crosstab(spec, width) if spec.get("layout") == "crosstab" else None
     section_rows = sorted(
         row for row in spec.get("section_rows", []) if isinstance(row, int) and data_start <= row <= data_end
     )
     return TableStructure(
-        layout="crosstab" if crosstab is not None else "relational",
         col_start=col_start,
         col_end=col_end,
         header_rows=header_rows,
@@ -153,7 +72,6 @@ def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
         data_end=data_end,
         columns=columns,
         section_rows=section_rows or None,
-        crosstab=crosstab,
         title=title,
         notes=spec.get("notes") or [],
     )
@@ -188,18 +106,12 @@ async def structure_tables(
     *,
     sheet_no: int = 0,
     anchors: dict | None = None,
-    header_hints: list[list[int]] | None = None,
-    title_hints: list[list[int]] | None = None,
     label: str = "",
 ) -> list[tuple[MaterializedTable, list[int]]]:
     if not candidates:
         return []
     started = time.perf_counter()
-    header = header_hints or [[] for _ in candidates]
-    title = title_hints or [[] for _ in candidates]
-    payload = "\n\n".join(
-        _candidate_text(grid, index, header[index], title[index]) for index, grid in enumerate(candidates)
-    )
+    payload = "\n\n".join(_candidate_text(grid, index) for index, grid in enumerate(candidates))
     specs = await collect_structure_candidates(await emit_structure_candidates(payload))
     prepared: list[tuple[list[int], list[list[str]], TableStructure]] = []
     for spec in specs:

@@ -50,17 +50,14 @@ def _blank_full_width_titles(
                 occupied[row_idx, col] = ""
 
 
-def _grid(table: Tag) -> tuple[list[list[str]], list[int]]:
+def _grid(table: Tag) -> list[list[str]]:
     occupied: dict[tuple[int, int], str] = {}
     row_spans: list[tuple[int, int]] = []
-    header_rows: list[int] = []
     width = 0
     height = 0
     for row_idx, tr in enumerate(_table_rows(table)):
         col = 0
         cells = tr.find_all(["td", "th"], recursive=False)
-        if cells and all(cell.name == "th" for cell in cells):
-            header_rows.append(row_idx)
         for cell in cells:
             while (row_idx, col) in occupied:
                 col += 1
@@ -76,17 +73,16 @@ def _grid(table: Tag) -> tuple[list[list[str]], list[int]]:
             width = max(width, col)
         height = row_idx + 1
     _blank_full_width_titles(occupied, row_spans, width)
-    grid = [[occupied.get((row, col), "") for col in range(width)] for row in range(height)]
-    return grid, header_rows
+    return [[occupied.get((row, col), "") for col in range(width)] for row in range(height)]
 
 
 def html_to_text(html: str) -> str:
     return BeautifulSoup(html, "lxml").get_text(separator=" ", strip=True)
 
 
-def grid_from_html(html: str) -> tuple[list[list[str]], list[int]]:
+def grid_from_html(html: str) -> list[list[str]]:
     table = BeautifulSoup(html, "lxml").find("table")
-    return _grid(table) if isinstance(table, Tag) else ([], [])
+    return _grid(table) if isinstance(table, Tag) else []
 
 
 def single_table_structure(grid: list[list[str]], header_rows: int) -> TableStructure:
@@ -179,7 +175,7 @@ def _columns(html: str) -> int:
     table = BeautifulSoup(html, "lxml").find("table")
     if not isinstance(table, Tag):
         return 0
-    grid, _ = _grid(table)
+    grid = _grid(table)
     return len(grid[0]) if grid else 0
 
 

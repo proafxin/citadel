@@ -4,7 +4,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from citadel.schemas.table import CellValue, Column, ColumnDType, Crosstab, TableStructure
+from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
 
 logger = logging.getLogger(__name__)
 
@@ -78,59 +78,6 @@ def _sample(rows: list[list[CellValue]]) -> list[list[CellValue]]:
         return list(rows)
     step = len(rows) / SAMPLE_TABLE_ROWS
     return [rows[int(index * step)] for index in range(SAMPLE_TABLE_ROWS)]
-
-
-def _dimension_values(grid: list[list[str]], header_row: int, start: int, end: int) -> list[str]:
-    out: list[str] = []
-    last = ""
-    for col in range(start, end + 1):
-        cell = _grid_cell(grid, header_row, col).strip()
-        if cell:
-            last = cell
-        out.append(last)
-    return out
-
-
-def _materialize_crosstab(
-    grid: list[list[str]],
-    structure: TableStructure,
-    crosstab: Crosstab,
-    sheet_no: int,
-    formulas: list[str] | None,
-    extra_notes: list[str] | None,
-    anchors: dict | None,
-) -> "MaterializedTable":
-    start, end = crosstab.value_col_start, crosstab.value_col_end
-    dim_values = [_dimension_values(grid, dim.header_row, start, end) for dim in crosstab.dimensions]
-    out_rows: list[list[str]] = []
-    for row in range(structure.data_start, structure.data_end + 1):
-        keys = [_grid_cell(grid, row, key.col) for key in crosstab.key_columns]
-        for col in range(start, end + 1):
-            cell = _grid_cell(grid, row, col)
-            if not cell.strip():
-                continue
-            dims = [dim_values[index][col - start] for index in range(len(crosstab.dimensions))]
-            out_rows.append([*keys, *dims, cell])
-    names = (
-        [key.name for key in crosstab.key_columns] + [dim.name for dim in crosstab.dimensions] + [crosstab.value_name]
-    )
-    width = len(names)
-    dtypes = [dtype_of([row[index] for row in out_rows]) for index in range(width)]
-    columns = [Column(header=names[index], dtype=dtypes[index]) for index in range(width)]
-    data_rows = [[cast_cell(row[index]) for index in range(width)] for row in out_rows]
-    return MaterializedTable(
-        sheet_no=sheet_no,
-        columns=columns,
-        rows=data_rows,
-        sample_rows=_sample(data_rows),
-        n_rows=len(data_rows),
-        title=structure.title,
-        caption=structure.caption,
-        notes=[*(structure.notes or []), *(extra_notes or [])],
-        anchors={**(anchors or {}), "header_rows": []},
-        formulas=formulas,
-        header_rows=[],
-    )
 
 
 def _section_at(grid: list[list[str]], row: int, col_start: int, count: int) -> tuple[int, str] | None:
@@ -285,6 +232,4 @@ def materialize(
 ) -> MaterializedTable:
     if structure.transposed:
         return _materialize_transposed(grid, structure, sheet_no, formulas, extra_notes, anchors)
-    if structure.layout == "crosstab" and structure.crosstab is not None:
-        return _materialize_crosstab(grid, structure, structure.crosstab, sheet_no, formulas, extra_notes, anchors)
     return _materialize_relational(grid, structure, sheet_no, formulas, extra_notes, anchors)
