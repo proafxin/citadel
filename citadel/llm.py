@@ -145,8 +145,8 @@ def _structure_tables(data: dict) -> list[dict]:
     return tables if isinstance(tables, list) else []
 
 
-async def emit_structure_candidates(payload: str) -> str:
-    prompt = f"{load_prompt('table_structure')}\n{payload}"
+async def emit_structure_candidates(payload: str, prompt_name: str) -> str:
+    prompt = f"{load_prompt(prompt_name)}\n{payload}"
     return await emit_slm(prompt, _STRUCTURE_SCHEMA, interactive=False, max_tokens=STRUCTURE_MAX_TOKENS)
 
 

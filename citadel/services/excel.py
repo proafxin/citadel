@@ -341,6 +341,8 @@ async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, Sheet
             "max_row": max(cell.row for cell in cells),
             "max_col": max(cell.col for cell in cells),
         }
-        structured = await structure_tables(grids, sheet_no=sheet.sheet_no, anchors=anchors)
+        structured = await structure_tables(
+            grids, prompt_name="table_structure_excel", sheet_no=sheet.sheet_no, anchors=anchors
+        )
         items.extend(table for table, _blocks in structured)
     return list(enumerate(items, start=1))

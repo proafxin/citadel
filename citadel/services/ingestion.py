@@ -1185,6 +1185,19 @@ async def handle_structure(fields: dict[str, str]) -> None:
     await redis.xadd(STREAM_TABLE_STRUCTURE, {"doc_id": doc_id, "unit": "document"})
 
 
+def _adjacent_context(blocks: list[Block], index: int) -> str:
+    parts = []
+    if index > 0:
+        before = blocks[index - 1]
+        if before.type != "table" and before.text and before.text.strip():
+            parts.append(f"context before: {before.text.strip()}")
+    if index + 1 < len(blocks):
+        after = blocks[index + 1]
+        if after.type != "table" and after.text and after.text.strip():
+            parts.append(f"context after: {after.text.strip()}")
+    return "\n".join(parts)
+
+
 async def handle_table_structure(fields: dict[str, str]) -> None:
     if fields["unit"] == "sheet":
         await handle_tabular(fields)
@@ -1194,7 +1207,8 @@ async def handle_table_structure(fields: dict[str, str]) -> None:
     prepared = load_structures(await redis.get(f"structures:{doc_id}"))
     indices = table_block_indices(prepared.stitched)
     grids = [grid_from_html(prepared.stitched[index].text or "") for index in indices]
-    structured = await structure_tables(grids, label=doc_id)
+    adjacent = [_adjacent_context(prepared.stitched, index) for index in indices]
+    structured = await structure_tables(grids, prompt_name="table_structure_ocr", label=doc_id, adjacent=adjacent)
     by_block: dict[int, list[MaterializedTable]] = {}
     for table, blocks in structured:
         by_block.setdefault(indices[min(blocks)], []).append(table)

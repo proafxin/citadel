@@ -29,12 +29,16 @@ def stack_candidates(grids: list[list[list[str]]]) -> list[list[str]]:
     return [[row[index] if index < len(row) else "" for index in range(width)] for grid in grids for row in grid]
 
 
-def _candidate_text(grid: list[list[str]], index: int) -> str:
+_MAX_ADJACENT = 200
+
+
+def _candidate_text(grid: list[list[str]], index: int, adjacent: str = "") -> str:
     width = max((len(row) for row in grid), default=0)
     kinds = column_kinds(grid)
     hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))
     body = _payload_text(grid, payload_rows(grid), width)
-    return f"{index}: {len(grid)} rows, {width} cols; column kinds: {hint}\n{body}"
+    context = f"\n{adjacent[:_MAX_ADJACENT]}" if adjacent else ""
+    return f"{index}: {len(grid)} rows, {width} cols; column kinds: {hint}{context}\n{body}"
 
 
 def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
@@ -104,15 +108,18 @@ def _drop_contained_specs(
 async def structure_tables(
     candidates: list[list[list[str]]],
     *,
+    prompt_name: str,
     sheet_no: int = 0,
     anchors: dict | None = None,
     label: str = "",
+    adjacent: list[str] | None = None,
 ) -> list[tuple[MaterializedTable, list[int]]]:
     if not candidates:
         return []
     started = time.perf_counter()
-    payload = "\n\n".join(_candidate_text(grid, index) for index, grid in enumerate(candidates))
-    specs = await collect_structure_candidates(await emit_structure_candidates(payload))
+    context = adjacent or ["" for _ in candidates]
+    payload = "\n\n".join(_candidate_text(grid, index, context[index]) for index, grid in enumerate(candidates))
+    specs = await collect_structure_candidates(await emit_structure_candidates(payload, prompt_name))
     prepared: list[tuple[list[int], list[list[str]], TableStructure]] = []
     for spec in specs:
         blocks = [index for index in spec.get("blocks", []) if isinstance(index, int) and 0 <= index < len(candidates)]
