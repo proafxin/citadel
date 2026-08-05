@@ -33,13 +33,9 @@ def _pending() -> dict[str, asyncio.Queue[tuple[str, str]]]:
 
 
 async def emit(payload: dict, interactive: bool) -> str:
-    # put ONE job on the stream and return its id WITHOUT waiting for the reply. many jobs can be emitted back to back so
-    # they sit on the stream together and vllm batches them; the reply is collected later by job id
     job_id = uuid.uuid4().hex
     _pending()[job_id] = asyncio.Queue()
     stream = STREAM_SLM_INTERACTIVE if interactive else STREAM_SLM_BULK
-    # t_emit rides with the job so the consumer can separate time SPENT WAITING for a slot from time generating.
-    # without it a slow call is unattributable: queued behind bulk work and slow to decode look identical
     await get_redis().xadd(
         stream,
         {

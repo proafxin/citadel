@@ -10,7 +10,6 @@ EMBED_DIM = 1024
 class ContentNode(Base):
     __tablename__ = "content"
 
-    # trigram GIN backs the sparse channel's ILIKE; declared here so autogenerate keeps it (see Embedding)
     __table_args__ = (
         Index(
             "ix_content_search_text_trgm",
@@ -31,5 +30,5 @@ class ContentNode(Base):
     bbox: Mapped[list[float] | None] = mapped_column(JSONB, default=None)
     raw: Mapped[dict | None] = mapped_column(JSONB, default=None)
     search_text: Mapped[str | None] = mapped_column(Text, default=None)
-    token_count: Mapped[int | None] = mapped_column(default=None)  # BGE-M3 tokens in search_text, set at ingestion
+    token_count: Mapped[int | None] = mapped_column(default=None)
     qwen_token_count: Mapped[int | None] = mapped_column(default=None)

@@ -30,17 +30,13 @@ _finalizing: set[int] = set()
 
 
 async def _finalize(library_id: int, tag: str) -> None:
-    if library_id in _finalizing:  # catch-up and the live NOTIFY can target the same library — run it once
+    if library_id in _finalizing:
         return
     _finalizing.add(library_id)
     logger.info("finalizing library=%d", library_id)
     try:
         await mark_finalize_started(library_id)
-        await mark_described(library_id)  # descriptions are produced inline during structure now; this is an instant
-        # status transition kept so the finalize phases (and the UI reading them) are unchanged
-        # prep is retrieval-queryable work, run now that ingestion (structure) is done, off the ocr-contended window.
-        # summarizing (worker) and embedding (here) do not depend on each other, so they run CONCURRENTLY and the
-        # library is READY once BOTH land — the summary wait is an event (the last summary fires it), never a poll
+        await mark_described(library_id)
         emitted = await emit_library_batches(library_id)
         logger.info("summarizing library=%d documents=%d", library_id, emitted)
         await mark_embed_started(library_id)
@@ -55,22 +51,17 @@ async def _finalize(library_id: int, tag: str) -> None:
 
 
 async def finalize_libraries(queue: asyncio.Queue[int]) -> None:
-    # consume library ids signalled ready (NOTIFY 'embed' → _listen enqueues them) and finalize each in turn:
-    # describe its tables + embed. one library at a time (GPU embed is concurrency-1 anyway).
     while True:
         library_id = await queue.get()
         await _finalize(library_id, "finalized")
 
 
-LISTEN_HEALTH_S = 30  # probe the LISTEN connection this often so a silently dead/partitioned socket is detected
-LISTEN_RETRY_S = 2  # backoff between reconnect attempts while the DB is unreachable
+LISTEN_HEALTH_S = 30
+LISTEN_RETRY_S = 2
 _LISTEN_ERRORS = (OSError, asyncpg.PostgresError, asyncpg.InterfaceError)
 
 
 async def _listen(queue: asyncio.Queue[int]) -> None:
-    # own the embed LISTEN connection: reconnect on drop and re-sweep pending_libraries on every (re)connect, so a PG
-    # restart/blip can't silently strand finalization. the periodic SELECT surfaces a dead socket the driver hasn't
-    # noticed yet; catch-up recovers any NOTIFY missed during the gap.
     while True:
         try:
             conn = await asyncpg.connect(get_settings().pg_dsn)
@@ -92,10 +83,6 @@ async def _listen(queue: asyncio.Queue[int]) -> None:
 
 
 def _fatal_on_worker_death(task: asyncio.Task[None]) -> None:
-    # these workers must never die silently. asyncio parks a detached task's exception (never retrieved), which is
-    # exactly how the embed failure hid for hours. instead: the moment one ends for any reason other than shutdown
-    # cancellation, log the full traceback and SIGTERM ourselves — the process exits loudly instead of serving on with
-    # finalization dead. a supervisor (or your dev restart) then re-hits the real error until it is actually fixed.
     if task.cancelled():
         return
     exc = task.exception()

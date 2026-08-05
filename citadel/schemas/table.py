@@ -23,17 +23,15 @@ class Column(BaseModel):
 
 class KeyColumn(BaseModel):
     name: str
-    col: int  # grid column index of a row-key column, carried through the unpivot unchanged
+    col: int
 
 
 class Dimension(BaseModel):
     name: str
-    header_row: int  # the header row whose cells label each value column with this dimension's value
+    header_row: int
 
 
 class Crosstab(BaseModel):
-    # a matrix: value_col_start..value_col_end hold one measure, labelled by the dimension header rows; the key columns
-    # identify the row. unpivoting emits one output row per non-empty value cell: key values + dimension values + cell
     key_columns: list[KeyColumn]
     dimensions: list[Dimension]
     value_name: str
@@ -43,14 +41,14 @@ class Crosstab(BaseModel):
 
 class TableStructure(BaseModel):
     layout: Literal["relational", "crosstab"] = "relational"
-    transposed: bool = False  # the model judged fields run DOWN column 0, one record per following column
+    transposed: bool = False
     col_start: int
     col_end: int
     header_rows: list[int] | None = None
     data_start: int
     data_end: int
-    columns: list[str] | None = None  # SLM-resolved column names (relational); None → derive from header_rows
-    section_rows: list[int] | None = None  # data-band rows the model marked as section labels (grouping dividers)
+    columns: list[str] | None = None
+    section_rows: list[int] | None = None
     crosstab: Crosstab | None = None
     title: str | None = None
     caption: str | None = None

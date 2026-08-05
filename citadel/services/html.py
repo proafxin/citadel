@@ -66,8 +66,6 @@ def _li_text(item: Tag) -> str:
 
 
 def _walk_list(element: Tag, depth: int, blocks: list[Block]) -> None:
-    # explicit stack so arbitrarily deep list nesting can't hit the recursion limit. each frame is (li iterator, depth);
-    # a nested list is pushed the moment its parent <li> is emitted, so items still come out in document (pre-order).
     stack: list[tuple[Iterator[Tag], int]] = [(iter(element.find_all("li", recursive=False)), depth)]
     while stack:
         iterator, level = stack[-1]
@@ -119,8 +117,6 @@ def _latex(element: Tag) -> str:
 
 
 def _walk(element: Tag, blocks: list[Block]) -> None:
-    # explicit stack instead of recursion so arbitrarily deep container nesting (e.g. thousands of <div>) can never hit
-    # Python's recursion limit. each frame carries its own inline-text buffer, flushed when the frame is exhausted.
     stack: list[tuple[Iterator[object], list[str]]] = [(iter(element.children), [])]
     while stack:
         iterator, buffer = stack[-1]

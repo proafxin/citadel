@@ -146,8 +146,6 @@ def _capture_merges(worksheet: Worksheet) -> list[MergedRange]:
 
 
 def _capture_tables(worksheet: Worksheet) -> list[SheetTable]:
-    # a ListObject is an AUTHORITATIVE table: excel stores its exact range and header row count. hidden under
-    # read_only, but load_all_sheets does full loads so it is here for free. these override the region heuristic
     tables: list[SheetTable] = []
     for table in worksheet.tables.values():
         min_col, min_row, max_col, max_row = range_boundaries(table.ref)
@@ -164,9 +162,6 @@ def _capture_tables(worksheet: Worksheet) -> list[SheetTable]:
 
 
 def _capture_pivots(worksheet: Worksheet) -> list[SheetPivot]:
-    # a pivot table is a DERIVED aggregate. when its source is a range in this workbook, that source is extracted on its
-    # own as a grounded table, so the rendered aggregate is suppressed rather than stored a second time. a pivot with an
-    # external source (or a named source we cannot resolve to a sheet) is left alone — its data lives nowhere else here
     names = set(worksheet.parent.sheetnames)
     pivots: list[SheetPivot] = []
     for pivot in worksheet._pivots:
@@ -197,13 +192,10 @@ def sheet_names(data: bytes) -> list[str]:
     try:
         return workbook.sheetnames
     finally:
-        workbook.close()  # read_only mode holds the archive open until closed
+        workbook.close()
 
 
 def load_all_sheets(data: bytes) -> list[SheetExtraction]:
-    # two loads: data_only=True yields cached values but no formulas, data_only=False yields formulas but no values.
-    # openpyxl offers no mode that gives both, and a generated workbook has NO cached values at all — reading only the
-    # values load silently skips every formula cell. callers cache the result per document and index by sheet_no.
     values_workbook = openpyxl.load_workbook(BytesIO(data), data_only=True)
     formulas_workbook = openpyxl.load_workbook(BytesIO(data), data_only=False)
     try:
@@ -263,13 +255,6 @@ def _is_note_like(text: str) -> bool:
 
 
 def _title_hint_rows(region: Region) -> list[int]:
-    # a lone bold cell with the rest of its row empty is a common, deliberate spreadsheet convention for a section
-    # title or label ("Calculated Values:") — a real signal from the source format, not a guess, the same kind of
-    # thing the header hint already carries for markup/PDF tables. a lone cell shaped like a note — wrapped in
-    # parentheses, or led by a footnote marker — carries the same convention through its own text instead of
-    # formatting, so it counts even without bold. `region.cells` already excludes empty cells and is already scoped
-    # to the region's own column span, so a row with exactly one populated cell here has no other content anywhere
-    # in the region's width. flagged here, not decided: the model still makes the call
     by_row: dict[int, list[Cell]] = {}
     for cell in region.cells:
         by_row.setdefault(cell.row, []).append(cell)
@@ -294,8 +279,6 @@ def _formula_shape(formula: str) -> str:
 
 
 def region_formulas(region: Region) -> list[str]:
-    # a column is ONE formula pattern repeated down its rows with shifted refs, so "=B2*C2" and "=B3*C3" are the same
-    # fact. dedupe on the row-stripped shape and keep the first real formula per shape: N rows collapse to one entry
     ordered = sorted(region.cells, key=lambda cell: (cell.row, cell.col))
     by_shape: dict[str, str] = {}
     for cell in ordered:
@@ -315,8 +298,6 @@ def _anchor_range(region: Region, structure: TableStructure) -> dict:
 
 
 def _region_bounds(region: Region) -> dict:
-    # a transposed region's structure offsets are on the flipped grid, so they no longer map back to sheet rows/cols —
-    # anchor to the region rectangle, which is the same regardless of orientation
     return {
         "min_row": region.min_row,
         "min_col": region.min_col,
@@ -334,9 +315,6 @@ def _render_cell(value: RawCellValue) -> str:
 
 
 def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
-    # the region as a dense string grid for the header model: merged cells are filled (top-left value spans the whole
-    # merge) and every typed value rendered to text, so a merged / multi-row header reads like a normal grid. offsets
-    # are region-relative (row 0 = region.min_row) to line up with structure_grid and materialize
     values = {(cell.row, cell.col): cell_value(cell) for cell in region.cells}
     for merge in sheet.merges:
         if merge.max_row < region.min_row or merge.min_row > region.max_row:
@@ -356,7 +334,6 @@ def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
 
 
 def _pivot_covers(region: Region, pivots: list[SheetPivot]) -> bool:
-    # the rendered aggregate occupies the pivot's location; a region overlapping it IS that aggregate
     return any(
         region.min_row <= pivot.max_row
         and region.max_row >= pivot.min_row
@@ -367,9 +344,6 @@ def _pivot_covers(region: Region, pivots: list[SheetPivot]) -> bool:
 
 
 async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, SheetItem]]:
-    # find the regions, turn every table region into a row/column candidate, and hand ALL of them to ONE structure call:
-    # the model reads the whole sheet at once and decides table boundaries, splits and merges itself. non-table regions
-    # resolve to text here. nothing about table structure is decided in this code
     text: list[SheetItem] = []
     grids: list[list[list[str]]] = []
     title_hints: list[list[int]] = []

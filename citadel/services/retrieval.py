@@ -25,21 +25,11 @@ logger = logging.getLogger(__name__)
 
 EMBED_TTL = 86_400
 
-EMBED_VRAM_HEADROOM = 0.7  # of what is actually free — the floor, so a genuinely full card still yields a safe batch
-EMBED_VRAM_CAP = 2 * 1024**3  # ...but never more than this, whatever is lying around. the batch used to be sized on
-# free VRAM ALONE, which made this process's memory a function of everyone else's: shrink a co-located model's
-# reservation and the embedder helps itself to the difference, takes a bigger batch, and OOMs — the one time we freed
-# VRAM on purpose is the time it broke. capping it bounds this process no matter how empty the card looks, and leaves
-# the rest genuinely spendable on the models that need it. it costs only embedding wall time, a one-off pass that is
-# never the bottleneck
+EMBED_VRAM_HEADROOM = 0.7
+EMBED_VRAM_CAP = 2 * 1024**3
 MODEL_MAX_TOKENS = 8192
-BYTES_PER_TOKEN = 21_750  # activations: linear in tokens, so batch x longest bounds them
-MASK_BYTES_PER_TOKEN = 2  # the attention mask is NOT linear. transformers materializes it as (batch, 1, L, L) to hand
-# to sdpa, in the model's bf16 — one element per token PER key — so it costs 2 x longest bytes per token, i.e. it grows
-# with the SQUARE of sequence length. at longest=917 that is 2KB a token against 21.75KB of activations and it hides
-# inside the linear fit; at longest=8192 it is 16KB a token and dominates. sizing a batch on tokens alone therefore
-# reads the same for a group of short nodes and a group of long ones, and OOMs on the long one: 31 x 8192^2 x 2 =
-# 3.88GiB, which is exactly the allocation that failed
+BYTES_PER_TOKEN = 21_750
+MASK_BYTES_PER_TOKEN = 2
 UPSERT_COLS = 4
 UPSERT_CHUNK = 32767 // UPSERT_COLS
 
@@ -53,18 +43,14 @@ def available_vram() -> int:
 
 
 def bytes_per_token(longest: int) -> int:
-    # what ONE padded token of a batch actually costs: its activations, plus its row of the (L x L) attention mask
     return BYTES_PER_TOKEN + MASK_BYTES_PER_TOKEN * longest
 
 
 def vram_budget() -> int:
-    # the smaller of what is free and what we are willing to spend. free-VRAM alone is what OOM'd this (EMBED_VRAM_CAP)
     return min(int(EMBED_VRAM_HEADROOM * available_vram()), EMBED_VRAM_CAP)
 
 
 def token_budget() -> int:
-    # how many tokens a group may pack. priced at the model's longest possible node, since a group is packed before its
-    # longest is known and a single long node would otherwise blow the batch it lands in
     return max(MODEL_MAX_TOKENS, vram_budget() // bytes_per_token(MODEL_MAX_TOKENS))
 
 
@@ -105,9 +91,8 @@ class TableCand:
     columns: list[dict]
     metadata: dict
     sample_rows: list[list]
-    header_rows: list[int]  # row_idx values in table_rows that are header, not data — the query projection skips them
-    page_no: int | None  # where a table inside a document sits. a spreadsheet locates by sheet instead, a csv by
-    # nothing at all — the file is the table — so this is the document-only half of a table's identity
+    header_rows: list[int]
+    page_no: int | None
 
 
 @dataclass
@@ -119,8 +104,6 @@ class _PendingNode:
 
 
 async def _pending_nodes(library_id: int) -> list[_PendingNode]:
-    # content-bearing nodes in this library with no embeddings row yet → a resumed run just re-selects the un-embedded
-    # ones (anti-join, replacing the old embedding-IS-NULL-on-content trick now that embeddings live in their own table)
     async with get_sessionmaker()() as session:
         rows = await session.execute(
             select(ContentNode.id, ContentNode.search_text, ContentNode.type, ContentNode.token_count)
@@ -155,7 +138,7 @@ def _take_group(nodes: list[_PendingNode], start: int, budget: int) -> tuple[int
 
 
 async def _encode_group(library_id: int, batch: list[_PendingNode], longest: int) -> list[dict[str, object]]:
-    vectors = await _embed([node.search_text for node in batch], longest)  # GPU work outside any open transaction
+    vectors = await _embed([node.search_text for node in batch], longest)
     return [
         {"content_id": node.content_id, "library_id": library_id, "type": node.node_type, "embedding": vector}
         for node, vector in zip(batch, vectors, strict=True)
@@ -163,10 +146,6 @@ async def _encode_group(library_id: int, batch: list[_PendingNode], longest: int
 
 
 async def _write_group(records: list[dict[str, object]], label: str) -> None:
-    # runs CONCURRENTLY with the next group's encode. the two contend for nothing — this is postgres I/O, that is the
-    # GPU — and the write is half of finalize, so leaving it on the critical path idles the card for its whole
-    # duration. deferring the writes to the end instead would save nothing: the cost is ~1ms PER ROW of hnsw graph
-    # maintenance, flat across group sizes, so it is paid whenever it happens. only overlap removes it from the clock
     write_t = time.time()
     async with get_sessionmaker()() as session, session.begin():
         for chunk in _upsert_chunks(records, UPSERT_CHUNK):
@@ -191,13 +170,6 @@ async def embed_library(library_id: int) -> int:
     await redis.hset(f"embed:{library_id}", "t_start", time.time())
     await redis.expire(f"embed:{library_id}", EMBED_TTL)
     pending = await _pending_nodes(library_id)
-    # sort by length so every group is HOMOGENEOUS, which is what makes the memory estimate exact rather than merely
-    # safe. sentence-transformers sorts each call internally and pads every mini-batch to ITS OWN max, so in a group
-    # spanning 62..8192 tokens the group's `longest` is not the width any mini-batch actually runs at: we price them all
-    # at the ceiling and are still wrong, over-reserving for the short ones and under-reserving for the worst one
-    # (measured act 6695MiB against a 5548MiB budget — survived only on the 0.7 headroom). when every node in a group is
-    # the same length, `longest` IS each mini-batch's padded width, the estimate becomes arithmetic, and no padding is
-    # wasted. embed order is irrelevant — rows are upserted by content_id
     pending.sort(key=lambda node: node.token_len)
     total = len(pending)
     logger.info("embed library=%d nodes=%d", library_id, total)
@@ -212,7 +184,7 @@ async def embed_library(library_id: int) -> int:
         label = f"lib{library_id}.g{group_no}"
         records = await _encode_group(library_id, pending[index:end], longest)
         if writing is not None:
-            await writing  # one open transaction at a time, and a failed write raises here rather than being lost
+            await writing
         writing = asyncio.create_task(_write_group(records, label))
         group_rows = end - index
         embedded += group_rows
@@ -231,7 +203,7 @@ async def embed_library(library_id: int) -> int:
             rate,
         )
     if writing is not None:
-        await writing  # the last group's write must land before any document is marked embedded
+        await writing
     await _mark_documents_embedded(library_id)
     await redis.hset(f"embed:{library_id}", mapping={"t_done": time.time(), "nodes": embedded})
     return embedded
@@ -265,8 +237,6 @@ def _table_cand(table: Table, filename: str, page_no: int | None) -> TableCand:
 
 
 async def load_all_tables(library_id: int) -> list[TableCand]:
-    # the table channel sees every table in the library — schema + samples + row count — and writes the queries.
-    # relevance is decided constructively by which tables the queries reference
     async with get_sessionmaker()() as session:
         rows = list(
             await session.execute(
@@ -281,9 +251,6 @@ async def load_all_tables(library_id: int) -> list[TableCand]:
 
 
 async def scope_block_ids(ranges: list[tuple[int, int, int]]) -> list[int]:
-    # content ids of the blocks under the selected batches, addressed by (document_id, block_ordinal range). table
-    # nodes are INCLUDED: a tabular document's content is its tables, rendered as schema + samples, and it must
-    # contribute to the answer exactly as a text document's prose does — the same content the batch already counted
     if not ranges:
         return []
     clauses = [
@@ -321,7 +288,7 @@ async def load_block_texts(content_ids: list[int]) -> dict[int, BlockText]:
         )
     out: dict[int, BlockText] = {}
     for node, filename in nodes:
-        body = render_block(node, tables.get(node.id))  # prose renders its raw; a table renders schema + samples
+        body = render_block(node, tables.get(node.id))
         if body.strip():
             page = f" p{node.page_no}" if node.page_no else ""
             out[node.id] = BlockText(node.id, node.document_id, node.block_ordinal or 0, f"[{filename}{page}] {body}")
@@ -351,9 +318,6 @@ class DocRef:
 
 
 async def load_library_documents(library_id: int) -> list[DocRef]:
-    # every document in the library by its own summary — the document half of the inventory a question is resolved
-    # against. content_tokens is the document's full size, summed from its batches, so whether its blocks can be
-    # afforded is known before any of them are loaded
     async with get_sessionmaker()() as session:
         rows = list(
             await session.execute(
@@ -378,8 +342,6 @@ async def load_library_name(library_id: int) -> str:
 
 
 async def load_library_batches(library_id: int) -> list[BatchRef]:
-    # every batch summary in the library, in a stable order (document, then batch). this is the text channel's whole
-    # input — the corpus in its compressed form
     async with get_sessionmaker()() as session:
         rows = list(
             await session.execute(

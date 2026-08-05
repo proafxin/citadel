@@ -5,10 +5,6 @@ from citadel.schemas.content import Block
 from citadel.schemas.tree import ContentBlock
 from citadel.services.grid import is_math_text
 
-# the block types are the detector's own 25 classes, kept as it labels them rather than flattened into something
-# coarser — it separates a document title from a section title, a displayed formula from an inline one, a figure
-# caption from body text, and every one of those distinctions is information we would otherwise throw away.
-# this maps each to the KIND of leaf it becomes; anything unlisted is prose.
 _KIND_BY_TYPE = {
     "paragraph_title": "heading",
     "reference": "heading",
@@ -21,26 +17,21 @@ _LIST_MARKER = re.compile(r"^\s*(?:[●○•▪◦‣·*]\s|[-–—]\s|\(?\d{1
 _BULLET_GLYPH = re.compile(r"^\s*[●○•▪◦‣·*\-–—]\s+")
 _HEADING_SPLIT = re.compile(r'(?<=["”:.?)])\s*\n\s*')
 
-# page furniture: it recurs on every page and belongs to the page, not to the document. `number` is the detector's
-# label for a page number. a `footnote` is NOT furniture — on the math book the footnotes carry real mathematics
 PARATEXT_TYPES = {"header", "footer", "number", "aside_text", "header_image", "footer_image"}
 PAGE_NUMBER_TYPES = {"number"}
 EMPTY_IMAGE_TYPES = {"image", "header_image", "footer_image", "seal", "chart"}
 
-MIN_PARATEXT_PAGES = 2  # paratext RECURS: a running header appears on many pages, a mis-typed body block appears once
+MIN_PARATEXT_PAGES = 2
 _DIGITS = re.compile(r"\d+")
 _WHITESPACE = re.compile(r"\s+")
 
 
-MIN_LOOP_SEGMENT = 40  # chars; below this, repetition is legitimate (a bullet glyph, a short label, an axis tick)
-MIN_LOOP_REPEATS = 3  # a real block never emits the SAME 40+ char segment this many times — that is a VLM output loop
+MIN_LOOP_SEGMENT = 40
+MIN_LOOP_REPEATS = 3
 _SEGMENT_SPLIT = re.compile(r"\\\\|\n")
 
 
 def collapse_loops(text: str) -> str:
-    # a VLM that loses coherence (rotated spread, dense math) emits the same segment over and over until it hits its
-    # token limit. keep the FIRST occurrence of each repeated long segment and drop the copies: the distinct content
-    # survives in place, and a 25k-char loop collapses to what was actually read. never drops a one-off segment.
     segments = _SEGMENT_SPLIT.split(text)
     counts: dict[str, int] = {}
     for segment in segments:
@@ -63,7 +54,6 @@ def collapse_loops(text: str) -> str:
 
 
 def paratext_key(text: str) -> str:
-    # page numbers vary per page, so strip digits: "Chapter 3 ... 14" and "Chapter 3 ... 15" are the SAME running header
     return _WHITESPACE.sub(" ", _DIGITS.sub("", text)).strip().lower()
 
 
@@ -79,18 +69,13 @@ def _recurring_paratext(blocks: list[Block]) -> set[str]:
 
 
 def _rescued_type(text: str) -> str:
-    # a block mis-typed as header/footer is content: keep it in the tree, and if it is mathematics type it as such so it
-    # lands as an equation node in its proper place rather than being smeared into every other node's search text
     return "equation" if is_math_text(text) else "text"
 
 
 def split_paratext(blocks: list[Block]) -> tuple[list[Block], list[str]]:
-    # MinerU types a block per page and cannot see recurrence; we hold the whole document. so its paratext label is a
-    # HYPOTHESIS: accept it only when the text actually repeats across pages. a one-off block it called a header is
-    # content it mis-typed (a displayed formula near the page edge) — rescue it into the tree at its own position.
     recurring = _recurring_paratext(blocks)
     content: list[Block] = []
-    paratext: dict[str, str] = {}  # recurrence key -> first raw text, so a header is recorded ONCE, not once per page
+    paratext: dict[str, str] = {}
     for block in blocks:
         text = (block.text or "").strip()
         if block.type in PARATEXT_TYPES:
@@ -183,7 +168,6 @@ def _list_block(
 
 
 def _push_heading(block: Block, stack: list[tuple[int, str]]) -> None:
-    # a heading is not content: it sets the section every following block belongs to and is never stored on its own
     for piece in split_heading(block.text or ""):
         _push(stack, block.text_level or 1, piece)
 
@@ -265,14 +249,11 @@ def _leaf_text(block: ContentBlock) -> str:
     if block.kind == "equation":
         return block.latex or ""
     if block.kind == "list":
-        # the item's position is content: "the second item" is only answerable if the ordinal survives flattening
         return " ".join(f"{int(item.get('ordinal', 0)) + 1}. {item.get('content', '')}" for item in block.items or [])
     return block.text or ""
 
 
 def build_raw(block: ContentBlock) -> dict | None:
-    # the block's own content in its source shape — what markdown is rebuilt from. a table's cells are NOT here: they
-    # live in table_rows because they are queried by SQL
     match block.kind:
         case "equation":
             return {"latex": block.latex or ""}
@@ -315,15 +296,10 @@ def build_table_search_text(
     return "\n".join(part for part in parts if part)
 
 
-EQUATION_CONTEXT_BACK = 3  # blocks to look back for the sentence that introduces an equation
+EQUATION_CONTEXT_BACK = 3
 
 
 def _introducing_prose(blocks: list[ContentBlock], index: int) -> str:
-    # an equation is unsearchable on its own. LaTeX has no natural-language surface: nobody asks a question in
-    # \sum_{n=1}^{\infty}, they ask for "the sum of the reciprocals of the squares" — and those words are sitting in the
-    # prose that INTRODUCES the equation, one or two blocks above it ("Theorem 3.1 states that..."). that sentence is
-    # already in the tree; it was simply never part of the equation's own search text. same page only: a sentence from
-    # the previous page is not introducing anything.
     page = blocks[index].page_no
     for block in reversed(blocks[max(index - EQUATION_CONTEXT_BACK, 0) : index]):
         if block.page_no != page:
@@ -334,11 +310,9 @@ def _introducing_prose(blocks: list[ContentBlock], index: int) -> str:
 
 
 def build_search_text(blocks: list[ContentBlock], library_name: str, filename: str) -> dict[int, str]:
-    # paratext is DELIBERATELY absent: a running header repeated into every node's search text makes every embedding on
-    # the page share an identical block of tokens, which destroys discrimination. it lives in document metadata instead.
     result: dict[int, str] = {}
     for index, block in enumerate(blocks):
-        if block.kind == "table":  # a table's search text is built from its schema, not its cells
+        if block.kind == "table":
             continue
         context = _introducing_prose(blocks, index) if block.kind == "equation" else ""
         parts = [

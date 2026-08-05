@@ -12,8 +12,8 @@ from citadel.tabular.materialize import MaterializedTable, materialize
 
 logger = logging.getLogger(__name__)
 
-_MAX_CELL = 40  # a shown cell is truncated here — the model needs the shape and the label, not a whole paragraph
-_MIN_SEQUENCE_RUN = 3  # below this, any two numbers trivially "form a sequence" by definition — not a real signal
+_MAX_CELL = 40
+_MIN_SEQUENCE_RUN = 3
 
 
 def _row_line(index: int, row: list[str], width: int) -> str:
@@ -41,7 +41,7 @@ def _crosstab(table: dict, width: int) -> Crosstab | None:
     ]
     start = max(0, min(int(spec.get("value_col_start", 0)), width - 1))
     end = max(start, min(int(spec.get("value_col_end", width - 1)), width - 1))
-    if not dims:  # a crosstab with no dimensions is just a relational table the model mislabelled
+    if not dims:
         return None
     return Crosstab(
         key_columns=keys,
@@ -53,9 +53,6 @@ def _crosstab(table: dict, width: int) -> Crosstab | None:
 
 
 def stack_candidates(grids: list[list[list[str]]]) -> list[list[str]]:
-    # every candidate table — from any file type — is a row/column table. stacking them into one, padded to the widest,
-    # is the single input this stage sees: the model reads all of them at once and re-derives table boundaries from the
-    # rows themselves, so a table split across regions or pages comes back as continuous rows under one header
     width = max((len(row) for grid in grids for row in grid), default=0)
     return [[row[index] if index < len(row) else "" for index in range(width)] for grid in grids for row in grid]
 
@@ -71,10 +68,6 @@ def _numeric_value(cell: str) -> float | None:
 
 
 def _sequence_hint_rows(grid: list[list[str]], width: int) -> list[int]:
-    # a run of adjacent cells stepping by a constant difference (1, 2, 3, 4 or 1990, 1991, 1992, ...) is how a wide
-    # table spells out a dimension across columns instead of naming it once — years, indices, buckets. the row
-    # holding it is a header for that dimension (see crosstab, in the prompt), not a data row, even though every one
-    # of its cells is a plain number and would otherwise read exactly like the data beneath it
     hints: list[int] = []
     for row_index, row in enumerate(grid):
         longest = run_length = 0
@@ -124,7 +117,6 @@ def _candidate_text(
 
 
 def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
-    # one table the model reported, over its (possibly merged) grid. no boundaries decided here — the model gave them
     height = len(grid)
     width = max((len(row) for row in grid), default=0)
     col_start = max(0, min(int(spec.get("col_start", 0)), max(width - 1, 0)))
@@ -145,10 +137,6 @@ def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
     title = spec.get("title") or None
     data_start = (max(header_rows) + 1) if header_rows else 0
     if title and data_start == 0 and 0 not in header_rows:
-        # a title names the whole table and is never one of its rows, so it is excluded from data the same way a
-        # header row is — even for a label-value block, where header_rows stays empty by design (the carve-out
-        # above) and `title` is what signals the exclusion instead. its own row is taken to be row 0 of the block,
-        # the same place a lone label naming the whole block is expected to sit everywhere else in this stage
         data_start = 1
     data_end = max(data_start, min(int(spec.get("row_end", height - 1)), max(height - 1, 0)))
     columns = ([str(name) for name in spec.get("columns", [])] or None) if header_rows else None
@@ -180,11 +168,6 @@ def _contained(inner: TableStructure, outer: TableStructure) -> bool:
 
 
 def _index_comparable(blocks_i: list[int], blocks_j: list[int]) -> bool:
-    # data_start/data_end are row indices into the grid stack_candidates builds by concatenating these blocks IN
-    # ORDER — comparable between two specs only when one block list is a leading prefix of the other, so index 0
-    # means the same physical starting row for both (an identical list is trivially a prefix of itself, so this
-    # covers the same-block case too). any other pairing stacks a different set of rows in a different order, and
-    # their indices mean nothing next to each other
     shorter, longer = (blocks_i, blocks_j) if len(blocks_i) <= len(blocks_j) else (blocks_j, blocks_i)
     return longer[: len(shorter)] == shorter
 
@@ -192,11 +175,6 @@ def _index_comparable(blocks_i: list[int], blocks_j: list[int]) -> bool:
 def _drop_contained_specs(
     prepared: list[tuple[list[int], list[list[str]], TableStructure]],
 ) -> list[tuple[list[int], list[list[str]], TableStructure]]:
-    # two specs can share rows without the model coordinating their ranges against each other — nothing upstream
-    # re-checks it, and this is not limited to specs sharing the identical block list: a spec covering just the
-    # block a bigger spec starts with claims the same rows just as much as an exact block match would. a range
-    # strictly inside another one, from block lists whose indices are comparable, is the same rows claimed twice;
-    # keep the larger, more complete table and drop the one it subsumes
     dropped: set[int] = set()
     for i, (blocks_i, _, structure_i) in enumerate(prepared):
         for j, (blocks_j, _, structure_j) in enumerate(prepared):
@@ -214,16 +192,6 @@ async def structure_tables(
     title_hints: list[list[int]] | None = None,
     label: str = "",
 ) -> list[tuple[MaterializedTable, list[int]]]:
-    # THE unified stage — one call per document/sheet, for candidate tables from ANY source. the model sees every
-    # candidate labelled, returns the real tables (dropping non-tables) with each table's source candidate INDEX(es) —
-    # several = one table split apart, which we concatenate; one block claimed by several tables = one block holding
-    # several tables stacked by row, bounded by row_end — and its structure. returns each table with its source
-    # candidate indices so the caller can place it (e.g. under its first block). no structure decided in code.
-    # header_hints, when given, is one row-index list per candidate: rows the SOURCE format already marked as a
-    # header (a table's own <th>/OTSL <ched> row) — a real signal, not a guess, so it rides along as a hint rather
-    # than being decided here; the model still makes the call, same as everything else in this stage. title_hints is
-    # the same idea for a lone bold, otherwise-empty row — a source-format signal a row is a title/section label.
-    # label, when given, identifies the caller in the summary log line only — it plays no role in structuring
     if not candidates:
         return []
     started = time.perf_counter()

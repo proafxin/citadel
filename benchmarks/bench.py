@@ -1,13 +1,3 @@
-# Benchmark: Citadel pipeline vs stock mineru on the same docs — speed + quality (parity) diff.
-# mineru and the openai-server share one GPU, so run the phases in order, not at once:
-#   1) Citadel stack up (worker + orchestrator + mineru-openai-server):
-#        uv run python benchmarks/bench.py citadel <docs_dir>
-#      → fires the whole set concurrently at /ingest, times it, saves outputs to benchmarks/out/citadel/
-#   2) free the GPU (stop the openai-server) and run stock mineru on the SAME dir, timed:
-#        time mineru -p <docs_dir> -o benchmarks/out/mineru        # adjust to your mineru invocation
-#      → note its wall-clock; pages/sec = total_pages / that time
-#   3) compare quality (how close are we to stock mineru = the parity number):
-#        uv run python benchmarks/bench.py compare
 import argparse
 import asyncio
 import difflib
@@ -63,7 +53,6 @@ def _key(name: str) -> str:
 
 
 def compare(citadel_dir: str, mineru_dir: str) -> None:
-    # SequenceMatcher ratio = how similar our text is to stock mineru's; ~1.0 means parity (same model, same output)
     citadel = {
         _key(p.stem): tree.render_markdown(DocumentTree.model_validate_json(p.read_text()))
         for p in Path(citadel_dir).glob("*.json")

@@ -9,8 +9,6 @@ from citadel.models.content import EMBED_DIM
 class Embedding(Base):
     __tablename__ = "embeddings"
 
-    # the HNSW index is DECLARED here, not only in a migration: autogenerate cannot see a hand-written index, so a
-    # squashed/regenerated revision silently omits it (and a later autogenerate emits a drop_index for it)
     __table_args__ = (
         Index(
             "ix_embeddings_embedding_hnsw",

@@ -12,12 +12,6 @@ from citadel.tabular.materialize import MaterializedTable, materialize
 
 
 def read_csv_grid(data: bytes, separator: str) -> list[list[str]]:
-    # polars does the parsing — quoting, embedded newlines, ragged lines — and with has_header=True it also SKIPS any
-    # leading blank lines and names the columns from the first non-empty row. has_header=False cannot: it takes the
-    # column count from the literal first line, so one leading blank line collapses the file to a single column and
-    # truncate_ragged_lines then discards the rest of every row. the names come back as the grid's row 0, so the header
-    # is data like any other cell. every column stays Utf8 (infer_schema_length=0) so values are exact — dtypes are
-    # derived downstream by lossless round-trip, never by polars inference, and "007" stays the string "007"
     frame = pl.read_csv(
         BytesIO(data), separator=separator, has_header=True, infer_schema_length=0, truncate_ragged_lines=True
     )
@@ -26,8 +20,6 @@ def read_csv_grid(data: bytes, separator: str) -> list[list[str]]:
 
 
 def _table_rows(table: Tag) -> list[Tag]:
-    # the table's OWN rows only — direct <tr> plus <tr> inside a direct thead/tbody/tfoot. a <table> nested inside a
-    # <td> has its rows deeper, so recursive=False never reaches them → no phantom rows bleeding into the outer grid
     rows: list[Tag] = []
     for child in table.find_all(["tr", "thead", "tbody", "tfoot"], recursive=False):
         if child.name == "tr":
@@ -37,8 +29,8 @@ def _table_rows(table: Tag) -> list[Tag]:
     return rows
 
 
-GRID_MAX_SPAN = 1000  # a single cell's row/col span is clamped here; real headers span a handful, only bombs span more
-GRID_MAX_CELLS = 5_000_000  # hard ceiling on a materialized grid so a hallucinated/oversized span can't OOM the merge
+GRID_MAX_SPAN = 1000
+GRID_MAX_CELLS = 5_000_000
 
 
 def _place_span(
@@ -52,9 +44,6 @@ def _place_span(
 def _blank_full_width_titles(
     occupied: dict[tuple[int, int], str], row_spans: list[tuple[int, int]], width: int
 ) -> None:
-    # a cell spanning the table's FULL width is a title/banner, not a repeated column header — a genuine multi-level
-    # header's top label spans only PART of the width, and that duplication is needed downstream to combine with its
-    # sub-header, so only a full-width span is collapsed to its first cell here
     for row_idx, colspan in row_spans:
         if colspan >= width:
             for col in range(1, width):
@@ -63,11 +52,8 @@ def _blank_full_width_titles(
 
 def _grid(table: Tag) -> tuple[list[list[str]], list[int]]:
     occupied: dict[tuple[int, int], str] = {}
-    row_spans: list[tuple[int, int]] = []  # (row_idx, colspan) for a spanning cell — a title's colspan can only be
-    # judged against the table's total width, which isn't known until every row is walked
-    header_rows: list[int] = []  # a row is a header when the SOURCE already said so — every one of its cells came in
-    # as <th> (paddle.py emits a whole OTSL <ched> row this way; native HTML sources mark it the same way). this is a
-    # signal already computed upstream, carried through rather than thrown away and re-guessed later
+    row_spans: list[tuple[int, int]] = []
+    header_rows: list[int] = []
     width = 0
     height = 0
     for row_idx, tr in enumerate(_table_rows(table)):
@@ -104,9 +90,6 @@ def grid_from_html(html: str) -> tuple[list[list[str]], list[int]]:
 
 
 def single_table_structure(grid: list[list[str]], header_rows: int) -> TableStructure:
-    # the whole grid IS the table: one schema, its header on top. no model decides this — it is the definition of the
-    # format. only a raw spreadsheet cell grid, where tables can start anywhere and there may be several, is ambiguous
-    # enough to need the model
     return TableStructure(
         col_start=0,
         col_end=max(len(row) for row in grid) - 1,
@@ -117,8 +100,6 @@ def single_table_structure(grid: list[list[str]], header_rows: int) -> TableStru
 
 
 async def structure_csv_tables(data: bytes, separator: str) -> list[MaterializedTable]:
-    # a csv/tsv carries ONE schema by construction: polars parses it (quoting, embedded newlines, ragged lines) and the
-    # first row names the columns. no structure call, and no model at all
     grid = await asyncio.to_thread(read_csv_grid, data, separator)
     if not grid:
         return []
@@ -181,8 +162,6 @@ def _entity_grid(rows: list[dict]) -> list[list[str]]:
 
 
 def extract_json_tables(data: bytes, root: str) -> list[tuple[int, MaterializedTable]]:
-    # normalized into relations first (nested objects flattened, nested lists become child entities with a foreign key),
-    # so every entity is one table whose keys ARE its schema — deterministic, no structure call
     entities = normalize_json(json.loads(data), root)
     out: list[tuple[int, MaterializedTable]] = []
     for name, rows in entities.items():

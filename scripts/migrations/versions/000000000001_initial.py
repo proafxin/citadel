@@ -1,10 +1,3 @@
-"""initial schema
-
-Revision ID: 000000000001
-Revises:
-Create Date: 2026-07-23 00:00:00.000000
-
-"""
 from typing import Sequence, Union
 
 import pgvector.sqlalchemy

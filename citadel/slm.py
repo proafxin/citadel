@@ -27,8 +27,7 @@ from config import configure_logging, get_settings
 logger = logging.getLogger(__name__)
 
 CONSUMER = "slm"
-DRAIN_COUNT = 256  # jobs claimed off a stream per read — a batch size for the READ, never a concurrency bound. what
-# may run at once is vllm's decision, taken against free KV
+DRAIN_COUNT = 256
 MAX_ATTEMPTS = 3
 BLOCK_MS = 5000
 NO_TIMEOUT = httpx.Timeout(None)
@@ -50,7 +49,6 @@ async def _emit(reply_to: str, job_id: str, kind: str, value: str) -> None:
 
 
 async def _stream_call(client: httpx.AsyncClient, url: str, payload: dict, reply_to: str, job_id: str) -> float | None:
-    # returns when the FIRST token landed: it splits the queue-plus-prefill wait (emit → here) from decode (here → done)
     first: float | None = None
     async with client.stream("POST", url, json=payload) as response:
         if response.is_error:
@@ -78,7 +76,7 @@ async def _blocking_call(
     if response.is_error:
         logger.error("provider %d job=%s body=%s", response.status_code, job_id, response.text[:2000])
     response.raise_for_status()
-    first = time.time()  # a blocking call yields the whole reply at once, so first ≈ done: no decode span to measure
+    first = time.time()
     await _emit(reply_to, job_id, CHUNK, response.json()["choices"][0]["message"]["content"])
     return first
 
@@ -129,9 +127,6 @@ async def _run_job(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
     job_id = raw[b"job_id"].decode()
     reply_to = raw[b"reply_to"].decode()
     attempt = int(raw.get(b"attempt", b"0"))
-    # ttft = emit → first token: the queue-plus-prefill wait, most of which is spent WAITING inside vllm for a KV slot
-    # (no client gate — a job is dispatched at once and then waits there). gen = first token → done: the actual decode.
-    # a slow call is one or the other and they need opposite fixes — contention vs work that is simply large
     emitted = float(raw.get(b"t_emit", b"0") or 0)
     started = time.time()
     try:
@@ -151,8 +146,6 @@ async def _run_job(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
     done = time.time()
     ttft = (first - emitted) if first and emitted else (started - emitted if emitted else 0.0)
     gen = (done - first) if first else (done - started)
-    # per-job lines are only signal for the few interactive (query) calls; the many bulk (summary) ones would just be
-    # noise at info, so they go to debug
     level = logging.INFO if stream == STREAM_SLM_INTERACTIVE else logging.DEBUG
     logger.log(level, "slm job stream=%s ttft=%.1fs gen=%.1fs", stream, ttft, gen)
     await _emit(reply_to, job_id, DONE, "")
@@ -186,10 +179,6 @@ async def _drain(stream: str) -> int:
 
 
 async def _pump() -> None:
-    # no client-side concurrency gate. every claimed job is dispatched straight at vllm, which decides what runs and
-    # what waits — by KV, which is size-aware, where a request count never could be. a semaphore here could only
-    # STARVE the scheduler: it capped qwen at `Running: 3, Waiting: 0` for a whole run. service is fcfs; interactive is
-    # merely drained first, so a query is submitted ahead of bulk work claimed in the same pass
     while True:
         if await _drain(STREAM_SLM_INTERACTIVE):
             continue

@@ -14,15 +14,10 @@ from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL
 
 logger = logging.getLogger(__name__)
 
-STRUCT_MAX_TOKENS = 4096  # structured calls emit short JSON (indices, a concise merge summary, SQL)
-STRUCTURE_MAX_TOKENS = 8192  # table structuring emits one entry per real table in the document, plus now up to
-# several entries per block when one block is split by row — STRUCT_MAX_TOKENS is sized for a single short object,
-# not an array that grows with the document's table count
-SYNTH_MAX_TOKENS = 8192  # the streamed answer; the evidence budget reserves this much of the context window for it
-SLM_MODEL_LEN = 65536  # qwen --max-model-len: prompt and completion share this one window
-# resolution is ONE call over the WHOLE library — splitting it would put the breadth judgment back inside a slice, each
-# call weighing the question against a different part of the collection. so this is not a packing budget: it is the
-# corpus size past which the design no longer holds, and it is worth saying so before the server says it
+STRUCT_MAX_TOKENS = 4096
+STRUCTURE_MAX_TOKENS = 8192
+SYNTH_MAX_TOKENS = 8192
+SLM_MODEL_LEN = 65536
 RESOLVE_BUDGET = SLM_MODEL_LEN - STRUCT_MAX_TOKENS - 2048
 
 
@@ -47,8 +42,6 @@ def _extract_json(text: str) -> str:
 
 
 def _struct_payload(prompt: str, schema: dict, max_tokens: int = STRUCT_MAX_TOKENS) -> dict:
-    # max_tokens is the HARD completion cap: overrunning it truncates the JSON mid-string and the whole reply fails to
-    # parse. a call that asks the model for a long field must raise this above what it asked for, never shrink the ask
     return {
         "model": QWEN_MODEL,
         "messages": [{"role": "user", "content": prompt}],
@@ -91,8 +84,6 @@ async def collect_slm(job_id: str) -> dict:
 
 
 def _text_payload(prompt: str, max_tokens: int) -> dict:
-    # streamed so the job runner can time the first token — separating the in-vllm queue+prefill wait from decode. the
-    # reply is collected chunk by chunk exactly as before; streaming only changes how the tokens arrive, not the result
     return {
         "model": QWEN_MODEL,
         "messages": [{"role": "user", "content": prompt}],
@@ -104,10 +95,6 @@ def _text_payload(prompt: str, max_tokens: int) -> dict:
 
 
 async def emit_text(prompt: str, max_tokens: int, interactive: bool) -> str:
-    # PLAIN TEXT, deliberately. a json schema is for output that is actually structured — indices, sql, a table's shape.
-    # a summary is ONE free-text field, and wrapping it in `{"summary": "..."}` only adds an envelope that a length cap
-    # can corrupt: hitting max_tokens mid-string leaves unterminated json, which fails to parse and takes the whole
-    # batch down with it (measured). asked as text, the same cap merely yields a shorter summary, never a failure
     return await emit(_text_payload(prompt, max_tokens), interactive)
 
 
@@ -186,8 +173,6 @@ def _structure_tables(data: dict) -> list[dict]:
 
 
 async def emit_structure_candidates(payload: str) -> str:
-    # the unified stage: `payload` lays out every block for one document, each labelled by number. the model returns the
-    # real tables — each naming its source block(s) so a split table's fragments come back as one — with structure
     prompt = f"{load_prompt('table_structure')}\n{payload}"
     return await emit_slm(prompt, _STRUCTURE_SCHEMA, interactive=False, max_tokens=STRUCTURE_MAX_TOKENS)
 
@@ -255,8 +240,6 @@ _RESOLVE_SCHEMA = {
     "required": ["documents", "tables"],
 }
 
-# deepest first: an item named twice within its own kind is taken at the deepest naming. tables have no `parts` — a
-# table is either known by what it is (metadata) or read for its values (data), never a document-shaped middle rung
 _DOC_DEPTHS = ("wording", "parts", "overview")
 _TABLE_DEPTHS = ("data", "metadata")
 
@@ -279,18 +262,10 @@ def _resolve_prompt(query: str, items: list[str], library: str) -> str:
 
 
 def resolve_prompt_tokens(query: str, items: list[str], library: str = "") -> int:
-    # exposed so a caller can size a batch of items BEFORE calling emit_resolve — the same accounting that call itself
-    # uses, so a batch built to fit this is guaranteed to fit the real call
     return count_tokens(_resolve_prompt(query, items, library))
 
 
 async def emit_resolve(query: str, items: list[str], library: str = "") -> str:
-    # one grain — every document by its summary, every table by its identity and columns — read against the question
-    # in ONE call. what comes back is which items the answer must account for and how deeply each has to be read;
-    # everything downstream executes that, and nothing downstream decides membership again. `items` here is whatever
-    # the caller packed into one call — the whole library when it fits, one batch of it otherwise (see query.resolve).
-    # split emit/collect, exactly like validate_tables below: every batch's job is queued before any reply is awaited,
-    # so batches sit on the shared stream together rather than one at a time behind the caller's own await
     prompt = _resolve_prompt(query, items, library)
     tokens = count_tokens(prompt)
     if tokens > RESOLVE_BUDGET:
@@ -342,8 +317,6 @@ def _validate_prompt(candidates: list[str]) -> str:
 
 
 async def validate_tables(candidates: list[str]) -> list[bool]:
-    # which of a document's candidate tables are real. per-candidate judgment, so an oversized candidate set splits
-    # across concurrent batches losslessly — each batch decides its own members, nothing needs cross-candidate context
     if not candidates:
         return []
     counts = await asyncio.to_thread(count_tokens_batch, candidates)
@@ -380,7 +353,7 @@ async def write_queries(query: str, tables: list[str], library: str = "") -> Que
     )
     for sql in queries:
         logger.info("  sql: %s", sql)
-    if not queries:  # every table here was resolved as needing values from its rows, so nothing asked is a real miss
+    if not queries:
         logger.warning("write_queries returned nothing raw=%s", data)
     return plan
 

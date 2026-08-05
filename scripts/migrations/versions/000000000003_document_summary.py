@@ -1,10 +1,3 @@
-"""document summary
-
-Revision ID: 000000000003
-Revises: 000000000002
-Create Date: 2026-07-24 00:00:00.000000
-
-"""
 from typing import Sequence, Union
 
 import sqlalchemy as sa

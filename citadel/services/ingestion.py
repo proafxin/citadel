@@ -94,19 +94,10 @@ logger = logging.getLogger(__name__)
 GROUP = "citadel"
 STREAM_INGEST = "ingest"
 STREAM_NORMALIZED = "normalized"
-RENDER_DOCS = "render:docs"  # documents with render jobs outstanding — the rotation the render consumer reads over.
-# render jobs are per-DOCUMENT streams, read with a share PROPORTIONAL TO REMAINING WORK. all three orderings have now
-# been measured on this corpus:
-#   FIFO            472.8s — the dominant doc's jobs sit behind everyone's, so sparse docs run alone for 70s and the
-#                            model collapses to 1-5 crops in flight while every queue reads empty
-#   round-robin     478.0s — equal share gave the critical path 1/N ~ 5%, fixing the stall and stretching that doc 27%
-#   proportional      this — both finish together, which is where makespan is minimised
-# EQUAL SHARE IS THE BUG and must never be the fallback, including on the first pass before any density is known —
-# there the weight comes from PAGE COUNT, which already ranks the dominant document first
+RENDER_DOCS = "render:docs"
 STREAM_PAGES = "pages"
-STREAM_STRUCTURE = "structure"  # ungated: prepare + route each doc as its ocr completes (no-table docs go on to merge)
-STREAM_TABLE_STRUCTURE = "table_structure"  # THE table stream: every table unit from every source — spreadsheet
-# sheets and table-bearing pdf/html documents alike — is structured here, in one stage, after ocr has drained
+STREAM_STRUCTURE = "structure"
+STREAM_TABLE_STRUCTURE = "table_structure"
 STREAM_MERGE = "merge"
 
 
@@ -115,67 +106,32 @@ def render_stream(doc_id: str) -> str:
 
 
 MAX_ATTEMPTS = 3
-DOC_TTL = 86_400  # safety expiry on doc/blocks/sheets keys: set at submit, refreshed on every recorded unit, so a doc
-# that somehow never reaches merge (and so never hits cleanup) still self-evicts instead of accumulating in Redis
-# forever. far longer than any single doc's processing, so it never evicts live state; cleanup shortens it on finish.
-RENDER_DPI = 150  # validated equal to 200 and ~26% faster
-# the RAMP, and the one place a cpu bound is worth spending: until a document is paginated the gpu has no work from it
-# AT ALL, so these are not "feeding more than enough" — they are the serialization in front of an idle model. measured:
-# 36 files through 3 slots left the 809-page book, which carries 68% of all model work, unpaginated for 10.8s of a
-# ~510s run. cpu stays deliberately under-used everywhere downstream, where supply already outruns the gpu
+DOC_TTL = 86_400
+RENDER_DPI = 150
 PAGINATE_CONCURRENCY = CPU_THIRD
 RENDER_CONCURRENCY = CPU_EIGHTH
-PDFIUM_WORKERS = 4  # every pdfium job — counting, rendering AND text-layer extraction — shares these, and the text
-# layer is the one that matters: it is awaited INSIDE the ocr path, so a page waiting for a pdfium worker is a page not
-# feeding the model. one worker was right when layout was a 20s generation and pdfium had all the time in the world;
-# with a detector doing layout in 95ms, digital pages arrive at the text layer immediately and one worker cannot keep
-# up — measured layer_wait=262s against layer_cpu=8.9s, i.e. 97% queueing. each worker stands at ~650MB, which is real,
-# but host RAM is no longer the scarce thing it was (the OCR model's 11GB and the gap-fill engines are both gone)
-RENDER_TIMEOUT = 120  # page renders in <1s; if a job strands (dead/hung pool worker) free the slot + retry the page
-PDF_POOL_MAX_TASKS = 100  # recycle a pdfium worker every N pages: a long-lived one grows to hundreds of MB and never
-# gives it back. respawn is a fork off the (lean) forkserver, so the cost is milliseconds amortised over 100 pages,
-# against a stage that is already the cheapest in the pipeline
-DETECT_WORKERS = 1  # ONE detector process. more is not just unnecessary, it is WORSE: two contend for the card and
-# measured SLOWER than one (22.5 pages/s at one, 19.5 at two, 11.7 at two under load), while each carries its own
-# cuda context and model — the second cost ~1.7GB of VRAM to make the detector slower. demand is ~4 pages/s.
-# batching is pointless too (44ms/page at batch 1, 42ms at batch 16): the cost is CPU-side, not GPU
-UNCHARGED_PAGES = 512  # pages claimed but not yet charged to the crop budget — the ONE window a page is invisible to
-# every other bound, between its claim and the detector finding its regions. it is NOT a limit on pages in flight: a
-# charged page is already counted in crops and must not be counted again. sized generously because a page sits here
-# only for a detector pass (~100ms), and because a crop-sparse document needs many pages resident to put 128 crops in
-# front of the model at all — measured 0.82 crops/page on a born-digital book against 23.5 on a scanned one, so any
-# fixed page count is right for one of them and starves the other. host RAM bounds it: ~2MB of encoded image each
-CROP_BUFFER = 12288  # crops cut and waiting on the semaphore. if it cannot cover the pages in flight they simply queue
-# HERE instead, and budget_wait — not the model — becomes what limits us. a crop is PNG bytes by the time it is charged
-# (~40KB, not the ~400KB of raw pixels), so the headroom is cheap. the semaphore still caps what is in flight AT the
-# model; this bound only stops us holding crops we cannot send, and it must never be what throttles us
-CROP_BOUND = CROP_CONCURRENCY + CROP_BUFFER  # hard cap on crops alive at once, across every page and every crop source
-DECODE_CONCURRENCY = 16  # pages that may hold a decoded ~10MB bitmap at once — the ONLY place one ever exists, so this
-# is the whole of our bitmap RAM. a page now passes through in ~0.2s (decode, build the model's 1036x1036 layout copy,
-# drop the bitmap; later re-decode, cut, drop it again) because the slow part — waiting on the layout call — is spent
-# OUTSIDE the gate. at a few pages a second, a 0.2s hold needs a handful of slots; 288 was sized for the old shape,
-# where a page squatted here for the whole 66s layout wait. decode_wait is 0.0s on every document, so this gate is not
-# contended and the ~2.2GB it was reserving is better spent on pages in flight, which is what feeds the model
+PDFIUM_WORKERS = 4
+RENDER_TIMEOUT = 120
+PDF_POOL_MAX_TASKS = 100
+DETECT_WORKERS = 1
+UNCHARGED_PAGES = 512
+CROP_BUFFER = 12288
+CROP_BOUND = CROP_CONCURRENCY + CROP_BUFFER
+DECODE_CONCURRENCY = 16
 
 
 @lru_cache
 def get_decode_gate() -> asyncio.Semaphore:
-    # the only gate that admits a decoded bitmap. a page holds a slot for layout + charge + cut, then drops the image
     return asyncio.Semaphore(DECODE_CONCURRENCY)
 
 
 @lru_cache
 def get_crop_semaphore() -> asyncio.Semaphore:
-    # ONE semaphore shared by every crop request from every page. each mineru entry point defaults to constructing a
-    # fresh per-call semaphore, which bounds a single page and nothing globally — that is what let crops go unbounded
     return asyncio.Semaphore(CROP_CONCURRENCY)
 
 
 @dataclass
 class _CropBudget:
-    # bounds crops ALIVE (cut and held in RAM), not just crops in flight: a page reserves its blocks before any crop is
-    # cut, so a page whose crops cannot be absorbed yet blocks here instead of materializing images nothing will read.
-    # FIFO: waiters are granted strictly in arrival order, so a 66-block page can never be starved by 17-block pages
     limit: int
     used: int = 0
     waiters: deque[tuple[int, asyncio.Future[None]]] = field(default_factory=deque)
@@ -184,12 +140,12 @@ class _CropBudget:
         return self.limit - self.used
 
     async def acquire(self, count: int) -> int:
-        need = min(count, self.limit)  # a page with more blocks than the whole budget takes it all rather than deadlock
+        need = min(count, self.limit)
         if not self.waiters and self.free() >= need:
             self.used += need
             return need
         waiter = asyncio.get_running_loop().create_future()
-        self.waiters.append((need, waiter))  # queue behind everyone already waiting — never jump the line
+        self.waiters.append((need, waiter))
         await waiter
         return need
 
@@ -197,11 +153,11 @@ class _CropBudget:
         self.used -= count
         while self.waiters:
             need, waiter = self.waiters[0]
-            if waiter.done():  # its page was cancelled while queued — it will never take the reservation
+            if waiter.done():
                 self.waiters.popleft()
                 continue
             if self.free() < need:
-                return  # head of the line cannot fit yet; no one behind it may overtake
+                return
             self.waiters.popleft()
             self.used += need
             waiter.set_result(None)
@@ -209,12 +165,6 @@ class _CropBudget:
 
 @dataclass
 class _Admission:
-    # pages CLAIMED but not yet accounted for in crops. this is the only window a page is unmeasurable: the crop budget
-    # cannot see a page until the detector has found its regions, so between the claim and that charge the page holds an
-    # encoded image the budget reads as free. bound THAT window — not the page's whole life. a page that has charged is
-    # already represented in the crop budget, and counting it twice is what starved the model: at a fixed 96 pages, a
-    # document yielding 0.8 crops a page could put only ~79 crops in front of 128 slots and could not claim more,
-    # because its pages sat holding slots while their crops queued. crops are the unit the GPU consumes; pages are not
     limit: int
     pending: set[tuple[str, int]] = field(default_factory=set)
 
@@ -225,27 +175,24 @@ class _Admission:
         self.pending.add((doc_id, page_idx))
 
     def settle(self, doc_id: str, page_idx: int) -> None:
-        self.pending.discard((doc_id, page_idx))  # idempotent: charged normally, or released by the job's finally
+        self.pending.discard((doc_id, page_idx))
 
 
-TIMELINE_BUCKET = 10.0  # seconds per reported point
+TIMELINE_BUCKET = 10.0
 TIMELINE_TICK = 1.0
-STARVED = CROP_CONCURRENCY // 2  # below half the slots, the model is demonstrably not being fed
+STARVED = CROP_CONCURRENCY // 2
 
 
 @dataclass
 class _Timeline:
-    # WHERE the idle sits, not how much of it there is. occupancy gives the total; only a time series says whether it
-    # is the ramp, the tail, or a stall in between — and the crops ALIVE at the same instant say which: slots empty
-    # while crops are queued would be a dispatch fault, slots empty with nothing queued is starvation upstream
     inflight: int = 0
     started: float = 0.0
-    buckets: list[list[float]] = field(default_factory=list)  # [inflight_sum, alive_sum, samples]
+    buckets: list[list[float]] = field(default_factory=list)
 
     def enter(self) -> None:
         self.inflight += 1
         if not self.started:
-            self.started = time.time()  # the clock starts at the FIRST crop, so the series is not padded by boot
+            self.started = time.time()
 
     def leave(self) -> None:
         self.inflight -= 1
@@ -309,12 +256,6 @@ _PROCESS_POOLS: list[ProcessPool] = []
 
 @lru_cache
 def get_pdfium_pool() -> ProcessPool:
-    # ONE pool for every pdfium job — counting, rendering and text-layer extraction. they run the same library over the
-    # same files, and a pdfium process costs hundreds of MB no matter how little it does, so three pools meant three
-    # times that for no throughput: all of it together is a few hundred CPU-seconds against a GPU-bound run.
-    # one process per worker (pdfium is not thread-safe; isolate by process). forkserver preloads only the lean pdf
-    # module (not __main__ → no onnxruntime/cv2/mineru/xgboost in a pdfium worker). pebble kills+replaces only the
-    # specific worker a per-task timeout fires on, so a hung page can't permanently shrink the pool.
     ctx = multiprocessing.get_context("forkserver")
     ctx.set_forkserver_preload(["citadel.services.pdf"])
     pool = ProcessPool(max_workers=PDFIUM_WORKERS, max_tasks=PDF_POOL_MAX_TASKS, context=ctx)
@@ -324,30 +265,16 @@ def get_pdfium_pool() -> ProcessPool:
 
 @lru_cache
 def get_pdfium_gate() -> asyncio.Semaphore:
-    # exactly as many permits as the pool has workers, so holding one means a worker is free. it exists to make the
-    # queue wait VISIBLE: pebble queues inside schedule(), so timing the submit charges the wait to the work
     return asyncio.Semaphore(PDFIUM_WORKERS)
 
 
 @lru_cache
 def get_detect_pool() -> ProcessPoolExecutor:
-    # layout is a DETECTOR: one RT-DETR forward pass per page, boxes and reading order out.
-    #
-    # PROCESSES, not threads, and not a fork. its cost is CPU-side python — batching it changes nothing (44ms/page at
-    # batch 1, 42ms at batch 16) — so in-process threads do not scale it: measured 22.5 pages/s on one process against
-    # 20.9 on two threads, LESS than one, because they fight over the GIL. worse, they fight the event loop that drives
-    # every crop request in flight, which is what stalls it (layout_wait ran to 5-10s a page) and what starves the GPU.
-    # fork is out: a cuda context cannot survive it, and python's ONE forkserver has a GLOBAL preload list that the
-    # pdfium, tabular and detect pools would all be fighting over. so: spawn, one fresh interpreter per worker, each
-    # initialising cuda for itself.
-    # stdlib, not pebble: pebble SWALLOWS a child that dies at startup and reports only "the pool is not active", which
-    # is why the first attempt at this was undebuggable. ProcessPoolExecutor propagates the child's exception.
     return ProcessPoolExecutor(max_workers=DETECT_WORKERS, mp_context=multiprocessing.get_context("spawn"))
 
 
 @lru_cache
 def get_detect_gate() -> asyncio.Semaphore:
-    # one permit per thread: run_in_executor queues silently, so without this the queue wait is charged as detector work
     return asyncio.Semaphore(DETECT_WORKERS)
 
 
@@ -377,7 +304,7 @@ def make_profile_pool(n: int) -> asyncio.Queue[str]:
     queue: asyncio.Queue[str] = asyncio.Queue()
     for _ in range(n):
         path = tempfile.mkdtemp(prefix="lo_profile_")
-        _PROFILE_DIRS.append(path)  # tracked so shutdown removes exactly this process's profiles (never a shared glob)
+        _PROFILE_DIRS.append(path)
         queue.put_nowait(path)
     return queue
 
@@ -390,21 +317,16 @@ def _reap_profile_dirs() -> None:
 
 
 def release_idle() -> None:
-    # ingestion is bursty but the worker is always-on, so what it warms up it then holds forever. the process pools are
-    # the whole cost — several hundred MB per worker, idle between uploads — and they rebuild lazily as a fork off the
-    # forkserver, in milliseconds. the detector is NOT dropped: it is a thread in this process holding a cuda context
-    # and ~400MB of VRAM, and tearing that down would mean re-initialising cuda on the next upload for nothing.
     while _PROCESS_POOLS:
         pool = _PROCESS_POOLS.pop()
         pool.stop()
         pool.join()
     get_pdfium_pool.cache_clear()
     gc.collect()
-    ctypes.CDLL("libc.so.6").malloc_trim(0)  # glibc keeps freed pages; without this the process footprint never drops
+    ctypes.CDLL("libc.so.6").malloc_trim(0)
 
 
 async def shutdown() -> None:
-    # dispose every long-lived resource this process owns so termination is clean and idempotent
     while _PROCESS_POOLS:
         pool = _PROCESS_POOLS.pop()
         pool.stop()
@@ -425,15 +347,10 @@ async def _add_stage_seconds(doc_id: str, field: str, seconds: float) -> None:
 
 
 def blob_path(doc_id: str | int) -> Path:
-    # doc-id-keyed source store on a shared host path (the stand-in for S3): every stage reads the source from here
-    # instead of copying it through Redis, so a large PDF is memory-mapped once, never pickled per page
     return BLOB_DIR / str(doc_id)
 
 
 async def reap_orphan_blobs() -> None:
-    # startup: keep only blobs for docs still in flight (QUEUED/PROCESSING) so a crashed run's recovery can finish them;
-    # drop terminal-doc and unknown (wiped-DB) blobs. NEVER a blanket wipe — that deletes other in-flight docs' sources
-    # and hangs them forever (render/tabular find no source, the page is never recorded, no watchdog recovers it).
     BLOB_DIR.mkdir(parents=True, exist_ok=True)
     async with get_sessionmaker()() as session:
         active = set(
@@ -452,9 +369,6 @@ async def _doc_terminal(doc_id: str) -> bool:
     return status not in {DocumentStatus.QUEUED, DocumentStatus.PROCESSING}
 
 
-# ---- orchestrator side ----------------------------------------------------------------
-
-
 async def submit_documents(files: list[UploadFile], library_id: int) -> IngestResponse:
     if not await library_exists(library_id):
         raise HTTPException(status_code=404, detail="unknown library")
@@ -470,7 +384,7 @@ async def submit_documents(files: list[UploadFile], library_id: int) -> IngestRe
             f"doc:{doc_id}",
             mapping={"state": "queued", "filename": name, "library_id": library_id, "done_count": 0, "t0": now},
         )
-        pipe.expire(f"doc:{doc_id}", DOC_TTL)  # safety net so a doc that never reaches merge still self-evicts
+        pipe.expire(f"doc:{doc_id}", DOC_TTL)
         pipe.xadd(STREAM_INGEST, {"doc_id": doc_id, "filename": name})
     await pipe.execute()
     logger.info("ingest library=%s files=%d doc_ids=%s", library_id, len(files), doc_ids)
@@ -532,9 +446,6 @@ async def library_progress(library_id: int) -> list[DocProgress]:
     return progress
 
 
-# ---- normalize stage (CPU / process pool) ---------------------------------------------
-
-
 async def handle_normalize(fields: dict[str, str], profile_dir: str) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
@@ -546,9 +457,6 @@ async def handle_normalize(fields: dict[str, str], profile_dir: str) -> None:
     await asyncio.to_thread(blob_path(doc_id).write_bytes, normalized)
     await get_redis().xadd(STREAM_NORMALIZED, {"doc_id": doc_id, "kind": kind, "filename": fields["filename"]})
     logger.info("normalize file=%s kind=%s", fields["filename"], kind)
-
-
-# ---- paginate stage (CPU / process pool) ----------------------------------------------
 
 
 def _cap_image_bytes(image_bytes: bytes) -> bytes:
@@ -578,8 +486,6 @@ async def _paginate_html(doc_id: str, filename: str) -> None:
 
 
 async def _paginate_pptx(doc_id: str, filename: str) -> None:
-    # a slide is the page unit: page_idx = slide index, so content ids line up with every other paginated lane. an
-    # empty deck still records one empty page, otherwise no unit job fires and the doc never reaches merge.
     data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
     slides = await asyncio.to_thread(parse_pptx, data)
     await get_redis().hset(f"doc:{doc_id}", "page_count", max(len(slides), 1))
@@ -595,7 +501,7 @@ async def handle_paginate(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     kind = fields["kind"]
     redis = get_redis()
-    await redis.hset(f"doc:{doc_id}", "kind", kind)  # read back at table_structure to route OCR tables to the model
+    await redis.hset(f"doc:{doc_id}", "kind", kind)
     await redis.hset(f"doc:{doc_id}", "state", "paginating")
     await redis.hsetnx(f"doc:{doc_id}", "t_paginate", time.time())
     paginator = _BLOCK_PAGINATORS.get(kind)
@@ -604,7 +510,7 @@ async def handle_paginate(fields: dict[str, str]) -> None:
         return
     if kind.startswith("image:"):
         data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
-        image_bytes = await asyncio.to_thread(_cap_image_bytes, data)  # cap huge scans → keep the worker's RAM bounded
+        image_bytes = await asyncio.to_thread(_cap_image_bytes, data)
         await redis.hset(f"doc:{doc_id}", "page_count", 1)
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0, "image": image_bytes})
         logger.info("paginate file=%s image", fields["filename"])
@@ -613,7 +519,7 @@ async def handle_paginate(fields: dict[str, str]) -> None:
         await redis.hset(f"doc:{doc_id}", "mode", "tabular")
         if kind == "xlsx":
             names = await asyncio.to_thread(sheet_names, await asyncio.to_thread(blob_path(doc_id).read_bytes))
-            if not names:  # workbook with no sheets: no unit jobs would fire, so drive straight to merge
+            if not names:
                 await redis.hset(f"doc:{doc_id}", "page_count", 0)
                 await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
                 logger.info("paginate file=%s sheets=0 → merge", fields["filename"])
@@ -631,7 +537,7 @@ async def handle_paginate(fields: dict[str, str]) -> None:
         return
     dpi = RENDER_DPI
     count, _, _ = await _run_pdfium(count_pdf_pages, str(blob_path(doc_id)), job_timeout=RENDER_TIMEOUT)
-    if count <= 0:  # empty/unreadable pdf: no page units will ever be recorded, so drive the doc straight to merge
+    if count <= 0:
         await redis.hset(f"doc:{doc_id}", "page_count", 0)
         await get_redis().xadd(STREAM_MERGE, {"doc_id": doc_id})
         logger.info("paginate file=%s pages=0 → merge", fields["filename"])
@@ -641,8 +547,7 @@ async def handle_paginate(fields: dict[str, str]) -> None:
     pipe = redis.pipeline(transaction=False)
     for idx in range(count):
         pipe.xadd(stream, {"doc_id": doc_id, "page_idx": idx, "dpi": dpi})
-    await pipe.execute()  # emit one render job per page → the bounded render consumer does the work
-    # joins the rotation only AFTER its jobs exist, so "in the set with an empty stream" means drained, never pending
+    await pipe.execute()
     await redis.sadd(RENDER_DOCS, doc_id)
     await redis.hsetnx(f"doc:{doc_id}", "t_paginated", time.time())
     logger.info("paginate file=%s pages=%d", fields["filename"], count)
@@ -654,10 +559,10 @@ async def handle_render(fields: dict[str, str]) -> None:
     dpi = int(fields["dpi"])
     path = blob_path(doc_id)
     if not path.exists():
-        if not await _doc_terminal(doc_id):  # source gone while the doc is still in flight → fail the page, don't hang
+        if not await _doc_terminal(doc_id):
             msg = f"source blob missing for in-flight doc {doc_id}"
             raise FileNotFoundError(msg)
-        return  # doc already finished → a reclaimed render job is a safe no-op
+        return
     redis = get_redis()
     await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
     (image_bytes, digital), render_wait, render_cpu = await _run_pdfium(
@@ -671,12 +576,6 @@ async def handle_render(fields: dict[str, str]) -> None:
     )
 
 
-# ---- ocr stage: detector (pool) finds the regions, the VLM (vLLM) reads each crop ------------------
-
-
-# atomic unit-completion: record the unit (HSETNX dedup), and ONLY if it is new, bump done_count and — when it is the
-# unit that reaches page_count — fire merge. one server-side EVAL so a crash mid-op can't wedge the doc (a redelivery
-# re-runs it, HSETNX returns 0, no double-count) and merge fires exactly once even across worker restarts.
 _RECORD_UNIT_LUA = """
 if redis.call('HSETNX', KEYS[1], ARGV[1], ARGV[2]) == 0 then return 0 end
 redis.call('EXPIRE', KEYS[1], ARGV[4])
@@ -696,8 +595,6 @@ def _record_unit() -> AsyncScript:
     return get_redis().register_script(_RECORD_UNIT_LUA)
 
 
-# requeue the bumped copy, ack the old, and delete the old as ONE server-side op, so a crash mid-retry can never leave
-# both the retry copy and the still-pending original (which would double-process the job on the next recovery)
 _REQUEUE_LUA = """
 redis.call('XADD', KEYS[1], '*', unpack(ARGV, 3))
 redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
@@ -716,15 +613,6 @@ async def requeue_message(stream: str, msg_id: str, fields: dict[bytes, bytes]) 
 
 
 async def render_weights(docs: list[str]) -> dict[str, float]:
-    # REMAINING CROPS per document, which is what the share must be proportional to. density is observed
-    # (crops seen / pages finished) and refines as the document runs; a document that has finished no pages yet has no
-    # density of its own and borrows the corpus mean, so its weight is still denominated in crops and comparable.
-    # a completion-boost term was tried here (twice) to desynchronize table-structure calls from the tail of the run.
-    # both measured WORSE total wall time on the real corpus (490s plain -> 504s -> 529s), not better: boosting a
-    # document nearing completion pulls render-claim priority away from whichever document has the most work left —
-    # on a corpus where two documents carry over 90% of total crop volume, that IS the critical path, and slowing it
-    # down to let smaller documents finish early costs more than the clustering it was meant to fix. plain
-    # proportional share, unmodified, is what is measured to minimize wall time
     redis = get_redis()
     pipe = redis.pipeline(transaction=False)
     for doc_id in docs:
@@ -741,17 +629,11 @@ async def render_weights(docs: list[str]) -> dict[str, float]:
     weights: dict[str, float] = {}
     for doc_id, (pages, done, crops) in stats.items():
         density = crops / done if done else mean_density
-        # floored at ONE crop per page: a fully-digital document owes no crops at all (its text comes from the
-        # layer), and weighting purely by crops would give it no share and never render its pages — it would simply
-        # never finish. every remaining page costs a render and a detect whatever its crop yield, so it always
-        # carries weight
         weights[doc_id] = max(1.0, (pages - done) * max(density, 1.0))
     return weights
 
 
 async def record_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
-    # the last page fires STRUCTURE (not merge): a doc with OCR blocks may hold tables, and those are structured in the
-    # structure stage before merge ever runs. tabular sheets go straight to merge — they are already structured upstream
     await _record_unit()(
         keys=[f"blocks:{doc_id}", f"doc:{doc_id}", STREAM_STRUCTURE],
         args=[str(page_idx), json.dumps([b.model_dump() for b in blocks]), doc_id, str(DOC_TTL)],
@@ -759,7 +641,6 @@ async def record_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
 
 
 async def fail_page(doc_id: str, page_idx: int) -> None:
-    # one page exhausting retries must not fail the whole doc: record a marker, keep going
     await record_page(doc_id, page_idx, [Block(type="error", page_idx=page_idx, text="[extraction failed]")])
 
 
@@ -769,18 +650,18 @@ async def record_sheet(doc_id: str, sheet_no: int) -> None:
     )
 
 
-SHEETS_CACHE_MAX = 4  # workbooks kept parsed at once; every sheet of a doc reuses one parse instead of re-loading it
+SHEETS_CACHE_MAX = 4
 _SHEETS_CACHE: LRUCache[str, list[SheetExtraction]] = LRUCache(maxsize=SHEETS_CACHE_MAX)
 _SHEETS_LOCK = asyncio.Lock()
 
 
 async def _get_sheet(doc_id: str, sheet_no: int) -> SheetExtraction:
-    async with _SHEETS_LOCK:  # serialize the load so concurrent sheets of one doc parse the workbook once
+    async with _SHEETS_LOCK:
         sheets = _SHEETS_CACHE.get(doc_id)
         if sheets is None:
             data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
             sheets = await asyncio.to_thread(load_all_sheets, data)
-            _SHEETS_CACHE[doc_id] = sheets  # LRUCache evicts the least-recently-used workbook past maxsize
+            _SHEETS_CACHE[doc_id] = sheets
     return sheets[sheet_no - 1]
 
 
@@ -790,17 +671,13 @@ async def handle_tabular(fields: dict[str, str]) -> None:
     sheet_no = int(fields["sheet_no"])
     redis = get_redis()
     await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
-    # a sheet is a unit of work exactly as a page is, and it marks itself started for the same reason: `started_count`
-    # minus `done_count` is what progress reports as ACTIVE. only the page path used to bump it, so a spreadsheet
-    # reported nothing in flight and sat at "queued" until the whole document flipped to ingested — it never showed as
-    # processing, however long its sheets took
     await redis.hincrby(f"doc:{doc_id}", "started_count", 1)
     path = blob_path(doc_id)
     if not path.exists():
-        if not await _doc_terminal(doc_id):  # source gone while the doc is still in flight → fail, don't hang
+        if not await _doc_terminal(doc_id):
             msg = f"source blob missing for in-flight doc {doc_id}"
             raise FileNotFoundError(msg)
-        return  # doc already finished → a reclaimed sheet job is a safe no-op
+        return
     if kind == "xlsx":
         sheet = await _get_sheet(doc_id, sheet_no)
         items = await extract_sheet_content(sheet)
@@ -823,16 +700,13 @@ async def fail_document(doc_id: str, stage: str) -> None:
     now = time.time()
     await redis.hset(f"doc:{doc_id}", mapping={"state": "failed", "error": f"{stage} failed", "t_done": now})
     await mark_document(int(doc_id), DocumentStatus.FAILED)
-    await cleanup(doc_id)  # terminal failure → release the source blobs (no wall-clock TTL to fall back on)
+    await cleanup(doc_id)
 
 
-FILLIN = re.compile(r"\.{4,}|_{4,}|…")  # form fill-in markers → the line may carry handwriting the layer can't see
+FILLIN = re.compile(r"\.{4,}|_{4,}|…")
 
 
 def _is_vlm_refusal(text: str) -> bool:
-    # the VLM narrates no-text crops (QR/blank graphics) instead of staying silent ("The image provided is a QR
-    # code... no textual content can be extracted"). a refusal both refers to the image AND denies content; real
-    # seal/stamp/figure text does neither, so requiring both signals keeps genuine recoveries
     t = text.lower()
     refers = any(k in t for k in ("the image", "this image", "the picture", "image provided", "qr code", "barcode"))
     denies = any(
@@ -856,18 +730,14 @@ def _is_vlm_refusal(text: str) -> bool:
 
 @dataclass
 class _Spans:
-    # where a page's time inside handle_ocr actually goes. every field is either a WAIT (queuing on one of our own
-    # bounds) or WORK (the resource actually doing something), never both — a span that mixes them cannot say what is
-    # slow. these are ACCUMULATORS: pages run concurrently and so do the crops within a page, so the raw sums overlap
-    # and are not durations of anything. they are divided by their unit count before they are ever reported.
-    decode_wait: float = 0.0  # queuing for a decode slot
-    layout_wait: float = 0.0  # queuing for a detector thread
-    layout: float = 0.0  # the detector: ONE forward pass. no generation, so it cannot loop or return an empty page
-    budget_wait: float = 0.0  # blocked on crop budget, holding nothing but the encoded page
-    cut: float = 0.0  # PIL: re-decode, cut the crops out, resize them into the model's pixel window, PNG them (cpu)
-    crop_wait: float = 0.0  # over the page's crops: queuing for a crop slot
-    predict: float = 0.0  # over the page's crops: the model actually reading them
-    crops: int = 0  # how many crops those two are summed over — without it the sums mean nothing
+    decode_wait: float = 0.0
+    layout_wait: float = 0.0
+    layout: float = 0.0
+    budget_wait: float = 0.0
+    cut: float = 0.0
+    crop_wait: float = 0.0
+    predict: float = 0.0
+    crops: int = 0
 
 
 SPAN_FIELDS = ("decode_wait", "layout_wait", "layout", "budget_wait", "cut", "crop_wait", "predict")
@@ -880,8 +750,6 @@ async def _record_spans(doc_id: str, spans: _Spans) -> None:
 
 
 def reading_order(blocks: list[DetBlock]) -> list[DetBlock]:
-    # the detector's pointer network orders the CONTENT regions; page furniture (headers, pictures) comes back
-    # unordered. keep its order for what it ordered, and slot everything else in by where it sits on the page
     ordered = sorted((b for b in blocks if b.order is not None), key=lambda b: b.order or 0)
     loose = sorted((b for b in blocks if b.order is None), key=lambda b: (b.bbox[1], b.bbox[0]))
     out = list(ordered)
@@ -892,25 +760,14 @@ def reading_order(blocks: list[DetBlock]) -> list[DetBlock]:
 
 
 def _to_read(blocks: list[DetBlock], digital: bool) -> list[int]:
-    # which regions the model is asked to read. a picture has no text. and on a born-digital page the prose already
-    # exists as real characters in the PDF, so re-recognizing it could only introduce errors — we take it from the layer
-    # instead, which is why a digital page costs ~2 crops where a scanned one costs ~26
     skip = LAYER_LABELS if digital else frozenset()
     return [i for i, b in enumerate(blocks) if is_readable(b) and b.label not in skip]
 
 
-GAP_GRID = 24  # the page is rasterized into this many cells per axis to approximate the coverage complement — coarse
-# enough to be cheap, fine enough that a genuinely missed table does not vanish into one giant cell
-GAP_CELL_PX = 6  # each cell is represented by this many px/side in the downsampled image the content signal reads
-# from — resizing DOWN first and computing std on the small image, rather than on the full page, is what keeps this
-# cheap: measured 11ms/page this way against 108ms computing the same signal at full resolution
-GAP_MIN_AREA_FRACTION = 0.04  # a gap below this is a margin/gutter, not a candidate miss
-GAP_CONTENT_STD = 2.0  # grayscale std of the downsampled uncovered cells above this reads as real content rather
-# than blank background — DISABLED, not called from extract_page: tested against a real scanned book
-# (Vorlesungen uber Zahlentheorie) and it fires on nearly every page. raw pixel variance cannot tell a genuinely
-# missed table apart from a scanning artifact or aged-paper texture, both of which vary just as much as real
-# content — this needs a signal tied to actual text/line structure (periodic edges at line-height spacing) before
-# it is safe to call again, not another threshold guess against the same signal
+GAP_GRID = 24
+GAP_CELL_PX = 6
+GAP_MIN_AREA_FRACTION = 0.04
+GAP_CONTENT_STD = 2.0
 
 
 def _occupancy(blocks: list[DetBlock]) -> np.ndarray:
@@ -941,10 +798,6 @@ def _cut_one(img: Image.Image, bbox: list[float]) -> Image.Image:
     return img.crop((box[0], box[1], max(box[2], box[0] + 1), max(box[3], box[1] + 1)))
 
 
-# regions that may be READ TOGETHER. every crop costs the model's 144-token floor whether it fills it or not, so two
-# adjacent regions read as one cost half. only prose qualifies: a run of paragraphs concatenated is still the same
-# prose, whereas merging two headings would fuse two titles, two display formulas would return one LaTeX blob for two
-# equations, and a list is already whole. measured on the 809-page scanned book — 12,908 regions become 9,938 crops
 MERGEABLE_LABELS = frozenset({"text", "footnote", "reference_content", "content", "abstract"})
 
 
@@ -961,16 +814,10 @@ def _bbox_pixels(bbox: list[float], size: tuple[int, int]) -> int:
     return max(1, int((bbox[2] - bbox[0]) * size[0])) * max(1, int((bbox[3] - bbox[1]) * size[1]))
 
 
-COLUMN_WIDEN = 1.25  # a merge may grow the block DOWNWARD, never sideways
+COLUMN_WIDEN = 1.25
 
 
 def _stacked(group: list[float], bbox: list[float]) -> bool:
-    # regions in one column sit above one another: merging them leaves the width alone and only adds height. two
-    # regions SIDE BY SIDE are a different matter — their union is a wide short strip holding two independent columns,
-    # and reading it as one crop both scrambles the order and costs accuracy. measured on a bilingual letterhead: the
-    # Kazakh and Russian addresses merged into one 89%-wide block and the model returned "данфылы" for "даңғылы",
-    # which the reference pipeline read correctly by keeping the two columns apart. area alone cannot catch this —
-    # two short columns have a SMALL union area — so the test is on width: a merge must not widen the block
     union = max(group[2], bbox[2]) - min(group[0], bbox[0])
     widest = max(group[2] - group[0], bbox[2] - bbox[0])
     return union <= widest * COLUMN_WIDEN
@@ -978,11 +825,6 @@ def _stacked(group: list[float], bbox: list[float]) -> bool:
 
 @dataclass
 class _GroupCloses:
-    # WHY a group ended, which decides where packing can go next. adjacent merging is at 23% and prose runs average
-    # 1.57 — if groups mostly close on AREA the union bbox is the limit (two stacked lines carry the dead whitespace
-    # between them, so composing the crop tightly instead of taking their union would pack far more). if they mostly
-    # close on LABEL then adjacent merging is exhausted and the remaining headroom needs non-adjacent regions, which
-    # means re-associating returned text with its source regions. very different projects; this says which
     joined: int = 0
     area: int = 0
     label: int = 0
@@ -1019,15 +861,11 @@ def log_group_closes() -> None:
 
 
 def group_crops(blocks: list[DetBlock], indices: list[int], size: tuple[int, int]) -> list[list[int]]:
-    # consecutive same-label prose regions share a crop while their UNION still fits the model's floor. past the floor
-    # a merge stops being free — the bill grows with the union — so the group closes and a new one starts
     groups: list[list[int]] = []
     unions: list[list[float]] = []
     for index in indices:
         label = blocks[index].label
         bbox = list(blocks[index].bbox)
-        # index + 1, not merely "the previous readable region": a picture sitting between two paragraphs is not in
-        # `indices`, and merging across it would place its content after text that follows it on the page
         closes = get_group_closes()
         if not groups:
             closes.first += 1
@@ -1058,9 +896,6 @@ def group_bbox(blocks: list[DetBlock], group: list[int]) -> list[float]:
 
 
 def _cut_crops(img: Image.Image, blocks: list[DetBlock], groups: list[list[int]]) -> list[bytes]:
-    # cut, fit the model's pixel window, and encode — all while the bitmap is alive, so the raw pixels die here and only
-    # the compressed form (~8x smaller) waits out the queue. PNG and NOT base64: base64 is 33% larger and every crop
-    # alive would carry that, which is host RAM spent to save an encode that was never on the critical path
     payloads: list[bytes] = []
     for group in groups:
         crop = _cut_one(img, group_bbox(blocks, group))
@@ -1075,9 +910,6 @@ def _cut_crops(img: Image.Image, blocks: list[DetBlock], groups: list[list[int]]
 async def _read_crop(
     payload: bytes, prompt: str, semaphore: asyncio.Semaphore, budget: _CropBudget, spans: _Spans
 ) -> str:
-    # one crop, one slot: the semaphore bounds what is in flight at the model, the budget bounds what is alive in RAM,
-    # and both are handed back the instant THIS crop returns — not when its slowest sibling does. the semaphore is
-    # acquired HERE so the queue wait is charged to crop_wait and never to predict
     mark = time.time()
     timeline = get_timeline()
     try:
@@ -1096,26 +928,16 @@ async def _read_crop(
 
 
 async def extract_page(doc_id: str, page_idx: int, image: bytes, digital: bool) -> list[Block]:
-    # a page's ~10MB decoded bitmap is needed only to CUT — never to wait on the model, which is the long part. so it
-    # lives inside the decode gate: cut, drop the bitmap, leave. the page then waits out the model holding just its
-    # crops and the ~2MB of encoded bytes it already had.
-    # crops are charged BEFORE they are cut, so none can exist uncharged — cutting first and charging after would let a
-    # scanned page (~26 crops) multiply through the gate and rebuild the very explosion the budget exists to stop.
     budget = get_crop_budget()
     semaphore = get_crop_semaphore()
     spans = _Spans()
 
-    # LAYOUT. a detector forward pass in its own pool: it takes no crop slot, generates no tokens, and cannot fail the
-    # way a language model laying out a page can (loop on itself, or emit nothing at all for a whole page)
     blocks, spans.layout_wait, spans.layout = await _run_detect(image)
     blocks = reading_order(blocks)
     indices = _to_read(blocks, digital)
 
-    # CUT.
     mark = time.time()
     granted = await budget.acquire(max(len(indices), 1))
-    # charged: this page is now represented in crops, so it stops occupying an admission slot and the next page can be
-    # claimed. a sparse page frees its slot having added almost nothing, so admission keeps pulling until crops fill
     get_admission().settle(doc_id, page_idx)
     spans.budget_wait = time.time() - mark
     mark = time.time()
@@ -1126,11 +948,11 @@ async def extract_page(doc_id: str, page_idx: int, image: bytes, digital: bool) 
             try:
                 payloads = await asyncio.to_thread(_cut_crops, img, blocks, groups)
             except BaseException:
-                budget.release(granted)  # the crops never existed, so no _read_crop will hand this back
+                budget.release(granted)
                 raise
     spans.cut = time.time() - mark
     spans.crops = len(payloads)
-    budget.release(granted - len(payloads))  # refund the estimate's slack; from here each crop hands its own slot back
+    budget.release(granted - len(payloads))
 
     texts = await asyncio.gather(
         *(
@@ -1143,9 +965,6 @@ async def extract_page(doc_id: str, page_idx: int, image: bytes, digital: bool) 
 
 
 def _blocks_from_groups(blocks: list[DetBlock], groups: list[list[int]], texts: list[str]) -> list[Block]:
-    # a merged group leaves ONE block, carrying the union of its regions and the single text the model returned for
-    # them. the regions folded in are not emitted — their content is in that text, and a second empty block for each
-    # would be a node with no content. order is untouched: a group is contiguous, so its head sits where it always did
     read = {group[0]: (group, text) for group, text in zip(groups, texts, strict=True)}
     folded = {index for group in groups for index in group[1:]}
     out: list[Block] = []
@@ -1156,7 +975,7 @@ def _blocks_from_groups(blocks: list[DetBlock], groups: list[list[int]], texts: 
         out.append(
             Block(
                 type=block.label,
-                page_idx=0,  # set by the caller, which knows the page
+                page_idx=0,
                 bbox=group_bbox(blocks, group),
                 text=block_text(block.label, text),
             )
@@ -1165,9 +984,6 @@ def _blocks_from_groups(blocks: list[DetBlock], groups: list[list[int]], texts: 
 
 
 async def _reread(image: bytes, blocks: list[Block]) -> None:
-    # crop each block's region and read it again, on its own. same shape as extract_page: cut inside the decode gate,
-    # drop the bitmap, and only then queue the crops against the global budget — a re-read is model work too, so it
-    # cannot be allowed to exceed it either
     if not blocks:
         return
     budget = get_crop_budget()
@@ -1181,7 +997,7 @@ async def _reread(image: bytes, blocks: list[Block]) -> None:
                     _cut_crops,
                     img,
                     [DetBlock(label=b.type, score=1.0, bbox=list(b.bbox or []), order=None) for b in blocks],
-                    [[index] for index in range(len(blocks))],  # a re-read targets one block at a time; never merged
+                    [[index] for index in range(len(blocks))],
                 )
             except BaseException:
                 budget.release(granted)
@@ -1200,9 +1016,6 @@ def _qr_detector() -> cv2.QRCodeDetector:
 
 
 def _qr_payload(crop: Image.Image) -> str | None:
-    # a QR/barcode has no prose; the model would narrate it ("...no textual content can be extracted"). detect it
-    # deterministically: None = not a QR (let the model read the seal/stamp text), else the decoded payload
-    # ("" when it is a QR but unreadable)
     text, points, _ = _qr_detector().detectAndDecode(np.asarray(crop.convert("RGB")))
     return text if points is not None else None
 
@@ -1218,29 +1031,18 @@ def _qr_scan(img: Image.Image, blocks: list[Block]) -> int:
         finally:
             crop.close()
         if payload:
-            block.text = payload  # decoded QR → the real encoded data, which no OCR of the glyph could recover
+            block.text = payload
             decoded += 1
     return decoded
 
 
 async def read_pictures(image: bytes, blocks: list[Block]) -> int:
-    # a picture region is DECODED, never read. the detector already tells us what a region is, and it has a class for
-    # every picture that carries text — `seal` and `chart` are their own labels, read on the normal path with their own
-    # task prompts. what is left under `image` is a photograph or a figure: there is no text on it to recognize.
-    # asking the model to read one anyway is what the reference pipeline calls use_ocr_for_image_block, and it defaults
-    # it to FALSE. we had it on — inherited from MinerU, whose layout vocabulary could not tell a seal from a figure —
-    # and it is where the runaway generations came from: given nothing to read, the model repeats a fragment until it
-    # exhausts its token budget, and thousands of tokens of that landed in the index.
-    # a QR is different: it is data, not text, and cv2 decodes it exactly with no model at all.
     async with get_decode_gate():
         with Image.open(io.BytesIO(image)) as img:
             return _qr_scan(img, blocks)
 
 
 async def recover_fillin_blocks(image: bytes, blocks: list[Block]) -> int:
-    # text blocks that came from the PDF's text layer but are empty or are fill-in fields may hold ink the layer cannot
-    # see — a signature, a handwritten date. re-read a focused crop of just that block: the crop fills the model's
-    # frame, giving the region far higher effective resolution than it had as part of a whole page
     flagged = [
         b for b in blocks if b.type in LAYER_LABELS and (not (b.text or "").strip() or FILLIN.search(b.text or ""))
     ]
@@ -1248,17 +1050,10 @@ async def recover_fillin_blocks(image: bytes, blocks: list[Block]) -> int:
     return len(flagged)
 
 
-CROP_LOG_THRESHOLD = 6  # count a page as ocr-heavy only when its re-read crops exceed this — surfaces burners in the
-# merge summary without counting every ordinary page
+CROP_LOG_THRESHOLD = 6
 
 
 async def _rescue_uncovered(doc_id: str, path: Path, page_idx: int, blocks: list[Block]) -> tuple[list[Block], int]:
-    # the detector misses text — on a form it boxes the STRUCTURE and not the filled-in VALUES, and we measured what
-    # that costs: 20% of borang_13's characters and 14% of defence's, never boxed and so never read. lowering the score
-    # threshold recovers some of it and starts reading OTHER regions twice, which is a worse trade.
-    # on a born-digital page there is nothing to trade. the text layer says exactly which characters no box covers, so
-    # they are added as their own regions: no model call, no duplication, and the characters are the document's own.
-    # coverage on a page with a text layer becomes 1.0 by construction rather than by tuning.
     runs, wait, cpu = await _run_pdfium(
         uncovered_layer_runs,
         str(path),
@@ -1270,9 +1065,6 @@ async def _rescue_uncovered(doc_id: str, path: Path, page_idx: int, blocks: list
     await _add_stage_seconds(doc_id, "layer_s", cpu)
     if not runs:
         return blocks, 0
-    # slot each rescued run into the EXISTING order by where it sits on the page — never re-sort the whole page. the
-    # detector's pointer network decided that order and it is the one thing here that understands columns; a positional
-    # sort would silently replace it with top-to-bottom and shred any two-column page.
     merged = list(blocks)
     for run in runs:
         block = Block(type="text", page_idx=0, bbox=list(run.bbox), text=run.text)
@@ -1294,8 +1086,6 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     fill_crops = 0
     rescued = 0
     if digital:
-        # born-digital page: the detector found the regions, and the prose comes from the page's OWN characters at each
-        # box — not re-recognized, so it cannot be misread
         layer_blocks = [b for b in blocks if b.type in LAYER_LABELS]
         path = blob_path(doc_id)
         if layer_blocks and path.exists():
@@ -1318,9 +1108,6 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     img_crops = await read_pictures(image, blocks)
     await _add_stage_seconds(doc_id, "ocr_s", time.time() - ocr_t)
     if rescued:
-        # not rare on a scanned/mixed corpus — counted per document and folded into its merge summary instead of one
-        # line per page, so a book with hundreds of these doesn't flood the terminal with what is the same finding
-        # repeated: text the detector never boxed, taken from the page's own characters
         await get_redis().hincrby(f"doc:{doc_id}", "rescued_pages", 1)
         await get_redis().hincrby(f"doc:{doc_id}", "rescued_runs", rescued)
     if img_crops + fill_crops >= CROP_LOG_THRESHOLD:
@@ -1332,19 +1119,10 @@ async def _emit_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
     await record_page(doc_id, page_idx, blocks)
 
 
-# ---- merge stage ----------------------------------------------------------------------
-
-
-STAGE_SECONDS = (  # (label, redis key, unit). every *_wait is US making something queue on one of our own bounds; every
-    # other field is the resource actually working. they are kept apart because a span that mixes them cannot answer the
-    # only question worth asking — is the pipeline slow, or is the model.
-    # the UNIT is not decoration. these are accumulators over units that run CONCURRENTLY — many pages at once, and many
-    # crops at once within a page — so the raw sum is not a duration of anything and comparing it to wall time is
-    # meaningless. each is reported as a MEAN over the unit it was summed across, which is a real number you can reason
-    # about: "the model spends 0.4s on a crop" and "a crop waits 1.2s for a slot" are comparable; 688 and 195 are not.
+STAGE_SECONDS = (
     ("render_wait", "render_wait_s", "pg"),
     ("render_cpu", "render_s", "pg"),
-    ("ocr_wall", "ocr_s", "pg"),  # a page's elapsed time in handle_ocr; the fields below decompose it
+    ("ocr_wall", "ocr_s", "pg"),
     ("decode_wait", "decode_wait_s", "pg"),
     ("layout_wait", "layout_wait_s", "pg"),
     ("layout", "layout_s", "pg"),
@@ -1358,9 +1136,6 @@ STAGE_SECONDS = (  # (label, redis key, unit). every *_wait is US making somethi
 
 
 def _stage_line(doc: dict[bytes, bytes]) -> str:
-    # NEVER print a raw accumulator. pages run concurrently and so do the crops inside a page, so every sum here is a
-    # sum of OVERLAPPING spans — it is not a duration, and set next to wall time it is nonsense. divide each by the
-    # units it was summed over and report the mean, which is a number that means something on its own.
     def g(key: str) -> float:
         return float(doc.get(key.encode(), 0) or 0)
 
@@ -1376,7 +1151,7 @@ def _stage_line(doc: dict[bytes, bytes]) -> str:
         if g(key) and units[unit]
     ]
     walls += [f"crops={g('crops_n'):.0f}"]
-    if g("rescued_pages"):  # counts, not overlapping-span sums, so unlike the timings above these print raw
+    if g("rescued_pages"):
         walls += [f"rescued={g('rescued_pages'):.0f}pg/{g('rescued_runs'):.0f}run"]
     if g("ocr_heavy_pages"):
         walls += [f"ocr_heavy={g('ocr_heavy_pages'):.0f}pg"]
@@ -1393,16 +1168,11 @@ async def _read_doc_blocks(doc_id: str) -> list[Block]:
 
 
 async def handle_structure(fields: dict[str, str]) -> None:
-    # the moment a doc's ocr completes, prepare (cpu) and ROUTE. no table blocks → straight to merge, so the doc ingests
-    # during ocr; has tables → publish ONE JOB PER TABLE BLOCK onto the table stream. the count is recorded first, so a
-    # job that finishes before the rest are queued cannot see a complete set and fire merge early
     doc_id = fields["doc_id"]
     redis = get_redis()
     proc, pages, crops = (
         float(value or 0) for value in await redis.hmget(f"doc:{doc_id}", "t_proc", "page_count", "crops_n")
     )
-    # ONE line per document, at the single instant that matters for scheduling: whether completions land spread
-    # across the run or clustered at the tail is exactly what this timestamp answers, directly from the log
     elapsed = time.time() - proc if proc else 0.0
     logger.info("ocr_complete doc=%s elapsed=%.1fs pages=%.0f crops=%.0f", doc_id, elapsed, pages, crops)
     blocks = await _read_doc_blocks(doc_id)
@@ -1416,9 +1186,6 @@ async def handle_structure(fields: dict[str, str]) -> None:
 
 
 async def handle_table_structure(fields: dict[str, str]) -> None:
-    # THE table structure extraction stage — the single place a table, from ANY source, is structured. every unit is a
-    # JOB ON THE STREAM, claimed under the stage's capacity: a SHEET (spreadsheet / csv / json, table data end to end)
-    # or a TABLE BLOCK (one grid a pdf / html doc yielded). redelivery of either is a no-op
     if fields["unit"] == "sheet":
         await handle_tabular(fields)
         return
@@ -1429,11 +1196,9 @@ async def handle_table_structure(fields: dict[str, str]) -> None:
     extracted = [grid_from_html(prepared.stitched[index].text or "") for index in indices]
     grids = [grid for grid, _ in extracted]
     header_hints = [header_rows for _, header_rows in extracted]
-    structured = await structure_tables(
-        grids, header_hints=header_hints, label=doc_id
-    )  # every candidate at once → structure + drop non-tables + merge splits
+    structured = await structure_tables(grids, header_hints=header_hints, label=doc_id)
     by_block: dict[int, list[MaterializedTable]] = {}
-    for table, blocks in structured:  # each table lands on its FIRST source block; the rest yield nothing
+    for table, blocks in structured:
         by_block.setdefault(indices[min(blocks)], []).append(table)
     await redis.hset(
         f"tables:{doc_id}", mapping={str(index): dump_tables(by_block.get(index, [])) for index in indices}
@@ -1470,15 +1235,12 @@ async def handle_merge(fields: dict[str, str]) -> None:
 
 async def cleanup(doc_id: str) -> None:
     redis = get_redis()
-    _SHEETS_CACHE.pop(doc_id, None)  # doc finished → drop its parsed workbook
+    _SHEETS_CACHE.pop(doc_id, None)
     await redis.delete(f"blocks:{doc_id}", f"sheets:{doc_id}", f"structures:{doc_id}", f"tables:{doc_id}")
     await redis.srem(RENDER_DOCS, doc_id)
     await redis.delete(render_stream(doc_id))
-    blob_path(doc_id).unlink(missing_ok=True)  # the doc's source file is freed the moment it finishes
-    await redis.expire(f"doc:{doc_id}", 3600)  # keep final status briefly, then auto-evict — no accumulation
-
-
-# ---- stage wiring (used by the worker entrypoint) -------------------------------------
+    blob_path(doc_id).unlink(missing_ok=True)
+    await redis.expire(f"doc:{doc_id}", 3600)
 
 
 async def ensure_group(stream: str) -> None:

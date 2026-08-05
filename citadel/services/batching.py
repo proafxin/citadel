@@ -16,7 +16,7 @@ from citadel.models.status import DocumentStatus
 from citadel.models.table import Table
 from citadel.prompts import load_prompt
 
-STREAM_BATCH = "batch"  # one job per MERGED DOCUMENT: packs it into batches and summarizes them all
+STREAM_BATCH = "batch"
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +24,6 @@ BATCH_TOKENS = 32768
 SAMPLE_ROWS = 3
 SUMMARY_RATIO = 0.1
 SUMMARY_TOKENS_MAX = 4096
-# a document's entry in the inventory the query is resolved against. every document AND every table in the library must
-# fit that one call, so this is a per-document ceiling, not a ratio of the document's length
 DOCUMENT_SUMMARY_TOKENS = 500
 
 _BLOCK_ORDINALS = text("""
@@ -66,9 +64,6 @@ async def assign_block_ordinals(session: AsyncSession, doc_id: int) -> None:
 
 
 def _table_text(table: Table) -> str:
-    # the row count leads, and the rows are declared a SAMPLE. without that a reader sees three rows and no statement of
-    # size, and the only available reading is that the table HAS three rows — measured: answers claiming a 834-row sheet
-    # "displays 3 rows". how big the table is cannot be inferred from an excerpt, so it is stated
     headers = [str(column.get("header") or "") for column in table.columns]
     shown = table.sample_rows[:SAMPLE_ROWS]
     lines = [f"table with {table.n_rows} rows, {len(shown)} shown as a sample:", " | ".join(headers)]
@@ -77,9 +72,6 @@ def _table_text(table: Table) -> str:
 
 
 def render_raw(raw: dict | None) -> str:
-    # the block's structure is part of its meaning: an item's position answers "the second item", indentation carries
-    # nesting, LaTeX needs its delimiters. search_text flattens all of that away, so it is for matching only — anything
-    # a model has to READ (a summary's input, an answer's evidence) is rendered from raw
     fields = raw or {}
     if items := fields.get("items"):
         return "\n".join(
@@ -167,7 +159,7 @@ async def build_document_specs(session: AsyncSession, doc_id: int) -> list[Batch
     return pack_batches(doc_id, blocks)
 
 
-_SUMMARY_LOCK = 2  # advisory-lock namespace for the per-library summary-completion check (disjoint from the embed lock)
+_SUMMARY_LOCK = 2
 
 
 def _summaries_done_stream(library_id: int) -> str:
@@ -175,8 +167,6 @@ def _summaries_done_stream(library_id: int) -> str:
 
 
 async def _pending_summaries(session: AsyncSession, library_id: int) -> int:
-    # documents whose batches are not summarized yet. a FAILED document is excluded — it is not INGESTED/PARTIAL, so it
-    # owes nothing and can never hold the library back; a redelivered job re-marks the same row without moving the count
     pending = await session.scalar(
         select(func.count())
         .select_from(Document)
@@ -190,10 +180,6 @@ async def _pending_summaries(session: AsyncSession, library_id: int) -> int:
 
 
 async def emit_library_batches(library_id: int) -> int:
-    # summarizing is retrieval prep, not structure, so it runs as ONE post-ingestion pass over the whole library rather
-    # than per document at merge: off the ocr-contended window, and never leaving the resolver a partial inventory. one
-    # job per document lands on the same stream the worker already drains with bounded concurrency. the completion
-    # stream is cleared BEFORE any job can fire, so a stale entry from a prior run is never mistaken for this one's
     async with get_sessionmaker()() as session:
         doc_ids = list(
             await session.scalars(
@@ -211,9 +197,6 @@ async def emit_library_batches(library_id: int) -> int:
 
 
 async def record_summary(library_id: int) -> None:
-    # counter-and-fire, DB-backed like embed's inflight check: once a document's summary commits, the job that finds no
-    # summaries left fires the library's completion stream. the advisory lock serializes the check, so two documents
-    # finishing together cannot both miss zero and leave the library never firing
     async with get_sessionmaker()() as session, session.begin():
         await session.execute(
             text("SELECT pg_advisory_xact_lock(:cls, :lib)"), {"cls": _SUMMARY_LOCK, "lib": library_id}
@@ -224,8 +207,6 @@ async def record_summary(library_id: int) -> None:
 
 
 async def wait_library_summaries(library_id: int, emitted: int) -> None:
-    # the last summary to land fires the completion stream; block on it instead of polling. reading from "0" is
-    # race-free — the entry persists, so a fire that happened before this read is still seen
     if emitted == 0:
         return
     await get_redis().xread({_summaries_done_stream(library_id): "0"}, block=0)
@@ -234,9 +215,6 @@ async def wait_library_summaries(library_id: int, emitted: int) -> None:
 def _summary_prompt(spec: BatchSpec) -> tuple[str, int]:
     budget = summary_budget(spec.content_tokens)
     prompt = f"{load_prompt('batch_summary').replace('{summary_tokens}', str(budget))}\ntext:\n{spec.text}"
-    # the completion cap sits ABOVE the summary asked for — the ask is advisory (a model cannot count its own tokens)
-    # while the cap is hard. the reply is plain text, so content that resists compression comes back SHORTER rather
-    # than unparseable; a batch is never lost to its own length
     return prompt, budget * 2 + 512
 
 
@@ -250,8 +228,6 @@ def _document_summary_prompt(filename: str, summaries: list[str]) -> tuple[str, 
 
 
 async def _document_summary(doc_id: int, summaries: list[str]) -> str | None:
-    # the document's own summary, reduced from the parts already summarized. it is written after them and from them
-    # only — nothing re-reads the document — so it costs one call per document and cannot disagree with its parts
     if not summaries:
         return None
     async with get_sessionmaker()() as session:
@@ -274,11 +250,6 @@ def _batch_row(doc_id: int, spec: BatchSpec, summary: str) -> ContentBatch:
 
 
 async def summarize_document(fields: dict[str, str]) -> None:
-    # ONE job per merged document: pack it into batches and summarize all of them. every batch's summary is emitted to
-    # the slm stream first and collected after, so a document's batches are summarized concurrently rather than one
-    # after another — and many documents are in flight at once, since the stage itself is unbounded.
-    # the batches and the document's mark are written in ONE transaction: a document is never left half-summarized, and
-    # re-running the job simply replaces the same rows
     doc_id = int(fields["doc_id"])
     started = time.time()
     async with get_sessionmaker()() as session, session.begin():
@@ -294,8 +265,6 @@ async def summarize_document(fields: dict[str, str]) -> None:
         await session.execute(
             update(Document).where(Document.id == doc_id).values(summary=summary, summarized_at=datetime.now(UTC))
         )
-    # pack vs summarize is the split that matters: packing is ours (CPU, tokenizing), summarizing is the model's. how
-    # far this span runs against the rest of ingestion says whether summaries finish inside it or tail past it
     logger.info(
         "batches doc=%d batches=%d content=%d pack=%.1fs summarize=%.1fs total=%.1fs",
         doc_id,

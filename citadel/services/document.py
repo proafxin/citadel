@@ -56,12 +56,10 @@ async def notify_embed(library_id: int) -> None:
         await session.execute(text("SELECT pg_notify('embed', :library)"), {"library": str(library_id)})
 
 
-_LIBRARY_LOCK_CLASS = 1  # namespace for the per-library advisory lock (two-arg space, disjoint from the doc lock)
+_LIBRARY_LOCK_CLASS = 1
 
 
 async def library_inflight(session: AsyncSession, library_id: int) -> int:
-    # documents the library is still working on. embedding must never start while this is nonzero: it would run BGE-M3
-    # against a partial library AND contend with the OCR model for the same GPU
     count = await session.scalar(
         select(func.count())
         .select_from(Document)
@@ -74,11 +72,6 @@ async def library_inflight(session: AsyncSession, library_id: int) -> int:
 
 
 async def _maybe_notify_embed(session: AsyncSession, library_id: int) -> None:
-    # serialize completion of docs in the SAME library: without this, two docs finishing concurrently each see the other
-    # still PROCESSING (uncommitted), so neither observes inflight==0 and neither notifies → the library never embeds.
-    # the lock holder counts + notifies + commits; the next waiter then sees the prior doc committed. two-arg lock space
-    # never collides with save_document_tree's single-arg per-doc lock, and every caller takes it doc-then-library, so
-    # there is no lock-order cycle.
     await session.execute(
         text("SELECT pg_advisory_xact_lock(:cls, :library)"), {"cls": _LIBRARY_LOCK_CLASS, "library": library_id}
     )
@@ -158,8 +151,6 @@ async def mark_library_ready(library_id: int) -> None:
 
 
 def _reclassify_regions(blocks: list[Block]) -> list[Block]:
-    # the visual model labels displayed math, prose and empty regions as "table". re-type each to the leaf it really is
-    # (equation / paragraph / dropped) so it never reaches table structuring, where it becomes a col0..colN relation
     kept: list[Block] = []
     for block in blocks:
         if block.type != "table":
@@ -194,10 +185,6 @@ class _Prepared:
 
 
 def prepare_document(blocks: list[Block]) -> _Prepared:
-    # the CPU half of the table path — dedup / paratext split / reclassify / stitch — run as soon as a doc's ocr ends.
-    # it stitches ONCE per doc (merge reads the result, never re-prepares). whether any stitched block is a table then
-    # decides the route: no tables → straight to merge, so the doc ingests during ocr; tables → deferred to the
-    # table_structure phase, which does only the SLM extraction, once ocr has drained
     return _prepare_blocks(blocks)
 
 
@@ -205,8 +192,6 @@ _TABLES_ADAPTER = TypeAdapter(list[MaterializedTable])
 
 
 def dump_structures(prepared: _Prepared) -> str:
-    # the prepared blocks the structure stage hands to merge, so merge never re-stitches. the structured tables do NOT
-    # ride here — each table job writes its own result independently, keyed by block index
     return json.dumps(
         {
             "stitched": [block.model_dump() for block in prepared.stitched],
@@ -217,7 +202,7 @@ def dump_structures(prepared: _Prepared) -> str:
 
 
 def load_structures(raw: str | bytes | None) -> _Prepared:
-    if raw is None:  # a doc with no blocks routed straight to merge (empty pdf); nothing was prepared or structured
+    if raw is None:
         return _Prepared([], [], {})
     data = json.loads(raw)
     return _Prepared(
@@ -230,7 +215,6 @@ def dump_tables(tables: list[MaterializedTable]) -> str:
 
 
 def collect_tables(results: dict[int, str | bytes]) -> tuple[dict[int, int], list[MaterializedTable]]:
-    # one job's output per block index; merge reassembles them in block order so the flat queue lines up with build_tree
     counts: dict[int, int] = {}
     queue: list[MaterializedTable] = []
     for index in sorted(results):
@@ -241,7 +225,6 @@ def collect_tables(results: dict[int, str | bytes]) -> tuple[dict[int, int], lis
 
 
 def _token_count(text: str | None) -> int:
-    # exact BGE-M3 token count (capped at the model ceiling), computed at ingestion so embedding reads it off the row
     if not text:
         return 0
     return min(EMBED_MAX_TOKENS, len(get_embed_tokenizer()(text, add_special_tokens=True)["input_ids"]))
@@ -313,8 +296,6 @@ DROP_REASONS = frozenset({"paratext", "empty_image", "empty_block"})
 
 
 def _drop_counts(blocks: list[Block], content: list[Block], reclassified: list[Block]) -> dict[str, int]:
-    # DERIVED, not re-predicated: split_paratext now RESCUES a mis-typed paratext block into content, so re-testing
-    # the type here would count a kept block as dropped. whatever it removed is either an empty image or paratext.
     empty_image = sum(1 for block in blocks if block.type in EMPTY_IMAGE_TYPES and not (block.text or "").strip())
     counts = {
         "paratext": len(blocks) - len(content) - empty_image,
@@ -332,7 +313,7 @@ def _drop_counts(blocks: list[Block], content: list[Block], reclassified: list[B
     return {reason: count for reason, count in counts.items() if count}
 
 
-_LOOP_EXEMPT_TYPES = {"table"}  # a table may legitimately repeat identical rows; only prose/math loop pathologically
+_LOOP_EXEMPT_TYPES = {"table"}
 
 
 def _collapse_block_loops(blocks: list[Block]) -> list[Block]:
@@ -347,12 +328,10 @@ def _collapse_block_loops(blocks: list[Block]) -> list[Block]:
 
 
 def _prepare_blocks(blocks: list[Block]) -> _Prepared:
-    deduped = _collapse_block_loops(blocks)  # kill VLM repetition loops before anything downstream sees them
+    deduped = _collapse_block_loops(blocks)
     content_blocks, paratext = split_paratext(deduped)
-    reclassified = _reclassify_regions(content_blocks)  # math/prose/empty must not reach table structuring
+    reclassified = _reclassify_regions(content_blocks)
     drops = _drop_counts(deduped, content_blocks, reclassified)
-    # the document title is metadata, not content: it leaves the block stream here, before table jobs are keyed by
-    # block index, so nothing downstream has to know it ever existed
     title, titleless = split_title(reclassified)
     return _Prepared(stitch_tables(titleless), paratext, drops, title)
 
@@ -365,8 +344,6 @@ async def save_document_tree(
     table_counts: dict[int, int],
     table_queue: list[MaterializedTable],
 ) -> None:
-    # the prepared blocks AND the table structures are both precomputed by the structure stage and passed in — merge
-    # does no SLM and no second stitch. `blocks` (raw) is kept only for persist_document_blocks and the blocks_in count
     async with get_sessionmaker()() as session:
         document = await session.get(Document, doc_id)
         if document is None:
@@ -378,9 +355,6 @@ async def save_document_tree(
     search_text = build_search_text(built, library_name, filename)
     tables = iter(table_queue)
     async with get_sessionmaker()() as session, session.begin():
-        # per-doc advisory lock: serialize concurrent/redelivered merges of the same document so the "already
-        # written?" check and the insert are one atomic unit. the lock holder writes the tree; any other caller waits,
-        # then finds it present and only refreshes status — never a duplicate content_id, no TOCTOU
         await session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": doc_id})
         document = await session.get(Document, doc_id)
         if document is None:
@@ -410,8 +384,6 @@ async def save_document_tree(
 
 
 def _sheet_text_search(library_name: str, filename: str, sheet_name: str, text: str) -> str:
-    # prose inside a spreadsheet gets the same library / filename / sheet prefix every other block carries, so it is
-    # findable by filename or sheet like anything else in the corpus
     return build_table_search_text(library_name, filename, sheet_name, None, None, [], [text])
 
 
@@ -643,7 +615,7 @@ async def _document_markdown(session: AsyncSession, doc_id: int) -> str:
     lines: list[str] = []
     heading: str | None = None
     for node in nodes:
-        if node.heading != heading:  # the heading is a field now, so sections are emitted where it changes
+        if node.heading != heading:
             heading = node.heading
             if heading:
                 lines.extend(["## " + heading, ""])

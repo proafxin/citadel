@@ -18,25 +18,18 @@ _FLOAT = re.compile(r"-?\d+\.\d+")
 class MaterializedTable:
     sheet_no: int
     columns: list[Column]
-    rows: list[list[CellValue]]  # the FULL stored grid: header rows first (verbatim), then data rows. header rows are
-    # kept, not deleted — a row the detector wrongly called a header (measured: Coca-Cola's NET OPERATING REVENUES, its
-    # top P&L line) survives as a queryable row instead of vanishing into a column name. what is a header is recorded in
-    # header_rows, not enforced by removal, so a wrong call is a mislabel over intact data, never a lost row
-    sample_rows: list[list[CellValue]]  # DATA rows only — the sample and n_rows are the data view, header rows excluded
+    rows: list[list[CellValue]]
+    sample_rows: list[list[CellValue]]
     n_rows: int
     title: str | None
     caption: str | None
     notes: list[str]
     anchors: dict
     formulas: list[str] | None = None
-    header_rows: list[int] = field(default_factory=list)  # indices into `rows` that are header, not data. the query
-    # projection skips exactly these, so the typed view is unchanged while the grid stays whole and reconstructable
+    header_rows: list[int] = field(default_factory=list)
 
 
 def _lossless_int(value: str) -> bool:
-    # a numeric type is assigned ONLY if the value round-trips back to its exact source text. rejects "007", "+5",
-    # " 5 " etc. so codes/ids with leading zeros stay verbatim strings and are never silently renumbered. also bounded
-    # to signed 64-bit so a long numeric id can't overflow the integer cast at query time — it stays a string instead
     if not _INT.fullmatch(value):
         return False
     number = int(value)
@@ -44,8 +37,6 @@ def _lossless_int(value: str) -> bool:
 
 
 def _lossless_decimal(value: str) -> bool:
-    # Decimal preserves trailing zeros and exact digits ("1.50" stays "1.50"); leading-zero/exponent forms don't
-    # round-trip and fall through to string
     return bool(_FLOAT.fullmatch(value)) and str(Decimal(value)) == value
 
 
@@ -61,8 +52,6 @@ def dtype_of(values: list[str]) -> ColumnDType:
 
 
 def cast_cell(value: str) -> CellValue:
-    # never converts: every cell is stored as its exact source text (empty → None). the dtype travels as a hint on the
-    # column and the query casts on demand — so dirty cells, codes and ids are never silently altered or dropped
     return value or None
 
 
@@ -71,8 +60,6 @@ def _grid_cell(grid: list[list[str]], row: int, col: int) -> str:
 
 
 def transpose_grid(grid: list[list[str]]) -> list[list[str]]:
-    # turn a sub-grid on its side. the DECISION to do so is the model's (structure.transposed); this is only the
-    # mechanical flip that follows it, so a side-on table's first column becomes the header row of a normal table
     width = max((len(row) for row in grid), default=0)
     return [[_grid_cell(grid, row, col) for row in range(len(grid))] for col in range(width)]
 
@@ -83,9 +70,6 @@ def _grid_header(grid: list[list[str]], header_rows: list[int], col: int) -> str
 
 
 def _clean_name(name: str | None) -> str | None:
-    # a resolved column name that is a pure decimal is a value the model read as a name (a key-value block's value
-    # column). drop it so the plain col<index> fallback names the column instead. bare integers survive — a year is a
-    # real column name on a wide sheet
     return None if name is not None and _lossless_decimal(name.strip()) else name
 
 
@@ -97,9 +81,6 @@ def _sample(rows: list[list[CellValue]]) -> list[list[CellValue]]:
 
 
 def _dimension_values(grid: list[list[str]], header_row: int, start: int, end: int) -> list[str]:
-    # a crosstab dimension value spans rightward across its columns even when the cells are blank — the source implied
-    # the span by layout. the SLM CONFIRMED the crosstab, so carrying the last value forward is the declared meaning,
-    # not a guess. returns the dimension value per value column, indexed from `start`
     out: list[str] = []
     last = ""
     for col in range(start, end + 1):
@@ -119,9 +100,6 @@ def _materialize_crosstab(
     extra_notes: list[str] | None,
     anchors: dict | None,
 ) -> "MaterializedTable":
-    # unpivot: one output row per NON-EMPTY value cell = the row's keys + that column's dimension values + the cell.
-    # every emitted cell is copied from the grid; nothing is generated. empty cells carry no data, so dropping them is
-    # lossless — the messy matrix becomes the same normalized relation a clean sheet would have produced
     start, end = crosstab.value_col_start, crosstab.value_col_end
     dim_values = [_dimension_values(grid, dim.header_row, start, end) for dim in crosstab.dimensions]
     out_rows: list[list[str]] = []
@@ -143,7 +121,7 @@ def _materialize_crosstab(
     return MaterializedTable(
         sheet_no=sheet_no,
         columns=columns,
-        rows=data_rows,  # no header rows: the header carried dimensions, which are now real columns on every row
+        rows=data_rows,
         sample_rows=_sample(data_rows),
         n_rows=len(data_rows),
         title=structure.title,
@@ -156,8 +134,6 @@ def _materialize_crosstab(
 
 
 def _section_at(grid: list[list[str]], row: int, col_start: int, count: int) -> tuple[int, str] | None:
-    # a section row the MODEL marked: its label is the first filled cell, its nesting level is that cell's column offset
-    # (a full-width label starts at 0, an indented sub-section deeper). no decision here — the model already made it
     for offset in range(count):
         value = _grid_cell(grid, row, col_start + offset).strip()
         if value:
@@ -168,9 +144,6 @@ def _section_at(grid: list[list[str]], row: int, col_start: int, count: int) -> 
 def _collect_sections(
     grid: list[list[str]], data_start: int, data_end: int, col_start: int, count: int, section_rows: list[int]
 ) -> tuple[list[list[str]], list[list[str | None]], list[str]]:
-    # apply the model's section-label calls: lift each marked row out of the data and fill its label DOWN onto the rows
-    # it governs, as leading grouping column(s). one column per distinct indent level; a shallower label clears deeper
-    # levels. nothing is decided or invented here — the label is source text, the membership is source structure
     markers: dict[int, tuple[int, str]] = {}
     for row in section_rows:
         if data_start <= row <= data_end and (marker := _section_at(grid, row, col_start, count)) is not None:
@@ -207,10 +180,6 @@ def _section_columns(sections: list[list[str | None]], names: list[str]) -> list
 def _dedupe_headers(
     grid: list[list[str]], header_rows: list[int], col_start: int, headers: list[str | None]
 ) -> list[str | None]:
-    # a multi-level header resolved for only the first of several siblings under one shared label collides here — the
-    # grid's own header rows, mechanically joined per column, resolve a genuinely varying sub-label without asking the
-    # model again. a name that still collides after that has no distinguishing text anywhere in the header rows —
-    # inventing a suffix would hide that gap, not close it, so it is logged and left as the ambiguous name it is
     counts = Counter(name for name in headers if name)
     resolved: list[str | None] = []
     for index, name in enumerate(headers):
@@ -239,8 +208,6 @@ def _materialize_relational(
         grid, structure.data_start, structure.data_end, structure.col_start, count, structure.section_rows or []
     )
     dtypes = [dtype_of([raw[index] for raw in collected]) for index in range(count)]
-    # SLM-resolved names win when present (it handles implied/merged/multi-row headers) — but only over a header row
-    # that survived validation: a name resolved from a row that turned out to be data is not a name for anything
     if structure.columns and header_rows:
         headers: list[str | None] = [
             structure.columns[index] if index < len(structure.columns) else None for index in range(count)
@@ -253,8 +220,6 @@ def _materialize_relational(
     ]
     section_columns = _section_columns(sections, section_names)
     header_pad: list[CellValue] = [None] * len(section_names)
-    # the header rows are kept as the first rows of the stored grid — verbatim, never dropped. a row the detector
-    # wrongly promoted to header survives as a queryable row; header_rows records what is header, deletion never does
     header_cells = [
         [*header_pad, *(cast_cell(_grid_cell(grid, row, structure.col_start + index)) for index in range(count))]
         for row in sorted(header_rows)
@@ -290,8 +255,6 @@ def _materialize_transposed(
     extra_notes: list[str] | None,
     anchors: dict | None,
 ) -> MaterializedTable:
-    # the model judged this table is on its side; turn its span back so the first column becomes the header row of a
-    # normal table, then materialize that. the flip is mechanical — the decision was the model's
     span = [
         [_grid_cell(grid, row, col) for col in range(structure.col_start, structure.col_end + 1)]
         for row in range(structure.data_start, structure.data_end + 1)
@@ -320,10 +283,6 @@ def materialize(
     extra_notes: list[str] | None = None,
     anchors: dict | None = None,
 ) -> MaterializedTable:
-    # THE materializer. every table in the system — spreadsheet region, html <table>, csv, json entity — arrives here
-    # as a grid plus the structure the model returned, and leaves as a MaterializedTable. one implementation, so a
-    # table's shape never depends on which file it came out of. source-specific extras (a sheet's formulas, cell
-    # comments, its address range) ride in as metadata rather than forking the logic
     if structure.transposed:
         return _materialize_transposed(grid, structure, sheet_no, formulas, extra_notes, anchors)
     if structure.layout == "crosstab" and structure.crosstab is not None:
