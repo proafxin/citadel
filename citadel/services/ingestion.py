@@ -1185,16 +1185,22 @@ async def handle_structure(fields: dict[str, str]) -> None:
     await redis.xadd(STREAM_TABLE_STRUCTURE, {"doc_id": doc_id, "unit": "document"})
 
 
+_ADJACENT_MAX_CHARS = 400
+
+
+def _adjacent_piece(block: Block, label: str) -> str | None:
+    text = (block.text or "").strip()
+    if block.type == "table" or not text or len(text) > _ADJACENT_MAX_CHARS:
+        return None
+    return f"{label}: {text}"
+
+
 def _adjacent_context(blocks: list[Block], index: int) -> str:
     parts = []
-    if index > 0:
-        before = blocks[index - 1]
-        if before.type != "table" and before.text and before.text.strip():
-            parts.append(f"context before: {before.text.strip()}")
-    if index + 1 < len(blocks):
-        after = blocks[index + 1]
-        if after.type != "table" and after.text and after.text.strip():
-            parts.append(f"context after: {after.text.strip()}")
+    if index > 0 and (piece := _adjacent_piece(blocks[index - 1], "context before")):
+        parts.append(piece)
+    if index + 1 < len(blocks) and (piece := _adjacent_piece(blocks[index + 1], "context after")):
+        parts.append(piece)
     return "\n".join(parts)
 
 

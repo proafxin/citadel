@@ -29,15 +29,12 @@ def stack_candidates(grids: list[list[list[str]]]) -> list[list[str]]:
     return [[row[index] if index < len(row) else "" for index in range(width)] for grid in grids for row in grid]
 
 
-_MAX_ADJACENT = 400
-
-
 def _candidate_text(grid: list[list[str]], index: int, adjacent: str = "") -> str:
     width = max((len(row) for row in grid), default=0)
     kinds = column_kinds(grid)
     hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))
     body = _payload_text(grid, payload_rows(grid), width)
-    context = f"\n{adjacent[:_MAX_ADJACENT]}" if adjacent else ""
+    context = f"\n{adjacent}" if adjacent else ""
     return f"{index}: {len(grid)} rows, {width} cols; column kinds: {hint}{context}\n{body}"
 
 
