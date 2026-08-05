@@ -1,7 +1,6 @@
 import logging
-import re
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 
 from citadel.llm import (
     collect_structure_candidates,
@@ -9,7 +8,7 @@ from citadel.llm import (
 )
 from citadel.schemas.table import Crosstab, Dimension, KeyColumn, TableStructure
 from citadel.tabular.flag import column_kinds, payload_rows
-from citadel.tabular.materialize import MaterializedTable, _plausible_header_rows, materialize
+from citadel.tabular.materialize import MaterializedTable, materialize
 
 logger = logging.getLogger(__name__)
 
@@ -24,22 +23,6 @@ def _row_line(index: int, row: list[str], width: int) -> str:
 
 def _payload_text(grid: list[list[str]], indices: list[int], width: int) -> str:
     return "\n".join(_row_line(index, grid[index], width) for index in indices)
-
-
-SPARSE_HEADER_MIN_WIDTH = 3  # below this a one-cell row may genuinely be the header of a narrow table
-SPARSE_HEADER_MAX_CELLS = 1
-
-
-def _is_header_row(grid: list[list[str]], row: int, width: int) -> bool:
-    # a header NAMES THE COLUMNS, so it populates them. a row carrying a single label with the rest empty is a section
-    # label or a banner — "Assets" sitting between a balance sheet's header and its rows — however the model labelled
-    # it. this is decidable from the grid, so it is not left to the model: it sits directly under the header, which is
-    # exactly where a second header level would sit, and the model reads it as one. a rejected row is not dropped —
-    # data_start is derived from the header rows that survive, so it simply becomes the data row it always was
-    if not 0 <= row < len(grid):
-        return False
-    populated = sum(1 for cell in grid[row] if cell.strip())
-    return not (width >= SPARSE_HEADER_MIN_WIDTH and populated <= SPARSE_HEADER_MAX_CELLS)
 
 
 def _crosstab(table: dict, width: int) -> Crosstab | None:
@@ -158,7 +141,7 @@ def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
             title=spec.get("title") or None,
             notes=spec.get("notes") or [],
         )
-    header_rows = sorted(h for h in spec.get("header_rows", []) if 0 <= h < height and _is_header_row(grid, h, width))
+    header_rows = sorted(h for h in spec.get("header_rows", []) if 0 <= h < height)
     title = spec.get("title") or None
     data_start = (max(header_rows) + 1) if header_rows else 0
     if title and data_start == 0 and 0 not in header_rows:
@@ -167,15 +150,6 @@ def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
         # above) and `title` is what signals the exclusion instead. its own row is taken to be row 0 of the block,
         # the same place a lone label naming the whole block is expected to sit everywhere else in this stage
         data_start = 1
-    # applied here, not only in materialize._materialize_relational, so _drop_contained_specs (which runs on this
-    # data_start/data_end, before materialize is ever called) sees the same corrected range that will actually be
-    # produced — otherwise a rejected header row's pull-back is invisible to containment detection and a spec that
-    # only looks non-overlapping on paper survives as a duplicate of the rows the correction folds into another spec
-    plausible_rows = _plausible_header_rows(grid, header_rows, width)
-    rejected_rows = set(header_rows) - set(plausible_rows)
-    if rejected_rows:
-        data_start = min(data_start, *rejected_rows)
-    header_rows = plausible_rows
     data_end = max(data_start, min(int(spec.get("row_end", height - 1)), max(height - 1, 0)))
     columns = ([str(name) for name in spec.get("columns", [])] or None) if header_rows else None
     crosstab = _crosstab(spec, width) if spec.get("layout") == "crosstab" else None
@@ -231,48 +205,6 @@ def _drop_contained_specs(
     return [item for index, item in enumerate(prepared) if index not in dropped]
 
 
-_SHORT_INDEX = re.compile(r"^\d{1,4}\.?$")  # a bare row-number ("1", "23.") — never prose, so it marks a blank
-# form's own placeholder row rather than a caption the model mistook for data
-
-
-def _is_degenerate(table: MaterializedTable) -> bool:
-    # a table that resolves to one row with only one cell filled is almost always a caption or banner the model
-    # mistook for data — the same sparse signal that already disqualifies a HEADER row (SPARSE_HEADER_MIN_WIDTH/
-    # MAX_CELLS), applied here to whether the table should exist at all. the one legitimate exception is a blank
-    # form's own row-index placeholder: that lone cell is a short digit token, never prose, so it is exempted
-    # rather than dropped along with genuine captions
-    if table.n_rows != 1 or len(table.columns) < SPARSE_HEADER_MIN_WIDTH:
-        return False
-    populated = [cell for cell in table.sample_rows[0] if cell not in {None, ""}]
-    if len(populated) > SPARSE_HEADER_MAX_CELLS:
-        return False
-    return not populated or not _SHORT_INDEX.match(str(populated[0]).strip())
-
-
-def _spec_covered_rows(blocks: list[int], structure: TableStructure) -> tuple[int, set[int]] | None:
-    # multi-block specs index into stack_candidates' concatenated grid, not this block's own row numbers, so
-    # gap-checking is scoped to single-block specs — the overwhelming majority, and the ones every observed
-    # omission so far has involved
-    if len(blocks) != 1:
-        return None
-    rows = set(range(structure.data_start, structure.data_end + 1))
-    rows.update(structure.header_rows or [])
-    if structure.title:
-        rows.add(0)
-    return blocks[0], rows
-
-
-def _log_gaps(candidates: list[list[list[str]]], covered: dict[int, set[int]]) -> None:
-    # nothing corrects this automatically — there is no spec for an unclaimed row to fix. logged so a row the model
-    # silently never accounted for is visible instead of quietly vanishing from the ingested table
-    for index, grid in enumerate(candidates):
-        if index not in covered:
-            continue
-        gap = {row for row, cells in enumerate(grid) if any(cell.strip() for cell in cells)} - covered[index]
-        if gap:
-            logger.info("table_structure gap block=%d unclaimed_rows=%s", index, sorted(gap))
-
-
 async def structure_tables(
     candidates: list[list[list[str]]],
     *,
@@ -321,20 +253,14 @@ async def structure_tables(
     out: list[tuple[MaterializedTable, list[int]]] = []
     merged = 0
     block_uses: Counter[int] = Counter()
-    covered: dict[int, set[int]] = defaultdict(set)
     for blocks, grid, structure in _drop_contained_specs(prepared):
         table = materialize(grid, structure, sheet_no=sheet_no, anchors=anchors)
-        if table.n_rows and not _is_degenerate(table):
+        if table.n_rows:
             out.append((table, blocks))
             merged += len(blocks) > 1
             block_uses.update(blocks)
-            if covered_rows := _spec_covered_rows(blocks, structure):
-                index, rows = covered_rows
-                covered[index] |= rows
         else:
-            reason = "materialized 0 rows" if not table.n_rows else "degenerate single-cell row"
-            logger.info("table_structure dropped blocks=%s — %s", blocks, reason)
-    _log_gaps(candidates, covered)
+            logger.info("table_structure dropped blocks=%s — materialized 0 rows", blocks)
     split = sum(1 for count in block_uses.values() if count > 1)
     logger.info(
         "table_structure%s candidates=%d tables=%d merged=%d split=%d secs=%.1f",
