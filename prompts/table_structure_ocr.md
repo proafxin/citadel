@@ -1,34 +1,152 @@
 # Table Structure
 
-We pulled several regions out of one document that we think might be tables — we are not sure. Some may turn out to be a heading, a caption, or plain running text that only looks tabular. Each region is called a **block**, numbered `0`, `1`, and so on in the order it appears, and already corresponds to one complete table candidate — nothing here needs merging with another block or splitting into several. Each block is shown as its size, its column value-kinds, and selected rows as `row N: cell | cell | ...` where N is the row number **within that block** — you see the headers and unusual rows in full plus a sample of ordinary rows. Some blocks also carry the text of the block immediately before and/or after them in the document, labelled `context before:`/`context after:` — that neighboring text is NOT confirmed to belong to this block; judge for yourself whether it actually names or describes this table before using it. You never return data values beyond what identifies the structure.
+Each numbered **block** below is a region we pulled from a document because it might be a table — we are not sure. It may turn out to be a form, a heading, a caption, or plain running text. Every block already covers exactly one complete table candidate: nothing here needs merging with another block or splitting into several.
 
-For each block, decide whether it is a real table. For every block that is: say so, and report whether it is rotated (`transposed`), its schema (the columns that name what each row holds), and its metadata (`title`, `notes`) — the fields below spell out exactly what to give for each.
+A block is shown as:
 
-Every row belongs to exactly one table — never two.
+```text
+N: R rows, C cols; column kinds: col0:kind, col1:kind, ...
+[context before: ...]
+[context after: ...]
+[source marks row(s) ... as header]
+row 0: cell | cell | cell
+row 1: cell | cell | cell
+```
 
-1. **Decide which blocks are real tables.** A real table records data: rows of values under columns that name what each value is. A block that is a page banner, a heading, a caption, or a line of running text dressed as columns is NOT a table — leave it out entirely.
-2. **Report each real table's structure.**
+`context before`/`context after` is the text of the block immediately next to this one — not confirmed to belong to it, judge for yourself. `source marks row(s) ... as header` appears only when the document's own format reliably marks a row as a header (e.g. real HTML `<th>`), never a guess — still verify it actually names columns.
 
-For every table you report, give:
+For every block that is a real table, report `transposed`, `col_start`/`col_end`, `header_rows`, `row_end`, `columns`, `section_rows`, `title`, `notes`, `blocks` (the single block number). Respond with a JSON object: `{"tables": [...]}`.
 
-- **blocks** — the single block number.
-- The structure fields below.
+## examples
 
-## orientation
+**Ordinary table.**
 
-Most tables list one record per row with field names along the top. A few are turned on their side: field names run DOWN the first column, one record per following column. If so, set **transposed** true and stop giving header/columns for it. Otherwise **transposed** false.
+```text
+0: 3 rows, 3 cols; column kinds: col0:string, col1:integer, col2:integer
+row 0: Region | Q1 | Q2
+row 1: East | 120 | 98
+row 2: West | 75 | 110
+```
 
-## structure
+→ `{"blocks": [0], "header_rows": [0], "row_end": 2, "col_start": 0, "col_end": 2, "columns": ["Region", "Q1", "Q2"], "transposed": false, "section_rows": [], "title": "", "notes": []}`
 
-Each column is one field, each row one record.
+**Header confirmed by the source, still verified.**
 
-- **col_start**, **col_end** — first/last column index (0-based, inclusive).
-- **header_rows** — the row number(s) whose cells NAME the columns. A header labels columns; it is not data. A row of values (even a total or top line) is data. A block of label-and-value pairs — ONE left column of field names beside EXACTLY ONE right column of their values — has NO header: return `header_rows` empty, leave `columns` empty, never promote a label-beside-value row. When a header spans more than one row — a top band grouping columns, a row of narrower sub-labels beneath it, sometimes a further row of symbols or units — include EVERY one of those rows in `header_rows`, not only the first: a row is still a header as long as its cells keep NAMING columns, even if the row above it already named the broader group they belong to. A row of numbers stepping in a steady progression across the columns (ages, years, bins, ranks, ...) is very likely naming a dimension rather than recording one, even though every cell in it is a plain number that would otherwise read as data — weigh it against the rest of the block's shape and treat it as a header when it fits that pattern; a genuine data row can occasionally step evenly too, so still confirm from context before excluding it.
-- **row_end** — the last row (within this block) that belongs to this table; its data runs from just after the last header row through row_end, inclusive. Normally the block's last row — but stop earlier if trailing rows stop being genuine data of this table's own kind: an abrupt label, or a row whose cells are all the same value where real data would vary across columns. A recognition pass can occasionally fuse a table with unrelated content directly beneath it; bound `row_end` before that content rather than folding it in as more rows.
-- **columns** — the resolved name of every column from col_start to col_end. When the header spans several rows, or a heading covers several columns and sits only in the first, combine them into one clear name per column. A top-level label spanning several columns is not one column's name — it is shared by all of them, so combine it with EACH of its own sub-labels to name every one of those columns individually (a "Ship Mode: First Class" heading over "Consumer / Corporate / Home Office" sub-columns needs three different names — "First Class Consumer", "First Class Corporate", "First Class Home Office" — not one name repeated or left blank for the rest). Never two columns with the same name, and never leave a column unnamed because it shares a top-level label with another. A combined name is always plain, single-line text — join any line break carried in a cell's own text with a space rather than including it literally.
-- **section_rows** — row numbers of SECTION-LABEL rows inside this table: a row carrying one label (the rest empty or that label spanned across the row) that introduces the group of rows beneath it and shares this table's columns. List them; they are neither header nor data.
-- **title**, **notes** — a title names the whole table; notes are anything else about it (a footnote, a unit, a caveat). Prefer `context before`/`context after` when it genuinely names or describes this table (e.g. "Table 3: Regional Sales" as the block right before it) — take just the name itself for `title`, not the surrounding sentence; put any further explanation from that same context in `notes` instead of folding it into `title`. Otherwise, a block's own first row can still be a lone label naming it (the rest of the row empty) — treat that the same way. If neither applies, leave both empty.
+```text
+1: 3 rows, 2 cols; column kinds: col0:string, col1:string
+source marks row(s) 0 as header
+row 0: Name | Role
+row 1: A. Ford | Engineer
+row 2: B. Diaz | Analyst
+```
 
-Report the tables top to bottom. `transposed` is `false` and `section_rows`/`columns` are `[]` when they do not apply. Respond ONLY with a JSON object like:
-{"tables": [{"blocks": [0], "transposed": false, "header_rows": [0], "row_end": 6, "col_start": 0, "col_end": 3, "columns": ["Region", "Q1", "Q2", "Q3"], "section_rows": [], "title": "", "notes": []}, {"blocks": [1], "transposed": false, "header_rows": [0], "row_end": 5, "col_start": 0, "col_end": 4, "columns": ["No", "Item", "Qty", "Price", "Amount"], "section_rows": [], "title": "Q3 Purchase Orders", "notes": []}]}
-Block 1's title came from its `context before` line ("Table 2: Q3 Purchase Orders") rather than anything inside the block itself — nothing in its own rows names the table, so without that context `title` would stay empty.
+Row 0 genuinely names both columns, so the hint is trusted: `header_rows: [0]`. Had it not (e.g. the marked row held a value like a real record instead), it would be rejected and header decided from the text alone.
+
+**Multi-row header.**
+
+```text
+2: 3 rows, 3 cols; column kinds: col0:string, col1:integer, col2:integer
+row 0: | Ship Mode: First Class |
+row 1: Segment | Consumer | Corporate
+row 2: A123 | 300 | 150
+```
+
+Row 0 groups, row 1 sub-labels — both name columns: `header_rows: [0, 1]`, `columns: ["Segment", "First Class Consumer", "First Class Corporate"]` (the group label combined into each sub-column's own name, not left blank or repeated).
+
+**A numeric row that is actually a header.**
+
+```text
+3: 2 rows, 4 cols; column kinds: col0:string, col1:integer, col2:integer, col3:integer
+row 0: Bin | 1990 | 1991 | 1992
+row 1: East | 4 | 9 | 12
+```
+
+Row 0's `1990, 1991, 1992` step evenly — a year axis, not data, even though every cell is a plain number: `header_rows: [0]`.
+
+**Label-value form (no header at all) — two shapes, same treatment.**
+
+```text
+4: 3 rows, 2 cols; column kinds: col0:string, col1:string
+row 0: Name | John Smith
+row 1: DOB | 1990-01-01
+row 2: City | Denver
+```
+
+```text
+5: 3 rows, 3 cols; column kinds: col0:string, col1:string, col2:string
+row 0: Name | : | John Smith
+row 1: DOB | : | 1990-01-01
+row 2: City | : | Denver
+```
+
+Both are one label column and one value per row — the second just has the colon split into its own cell. Either way: `header_rows: []`, `columns: []`. The test is the *shape* (every row is one label paired with its value), not the exact column count.
+
+**Blank form template — a row of column numbers, not data.**
+
+```text
+6: 2 rows, 5 cols; column kinds: col0:string, col1:string, col2:string, col3:string, col4:string
+row 0: No | Name | Nationality | Date of Birth | ID Number
+row 1: 1 | 2 | 3 | 4 | 5
+```
+
+Row 1 isn't a record — it's the columns numbered for reference, a convention in blank official forms, not filled-in data. `header_rows: [0]`, `row_end: 0` — no data rows exist; do not report `1, 2, 3, 4, 5` as if it were one.
+
+**Lone label naming everything beneath it (a title, not a header, not a table of its own).**
+
+```text
+7: 3 rows, 2 cols; column kinds: col0:string, col1:decimal
+row 0: Calculated Values
+row 1: st | 0.11
+row 2: KB | 69.04
+```
+
+Row 0 is alone, the rest of the row empty, and every row beneath keeps the same shape it introduces (more label-value pairs): `title: "Calculated Values"`, `header_rows: []`, `row_end: 2` — row 0 is never a row of the table, but it is also not a separate one-row table split from the rest, since nothing about the following rows' shape changes.
+
+**Trailing content that stops being this table.**
+
+```text
+8: 5 rows, 2 cols; column kinds: col0:string, col1:string
+row 0: id | name
+row 1: 1 | Alpha
+row 2: 2 | Beta
+row 3: notes: see appendix
+row 4: x | x
+```
+
+Row 3 breaks the shape (one label, not two data cells); row 4 repeats the same value in every cell where real data would vary. Neither is more of this table's data: `row_end: 2`.
+
+**Title from context, not from the block itself.**
+
+Given `context before: Table 2: Q3 Purchase Orders` and:
+
+```text
+9: 2 rows, 3 cols; column kinds: col0:integer, col1:string, col2:integer
+row 0: No | Item | Qty
+row 1: 1 | Widget | 4
+```
+
+Nothing in the block's own rows names it, so the title comes from context: `title: "Q3 Purchase Orders"` — just the name; if the context sentence had more explanation, that part would go in `notes`, not `title`.
+
+**Section labels inside a table.**
+
+```text
+10: 6 rows, 2 cols; column kinds: col0:string, col1:integer
+row 0: Product | Units
+row 1: Beverages
+row 2: Cola | 40
+row 3: Juice | 25
+row 4: Snacks
+row 5: Chips | 60
+```
+
+Rows 1 and 4 each carry one label, the rest empty, introducing the rows beneath them, sharing the table's own columns: `header_rows: [0]`, `section_rows: [1, 4]`.
+
+**Transposed.**
+
+```text
+11: 2 rows, 3 cols; column kinds: col0:string, col1:string, col2:string
+row 0: Name | John | Mary
+row 1: Age | 34 | 29
+```
+
+Field names run down column 0, one record per following column: `transposed: true`.

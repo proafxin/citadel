@@ -29,13 +29,19 @@ def stack_candidates(grids: list[list[list[str]]]) -> list[list[str]]:
     return [[row[index] if index < len(row) else "" for index in range(width)] for grid in grids for row in grid]
 
 
-def _candidate_text(grid: list[list[str]], index: int, adjacent: str = "") -> str:
+def _candidate_text(
+    grid: list[list[str]], index: int, adjacent: str = "", header_hint: list[int] | None = None
+) -> str:
     width = max((len(row) for row in grid), default=0)
     kinds = column_kinds(grid)
     hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))
     body = _payload_text(grid, payload_rows(grid), width)
     context = f"\n{adjacent}" if adjacent else ""
-    return f"{index}: {len(grid)} rows, {width} cols; column kinds: {hint}{context}\n{body}"
+    header_line = ""
+    if header_hint:
+        rows = ", ".join(str(row) for row in header_hint)
+        header_line = f"\nsource marks row(s) {rows} as header"
+    return f"{index}: {len(grid)} rows, {width} cols; column kinds: {hint}{context}{header_line}\n{body}"
 
 
 def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
@@ -110,12 +116,16 @@ async def structure_tables(
     anchors: dict | None = None,
     label: str = "",
     adjacent: list[str] | None = None,
+    header_hints: list[list[int]] | None = None,
 ) -> list[tuple[MaterializedTable, list[int]]]:
     if not candidates:
         return []
     started = time.perf_counter()
     context = adjacent or ["" for _ in candidates]
-    payload = "\n\n".join(_candidate_text(grid, index, context[index]) for index, grid in enumerate(candidates))
+    hints = header_hints or [[] for _ in candidates]
+    payload = "\n\n".join(
+        _candidate_text(grid, index, context[index], hints[index]) for index, grid in enumerate(candidates)
+    )
     specs = await collect_structure_candidates(await emit_structure_candidates(payload, prompt_name))
     prepared: list[tuple[list[int], list[list[str]], TableStructure]] = []
     for spec in specs:

@@ -494,7 +494,12 @@ async def _paginate_pptx(doc_id: str, filename: str) -> None:
     logger.info("paginate file=%s pptx slides=%d", filename, len(slides))
 
 
-_BLOCK_PAGINATORS = {"text": _paginate_text, "html": _paginate_html, "pptx": _paginate_pptx}
+_BLOCK_PAGINATORS = {
+    "text": _paginate_text,
+    "html": _paginate_html,
+    "html_pandoc": _paginate_html,
+    "pptx": _paginate_pptx,
+}
 
 
 async def handle_paginate(fields: dict[str, str]) -> None:
@@ -1204,6 +1209,9 @@ def _adjacent_context(blocks: list[Block], index: int) -> str:
     return "\n".join(parts)
 
 
+_RELIABLE_HEADER_KINDS = {"html", "pptx"}
+
+
 async def handle_table_structure(fields: dict[str, str]) -> None:
     if fields["unit"] == "sheet":
         await handle_tabular(fields)
@@ -1212,9 +1220,15 @@ async def handle_table_structure(fields: dict[str, str]) -> None:
     redis = get_redis()
     prepared = load_structures(await redis.get(f"structures:{doc_id}"))
     indices = table_block_indices(prepared.stitched)
-    grids = [grid_from_html(prepared.stitched[index].text or "") for index in indices]
+    extracted = [grid_from_html(prepared.stitched[index].text or "") for index in indices]
+    grids = [grid for grid, _ in extracted]
+    doc_kind = await redis.hget(f"doc:{doc_id}", "kind")
+    trust_header = (doc_kind.decode() if isinstance(doc_kind, bytes) else doc_kind) in _RELIABLE_HEADER_KINDS
+    header_hints = [header_rows if trust_header else [] for _, header_rows in extracted]
     adjacent = [_adjacent_context(prepared.stitched, index) for index in indices]
-    structured = await structure_tables(grids, prompt_name="table_structure_ocr", label=doc_id, adjacent=adjacent)
+    structured = await structure_tables(
+        grids, prompt_name="table_structure_ocr", label=doc_id, adjacent=adjacent, header_hints=header_hints
+    )
     by_block: dict[int, list[MaterializedTable]] = {}
     for table, blocks in structured:
         by_block.setdefault(indices[min(blocks)], []).append(table)

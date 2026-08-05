@@ -16,7 +16,7 @@ def _render_math(content: str, options: dict) -> str:
     return f"\\({html.escape(content)}\\)"
 
 
-_MARKDOWN = MarkdownIt().use(dollarmath_plugin, renderer=_render_math)
+_MARKDOWN = MarkdownIt().enable("table").use(dollarmath_plugin, renderer=_render_math)
 
 PRESENTATION_NATIVE_EXTS = {"pptx"}
 PRESENTATION_CONVERT_EXTS = {"ppt", "odp"}
@@ -122,9 +122,9 @@ def _markup_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes] |
     if ext in MARKDOWN_EXTS:
         return "html", _MARKDOWN.render(data.decode("utf-8")).encode()
     if ext in DOC_CONVERT_EXTS:
-        return "html", _pandoc_to_html(_soffice_convert(data, ext, "docx", profile_dir), "docx")
+        return "html_pandoc", _pandoc_to_html(_soffice_convert(data, ext, "docx", profile_dir), "docx")
     if ext in DOC_HTML_EXTS or ext == "epub":
-        return "html", _pandoc_to_html(data, ext)
+        return "html_pandoc", _pandoc_to_html(data, ext)
     return None
 
 
