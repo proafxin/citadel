@@ -1,152 +1,174 @@
-# Table Structure
+# Table Structure Extractor
 
-Each numbered **block** below is a region we pulled from a document because it might be a table — we are not sure. It may turn out to be a form, a heading, a caption, or plain running text. Every block already covers exactly one complete table candidate: nothing here needs merging with another block or splitting into several.
+You will be given some blocks of lines. In each block, there will be some lines. These blocks were extracted from tabular data which we considered to be candidate tables. Your job is to give us the actual structure of the table schema as well as any metadata. For the table structure, you should specify which line ranges form the actual rows of the table, which line ranges form the header rows and which line ranges form metadata such as title, caption, notes/comments, or any remaining metadata as well as which category the metadata belongs to. The output format should be a json. Note that some blocks may not even be valid tables. So, first decide if the table is valid or not. In the output only return the valid tables keyed by their id. Note that you need to parse each table properly to understand the underlying row column style structure first and there can be many deviations from a standard clean table (for example, a column may span multiple cells and there can be many other deviations which we can't really put cleanly in heuristics or fixed set of exhaustive rules. That's what you have to figure out). The following examples should be used to verify your understanding of the intent rather than treating them as exhaustive set of possibilities. Omit any key from your output whose value would otherwise be empty, null, or not applicable to that table — do not emit empty objects, empty arrays, or null values, just leave the key out entirely. Sometimes a table is in fact a form which we can consider to be a transposed table. This means detecting layout or relation between the data lines of the candidate table is also your job. You should also give us the layout type which can be: rectangular, crosstab, pivot, transpose.
 
-A block is shown as:
+## Sample Input
 
-```text
-N: R rows, C cols; column kinds: col0:kind, col1:kind, ...
-[context before: ...]
-[context after: ...]
-[source marks row(s) ... as header]
-row 0: cell | cell | cell
-row 1: cell | cell | cell
-```
+Table 1:
+0: some table text,,
+1: name, title, description
+2: ABC, Some title, Some description
+3: DEF, Another title, Another description
 
-`context before`/`context after` is the text of the block immediately next to this one — not confirmed to belong to it, judge for yourself. `source marks row(s) ... as header` appears only when the document's own format reliably marks a row as a header (e.g. real HTML `<th>`), never a guess — still verify it actually names columns.
+Table 2:
+0: Region,,
+1: North, South, East
+2: 300, 150, 90
+3: 200, 175, 60
 
-For every block that is a real table, report `transposed`, `col_start`/`col_end`, `header_rows`, `row_end`, `columns`, `section_rows`, `title`, `notes`, `blocks` (the single block number). Respond with a JSON object: `{"tables": [...]}`.
+Table 3:
+0: This report summarizes quarterly
+1: performance across all regions for
+2: the fiscal year ending in December.
 
-## examples
+Table 4:
+0: Name, John Smith
+1: DOB, 1990-01-01
+2: City, Denver
 
-**Ordinary table.**
+Table 5:
+0: Bin, 1990, 1991, 1992
+1: East, 4, 9, 12
+2: West, 6, 3, 15
 
-```text
-0: 3 rows, 3 cols; column kinds: col0:string, col1:integer, col2:integer
-row 0: Region | Q1 | Q2
-row 1: East | 120 | 98
-row 2: West | 75 | 110
-```
+Table 6:
+0: SAMPLE MEASUREMENT LOG,,,,,,,
+1: , Method, Alpha, , , Beta, ,
+2: , Group, X, Y, Z, X, Y, Z
+3: Record ID, Date, , , , , ,
+4: R-1001, 2013-03-14, , , , , , 91.06
+5: R-1002, 2013-03-15, 61.5, , , , ,
 
-→ `{"blocks": [0], "header_rows": [0], "row_end": 2, "col_start": 0, "col_end": 2, "columns": ["Region", "Q1", "Q2"], "transposed": false, "section_rows": [], "title": "", "notes": []}`
+Table 7:
+0: id, key_a, key_b, key_c, key_d, key_e, amount, price
+1: 1001, 12, 4, , , 1, 13.99, 13.99
+2: 1001, 12, 5, 19, , 3, 14.99, 9.99
+3: Reference notes:,,,,,,,
+4: key_a values:, 12, 12, 12, 15, 8, 8, 8
 
-**Header confirmed by the source, still verified.**
+Table 8:
+0: Field, Employee 1, Employee 2
+1: Name, Priya Nair, J. Alvarez
+2: Department, Logistics, Finance
+3: Start Date, 2021-06-01, 2019-11-15
 
-```text
-1: 3 rows, 2 cols; column kinds: col0:string, col1:string
-source marks row(s) 0 as header
-row 0: Name | Role
-row 1: A. Ford | Engineer
-row 2: B. Diaz | Analyst
-```
+Table 9:
+0: Property, System A, System B, System C
+1: Read latency (p99), 4ms, 12ms, 3ms
+2: Write latency (p99), 9ms, 6ms, 11ms
+3: Storage engine, LSM-tree, B-tree, LSM-tree
 
-Row 0 genuinely names both columns, so the hint is trusted: `header_rows: [0]`. Had it not (e.g. the marked row held a value like a real record instead), it would be rejected and header decided from the text alone.
+Table 10:
+0: QUARTERLY REVIEW,,,
+1: North Division,,,
+2: Segment, Q1, Q2, Q3
+3: Retail, 420, 465, 501
+4: Wholesale, 310, 298, 340
+5: South Division,,,
+6: Segment, Q1, Q2, Q3
+7: Retail, 180, 205, 190
+8: Wholesale, 90, 88, 102
 
-**Multi-row header.**
+## Sample Output
 
-```text
-2: 3 rows, 3 cols; column kinds: col0:string, col1:integer, col2:integer
-row 0: | Ship Mode: First Class |
-row 1: Segment | Consumer | Corporate
-row 2: A123 | 300 | 150
-```
+{
+    1: {
+        metadata: {title: 0},
+        rows_start: 2,
+        rows_end: 3,
+        headers_start: 1,
+        headers_end: 1,
+        columns: [
+            {label: "name", start: 0, end: 0},
+            {label: "title", start: 1, end: 1},
+            {label: "description", start: 2, end: 2}
+        ],
+        layout: "rectangular"
+    },
+    2: {
+        rows_start: 2,
+        rows_end: 3,
+        headers_start: 0,
+        headers_end: 1,
+        columns: [
+            {label: "Region North", start: 0, end: 0},
+            {label: "Region South", start: 1, end: 1},
+            {label: "Region East", start: 2, end: 2}
+        ]
+    },
+    4: {
+        rows_start: 0,
+        rows_end: 2
+    },
+    5: {
+        rows_start: 1,
+        rows_end: 2,
+        headers_start: 0,
+        headers_end: 0,
+        columns: [
+            {label: "Bin", start: 0, end: 0},
+            {label: "1990", start: 1, end: 1},
+            {label: "1991", start: 2, end: 2},
+            {label: "1992", start: 3, end: 3}
+        ]
+    },
+    6: {
+        metadata: {title: 0},
+        rows_start: 4,
+        rows_end: 5,
+        headers_start: 1,
+        headers_end: 3,
+        columns: [
+            {label: "Record ID", start: 0, end: 0},
+            {label: "Date", start: 1, end: 1},
+            {label: "Alpha X", start: 2, end: 2},
+            {label: "Alpha Y", start: 3, end: 3},
+            {label: "Alpha Z", start: 4, end: 4},
+            {label: "Beta X", start: 5, end: 5},
+            {label: "Beta Y", start: 6, end: 6},
+            {label: "Beta Z", start: 7, end: 7}
+        ]
+    },
+    7: {
+        rows_start: 1,
+        rows_end: 2,
+        headers_start: 0,
+        headers_end: 0,
+        columns: [
+            {label: "id", start: 0, end: 0},
+            {label: "key_a", start: 1, end: 1},
+            {label: "key_b", start: 2, end: 2},
+            {label: "key_c", start: 3, end: 3},
+            {label: "key_d", start: 4, end: 4},
+            {label: "key_e", start: 5, end: 5},
+            {label: "amount", start: 6, end: 6},
+            {label: "price", start: 7, end: 7}
+        ]
+    },
+    8: {
+        rows_start: 1,
+        rows_end: 3,
+        headers_start: 0,
+        headers_end: 0,
+        columns: [
+            {label: "Field", start: 0, end: 0},
+            {label: "Employee 1", start: 1, end: 1},
+            {label: "Employee 2", start: 2, end: 2}
+        ],
+        layout: "transpose"
+    },
+    9: {
+        rows_start: 1,
+        rows_end: 3,
+        headers_start: 0,
+        headers_end: 0,
+        columns: [
+            {label: "Property", start: 0, end: 0},
+            {label: "System A", start: 1, end: 1},
+            {label: "System B", start: 2, end: 2},
+            {label: "System C", start: 3, end: 3}
+        ]
+    }
+}
 
-Row 0 groups, row 1 sub-labels — both name columns: `header_rows: [0, 1]`, `columns: ["Segment", "First Class Consumer", "First Class Corporate"]` (the group label combined into each sub-column's own name, not left blank or repeated).
-
-**A numeric row that is actually a header.**
-
-```text
-3: 2 rows, 4 cols; column kinds: col0:string, col1:integer, col2:integer, col3:integer
-row 0: Bin | 1990 | 1991 | 1992
-row 1: East | 4 | 9 | 12
-```
-
-Row 0's `1990, 1991, 1992` step evenly — a year axis, not data, even though every cell is a plain number: `header_rows: [0]`.
-
-**Label-value form (no header at all) — two shapes, same treatment.**
-
-```text
-4: 3 rows, 2 cols; column kinds: col0:string, col1:string
-row 0: Name | John Smith
-row 1: DOB | 1990-01-01
-row 2: City | Denver
-```
-
-```text
-5: 3 rows, 3 cols; column kinds: col0:string, col1:string, col2:string
-row 0: Name | : | John Smith
-row 1: DOB | : | 1990-01-01
-row 2: City | : | Denver
-```
-
-Both are one label column and one value per row — the second just has the colon split into its own cell. Either way: `header_rows: []`, `columns: []`. The test is the *shape* (every row is one label paired with its value), not the exact column count.
-
-**Blank form template — a row of column numbers, not data.**
-
-```text
-6: 2 rows, 5 cols; column kinds: col0:string, col1:string, col2:string, col3:string, col4:string
-row 0: No | Name | Nationality | Date of Birth | ID Number
-row 1: 1 | 2 | 3 | 4 | 5
-```
-
-Row 1 isn't a record — it's the columns numbered for reference, a convention in blank official forms, not filled-in data. `header_rows: [0]`, `row_end: 0` — no data rows exist; do not report `1, 2, 3, 4, 5` as if it were one.
-
-**Lone label naming everything beneath it (a title, not a header, not a table of its own).**
-
-```text
-7: 3 rows, 2 cols; column kinds: col0:string, col1:decimal
-row 0: Calculated Values
-row 1: st | 0.11
-row 2: KB | 69.04
-```
-
-Row 0 is alone, the rest of the row empty, and every row beneath keeps the same shape it introduces (more label-value pairs): `title: "Calculated Values"`, `header_rows: []`, `row_end: 2` — row 0 is never a row of the table, but it is also not a separate one-row table split from the rest, since nothing about the following rows' shape changes.
-
-**Trailing content that stops being this table.**
-
-```text
-8: 5 rows, 2 cols; column kinds: col0:string, col1:string
-row 0: id | name
-row 1: 1 | Alpha
-row 2: 2 | Beta
-row 3: notes: see appendix
-row 4: x | x
-```
-
-Row 3 breaks the shape (one label, not two data cells); row 4 repeats the same value in every cell where real data would vary. Neither is more of this table's data: `row_end: 2`.
-
-**Title from context, not from the block itself.**
-
-Given `context before: Table 2: Q3 Purchase Orders` and:
-
-```text
-9: 2 rows, 3 cols; column kinds: col0:integer, col1:string, col2:integer
-row 0: No | Item | Qty
-row 1: 1 | Widget | 4
-```
-
-Nothing in the block's own rows names it, so the title comes from context: `title: "Q3 Purchase Orders"` — just the name; if the context sentence had more explanation, that part would go in `notes`, not `title`.
-
-**Section labels inside a table.**
-
-```text
-10: 6 rows, 2 cols; column kinds: col0:string, col1:integer
-row 0: Product | Units
-row 1: Beverages
-row 2: Cola | 40
-row 3: Juice | 25
-row 4: Snacks
-row 5: Chips | 60
-```
-
-Rows 1 and 4 each carry one label, the rest empty, introducing the rows beneath them, sharing the table's own columns: `header_rows: [0]`, `section_rows: [1, 4]`.
-
-**Transposed.**
-
-```text
-11: 2 rows, 3 cols; column kinds: col0:string, col1:string, col2:string
-row 0: Name | John | Mary
-row 1: Age | 34 | 29
-```
-
-Field names run down column 0, one record per following column: `transposed: true`.
+Table 3 is not a real table (plain running text broken across lines) and is correctly absent from the output entirely. Table 7's rows 3 and 4 break the shape established by rows 0-2 (a bare label, then a row whose cells are mostly a repeated echo of one column's own values rather than a new record) and are correctly excluded by `rows_end: 2` rather than folded in as more data or reported as metadata. Table 8 is left in its given orientation (row 0 is still literally the header row as shown) rather than pre-transposed — `layout: "transpose"` tells the consumer to flip it afterward, the same way `layout: "rectangular"` needs no flip. Table 9 looks label-value at a glance (column 0 reads like field names) but has two or more real value columns, not one, so its first row is a genuine header naming every column, not a label-value block.

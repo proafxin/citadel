@@ -179,6 +179,43 @@ def otsl_rows(otsl: str) -> list[tuple[list[str], bool, bool]]:
     return [(cells, flag, span) for cells, flag, span in rows if any(cell for cell in cells)]
 
 
+def otsl_to_json(otsl: str) -> list[list[dict]]:
+    output_rows: list[list[dict]] = []
+    track_row: list[dict] = []
+    output_row: list[dict] = []
+    track_above: list[dict] = []
+    parts = _OTSL_TOKEN.split(otsl)
+    for marker, content in itertools.zip_longest(parts[1::2], parts[2::2], fillvalue=""):
+        text = str(content).strip()
+        match marker:
+            case "nl":
+                output_rows.append(output_row)
+                track_above = track_row
+                track_row = []
+                output_row = []
+            case "fcel" | "ecel":
+                cell = {"text": text if marker == "fcel" else "", "rowspan": 1, "colspan": 1, "is_header": False}
+                track_row.append(cell)
+                output_row.append(cell)
+            case "ched" | "rhed":
+                cell = {"text": text, "rowspan": 1, "colspan": 1, "is_header": True}
+                track_row.append(cell)
+                output_row.append(cell)
+            case "lcel":
+                if track_row:
+                    track_row[-1]["colspan"] += 1
+                    track_row.append(track_row[-1])
+            case "ucel" | "xcel":
+                col = len(track_row)
+                if col < len(track_above):
+                    origin = track_above[col]
+                    origin["rowspan"] += 1
+                    track_row.append(origin)
+    if output_row or track_row:
+        output_rows.append(output_row)
+    return [row for row in output_rows if row]
+
+
 def _row_html(cells: list[str], width: int, tag: str) -> str:
     body = "".join(f"<{tag}>{html.escape(cells[i]) if i < len(cells) else ''}</{tag}>" for i in range(width))
     return f"<tr>{body}</tr>"
