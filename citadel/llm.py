@@ -187,6 +187,14 @@ _STRUCTURE_SCHEMA_OCR = {
             "headers_end": _TABLE_REF_SCHEMA,
             "columns": _LABELED_COLUMN_SCHEMA,
             "key_columns": _LABELED_COLUMN_SCHEMA,
+            "sections": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"label": {"type": "string"}, "line": _TABLE_REF_SCHEMA},
+                    "required": ["label", "line"],
+                },
+            },
             "dimensions": {
                 "type": "array",
                 "items": {

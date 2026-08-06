@@ -1,6 +1,6 @@
 # Table Structure Extractor
 
-You will be given some blocks of lines. In each block, there will be some lines. These blocks were extracted from tabular data which we considered to be candidate tables. Your job is to give us the actual structure of the table schema as well as any metadata. For the table structure, you should specify which line ranges form the actual rows of the table, which line ranges form the header rows and which line ranges form metadata such as title, caption, notes/comments, or any remaining metadata as well as which category the metadata belongs to. The output format should be a json. Note that some blocks may not even be valid tables. So, first decide if the table is valid or not. In the output only return the valid tables keyed by their id. Note that you need to parse each table properly to understand the underlying row column style structure first and there can be many deviations from a standard clean table (for example, a column may span multiple cells and there can be many other deviations which we can't really put cleanly in heuristics or fixed set of exhaustive rules. That's what you have to figure out). The following examples should be used to verify your understanding of the intent rather than treating them as exhaustive set of possibilities. Omit any key from your output whose value would otherwise be empty, null, or not applicable to that table — do not emit empty objects, empty arrays, or null values, just leave the key out entirely. Sometimes a table is in fact a form which we can consider to be a transposed table. This means detecting layout or relation between the data lines of the candidate table is also your job. You should also give us the layout type, which is exactly one of: rectangular, transpose, crosstab. For crosstab, give `key_columns`, `dimensions` (each `{label, line}`), and `value_start`/`value_end` instead of `columns`. If candidates are really one table split apart (only ever adjacent ones), report one entry with a `tables` list and line references as `{table, line}` instead of a bare line number.
+You will be given some blocks of lines. In each block, there will be some lines. These blocks were extracted from tabular data which we considered to be candidate tables. Your job is to give us the actual structure of the table schema as well as any metadata. For the table structure, you should specify which line ranges form the actual rows of the table, which line ranges form the header rows and which line ranges form metadata such as title, caption, notes/comments, or any remaining metadata as well as which category the metadata belongs to. The output format should be a json. Note that some blocks may not even be valid tables. So, first decide if the table is valid or not. In the output only return the valid tables keyed by their id. Note that you need to parse each table properly to understand the underlying row column style structure first and there can be many deviations from a standard clean table (for example, a column may span multiple cells and there can be many other deviations which we can't really put cleanly in heuristics or fixed set of exhaustive rules. That's what you have to figure out). The following examples should be used to verify your understanding of the intent rather than treating them as exhaustive set of possibilities. Omit any key from your output whose value would otherwise be empty, null, or not applicable to that table — do not emit empty objects, empty arrays, or null values, just leave the key out entirely. Sometimes a table is in fact a form which we can consider to be a transposed table. This means detecting layout or relation between the data lines of the candidate table is also your job. You should also give us the layout type, which is exactly one of: rectangular, transpose, crosstab. For crosstab, give `key_columns`, `dimensions` (each `{label, line}`), and `value_start`/`value_end` instead of `columns`. A short row of low-cardinality repeating labels (e.g. P/R, X/Y/Z, Yes/No) directly beneath a row of group names is almost always a second header row to fold into `headers_end`, not a data row, even though its own cells could pass for data on their own. If a label row inside the data range introduces a run of following rows that still share the table's own columns, give `sections` (a list of `{label, line}`) instead of reporting that label as its own table or as metadata. If candidates are really one table split apart (only ever adjacent ones), report one entry with a `tables` list and line references as `{table, line}` instead of a bare line number.
 
 ## Sample Input
 
@@ -59,6 +59,16 @@ Table 9:
 1: Read latency (p99), 4ms, 12ms, 3ms
 2: Write latency (p99), 9ms, 6ms, 11ms
 3: Storage engine, LSM-tree, B-tree, LSM-tree
+
+Table 10:
+0: CODE, DESCRIPTION
+1: Category A,
+2: 101, Widget assembly
+3: 102, Widget inspection
+4: 103, Widget packaging
+5: Category B,
+6: 201, Gadget assembly
+7: 202, Gadget testing
 
 Table 11:
 0: Batch, Yield %, Operator, Notes
@@ -186,6 +196,20 @@ Table 13:
             {label: "System C", index: 3}
         ]
     },
+    10: {
+        rows_start: 1,
+        rows_end: 7,
+        headers_start: 0,
+        headers_end: 0,
+        columns: [
+            {label: "CODE", index: 0},
+            {label: "DESCRIPTION", index: 1}
+        ],
+        sections: [
+            {label: "Category A", line: 1},
+            {label: "Category B", line: 5}
+        ]
+    },
     "11,12": {
         tables: [11, 12],
         headers_start: {table: 11, line: 0},
@@ -220,4 +244,4 @@ Table 13:
     }
 }
 
-Table 2's row 5 is a Total row summing each region's column, not another quarter's record — it's real derived data, not junk, so it's kept as `metadata: {total: 5}` rather than silently dropped, while `rows_end: 4` still keeps it out of the actual data rows. This differs from Table 7 below, where the excluded rows are a bare label and an echoed reference list, not a value worth keeping, so they get no metadata entry at all. Table 3 is not a real table (plain running text broken across lines) and is correctly absent from the output entirely. Table 7's rows 3 and 4 break the shape established by rows 0-2 (a bare label, then a row whose cells are mostly a repeated echo of one column's own values rather than a new record) and are correctly excluded by `rows_end: 2` rather than folded in as more data or reported as metadata. Table 8 is left in its given orientation (row 0 is still literally the header row as shown) rather than pre-transposed — `layout: "transpose"` tells the consumer to flip it afterward, the same way `layout: "rectangular"` needs no flip. Table 9 looks label-value at a glance (column 0 reads like field names) but has two or more real value columns, not one, so its first row is a genuine header naming every column, not a label-value block. Tables 11 and 12 are one table split apart: 12 has no header row of its own, only a continuation of 11's data, so `headers_start`/`headers_end` both point at table 11 while `rows_end` points at table 12's last line. Table 13 is a crosstab with two key columns (Segment, Cohort) and three stacked dimension rows (Year, Channel, Metric) rather than one — each dimension is reported on its own line instead of merging Year+Channel+Metric into a single combined column label.
+Table 2's row 5 is a Total row summing each region's column, not another quarter's record — it's real derived data, not junk, so it's kept as `metadata: {total: 5}` rather than silently dropped, while `rows_end: 4` still keeps it out of the actual data rows. This differs from Table 7 below, where the excluded rows are a bare label and an echoed reference list, not a value worth keeping, so they get no metadata entry at all. Table 3 is not a real table (plain running text broken across lines) and is correctly absent from the output entirely. Table 7's rows 3 and 4 break the shape established by rows 0-2 (a bare label, then a row whose cells are mostly a repeated echo of one column's own values rather than a new record) and are correctly excluded by `rows_end: 2` rather than folded in as more data or reported as metadata. Table 8 is left in its given orientation (row 0 is still literally the header row as shown) rather than pre-transposed — `layout: "transpose"` tells the consumer to flip it afterward, the same way `layout: "rectangular"` needs no flip. Table 9 looks label-value at a glance (column 0 reads like field names) but has two or more real value columns, not one, so its first row is a genuine header naming every column, not a label-value block. Table 10's rows 1 and 5 are section labels, not data or metadata — each introduces a run of following rows that still share the table's own two columns, so they're reported as `sections` rather than as their own table or a title; the rows that follow each one still count as ordinary rows within `rows_start`-`rows_end`. Tables 11 and 12 are one table split apart: 12 has no header row of its own, only a continuation of 11's data, so `headers_start`/`headers_end` both point at table 11 while `rows_end` points at table 12's last line. Table 13 is a crosstab with two key columns (Segment, Cohort) and three stacked dimension rows (Year, Channel, Metric) rather than one — each dimension is reported on its own line instead of merging Year+Channel+Metric into a single combined column label.

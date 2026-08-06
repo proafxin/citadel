@@ -321,6 +321,7 @@ def _rectangular_structure(
     if "headers_start" in spec and "headers_end" in spec:
         header_rows = list(range(resolve(spec["headers_start"]), resolve(spec["headers_end"]) + 1))
     columns = _labeled_columns(spec.get("columns"), width)
+    section_rows = [resolve(entry["line"]) for entry in spec.get("sections") or []]
     structure = TableStructure(
         col_start=0,
         col_end=max(width - 1, 0),
@@ -328,6 +329,7 @@ def _rectangular_structure(
         data_start=rows_start,
         data_end=rows_end,
         columns=columns,
+        section_rows=section_rows or None,
         title=title,
         notes=notes,
     )
