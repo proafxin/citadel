@@ -92,24 +92,25 @@ Table 13:
         headers_start: 1,
         headers_end: 1,
         columns: [
-            {label: "name", start: 0, end: 0},
-            {label: "title", start: 1, end: 1},
-            {label: "description", start: 2, end: 2}
+            {label: "name", index: 0},
+            {label: "title", index: 1},
+            {label: "description", index: 2}
         ],
         layout: "rectangular"
     },
     2: {
+        metadata: {total: 5},
         rows_start: 2,
         rows_end: 4,
         headers_start: 0,
         headers_end: 1,
         columns: [
-            {label: "Quarter", start: 0, end: 0},
-            {label: "Region North", start: 1, end: 1},
-            {label: "Region South", start: 2, end: 2},
-            {label: "Region East", start: 3, end: 3},
-            {label: "Region West", start: 4, end: 4},
-            {label: "Region Central", start: 5, end: 5}
+            {label: "Quarter", index: 0},
+            {label: "Region North", index: 1},
+            {label: "Region South", index: 2},
+            {label: "Region East", index: 3},
+            {label: "Region West", index: 4},
+            {label: "Region Central", index: 5}
         ]
     },
     4: {
@@ -122,10 +123,10 @@ Table 13:
         headers_start: 0,
         headers_end: 0,
         columns: [
-            {label: "Bin", start: 0, end: 0},
-            {label: "1990", start: 1, end: 1},
-            {label: "1991", start: 2, end: 2},
-            {label: "1992", start: 3, end: 3}
+            {label: "Bin", index: 0},
+            {label: "1990", index: 1},
+            {label: "1991", index: 2},
+            {label: "1992", index: 3}
         ]
     },
     6: {
@@ -135,14 +136,14 @@ Table 13:
         headers_start: 1,
         headers_end: 3,
         columns: [
-            {label: "Record ID", start: 0, end: 0},
-            {label: "Date", start: 1, end: 1},
-            {label: "Alpha X", start: 2, end: 2},
-            {label: "Alpha Y", start: 3, end: 3},
-            {label: "Alpha Z", start: 4, end: 4},
-            {label: "Beta X", start: 5, end: 5},
-            {label: "Beta Y", start: 6, end: 6},
-            {label: "Beta Z", start: 7, end: 7}
+            {label: "Record ID", index: 0},
+            {label: "Date", index: 1},
+            {label: "Alpha X", index: 2},
+            {label: "Alpha Y", index: 3},
+            {label: "Alpha Z", index: 4},
+            {label: "Beta X", index: 5},
+            {label: "Beta Y", index: 6},
+            {label: "Beta Z", index: 7}
         ]
     },
     7: {
@@ -151,14 +152,14 @@ Table 13:
         headers_start: 0,
         headers_end: 0,
         columns: [
-            {label: "id", start: 0, end: 0},
-            {label: "key_a", start: 1, end: 1},
-            {label: "key_b", start: 2, end: 2},
-            {label: "key_c", start: 3, end: 3},
-            {label: "key_d", start: 4, end: 4},
-            {label: "key_e", start: 5, end: 5},
-            {label: "amount", start: 6, end: 6},
-            {label: "price", start: 7, end: 7}
+            {label: "id", index: 0},
+            {label: "key_a", index: 1},
+            {label: "key_b", index: 2},
+            {label: "key_c", index: 3},
+            {label: "key_d", index: 4},
+            {label: "key_e", index: 5},
+            {label: "amount", index: 6},
+            {label: "price", index: 7}
         ]
     },
     8: {
@@ -167,9 +168,9 @@ Table 13:
         headers_start: 0,
         headers_end: 0,
         columns: [
-            {label: "Field", start: 0, end: 0},
-            {label: "Employee 1", start: 1, end: 1},
-            {label: "Employee 2", start: 2, end: 2}
+            {label: "Field", index: 0},
+            {label: "Employee 1", index: 1},
+            {label: "Employee 2", index: 2}
         ],
         layout: "transpose"
     },
@@ -179,10 +180,10 @@ Table 13:
         headers_start: 0,
         headers_end: 0,
         columns: [
-            {label: "Property", start: 0, end: 0},
-            {label: "System A", start: 1, end: 1},
-            {label: "System B", start: 2, end: 2},
-            {label: "System C", start: 3, end: 3}
+            {label: "Property", index: 0},
+            {label: "System A", index: 1},
+            {label: "System B", index: 2},
+            {label: "System C", index: 3}
         ]
     },
     "11,12": {
@@ -192,10 +193,10 @@ Table 13:
         rows_start: {table: 11, line: 1},
         rows_end: {table: 12, line: 2},
         columns: [
-            {label: "Batch", start: 0, end: 0},
-            {label: "Yield %", start: 1, end: 1},
-            {label: "Operator", start: 2, end: 2},
-            {label: "Notes", start: 3, end: 3}
+            {label: "Batch", index: 0},
+            {label: "Yield %", index: 1},
+            {label: "Operator", index: 2},
+            {label: "Notes", index: 3}
         ]
     },
     13: {
@@ -205,8 +206,8 @@ Table 13:
         headers_start: 1,
         headers_end: 3,
         key_columns: [
-            {label: "Segment", start: 0, end: 0},
-            {label: "Cohort", start: 1, end: 1}
+            {label: "Segment", index: 0},
+            {label: "Cohort", index: 1}
         ],
         dimensions: [
             {label: "Year", line: 1},
@@ -219,4 +220,4 @@ Table 13:
     }
 }
 
-Table 2's row 5 is a Total row summing each region's column, not another quarter's record, so it's excluded by `rows_end: 4` the same way Table 7 excludes its trailing rows. Table 3 is not a real table (plain running text broken across lines) and is correctly absent from the output entirely. Table 7's rows 3 and 4 break the shape established by rows 0-2 (a bare label, then a row whose cells are mostly a repeated echo of one column's own values rather than a new record) and are correctly excluded by `rows_end: 2` rather than folded in as more data or reported as metadata. Table 8 is left in its given orientation (row 0 is still literally the header row as shown) rather than pre-transposed — `layout: "transpose"` tells the consumer to flip it afterward, the same way `layout: "rectangular"` needs no flip. Table 9 looks label-value at a glance (column 0 reads like field names) but has two or more real value columns, not one, so its first row is a genuine header naming every column, not a label-value block. Tables 11 and 12 are one table split apart: 12 has no header row of its own, only a continuation of 11's data, so `headers_start`/`headers_end` both point at table 11 while `rows_end` points at table 12's last line. Table 13 is a crosstab with two key columns (Segment, Cohort) and three stacked dimension rows (Year, Channel, Metric) rather than one — each dimension is reported on its own line instead of merging Year+Channel+Metric into a single combined column label.
+Table 2's row 5 is a Total row summing each region's column, not another quarter's record — it's real derived data, not junk, so it's kept as `metadata: {total: 5}` rather than silently dropped, while `rows_end: 4` still keeps it out of the actual data rows. This differs from Table 7 below, where the excluded rows are a bare label and an echoed reference list, not a value worth keeping, so they get no metadata entry at all. Table 3 is not a real table (plain running text broken across lines) and is correctly absent from the output entirely. Table 7's rows 3 and 4 break the shape established by rows 0-2 (a bare label, then a row whose cells are mostly a repeated echo of one column's own values rather than a new record) and are correctly excluded by `rows_end: 2` rather than folded in as more data or reported as metadata. Table 8 is left in its given orientation (row 0 is still literally the header row as shown) rather than pre-transposed — `layout: "transpose"` tells the consumer to flip it afterward, the same way `layout: "rectangular"` needs no flip. Table 9 looks label-value at a glance (column 0 reads like field names) but has two or more real value columns, not one, so its first row is a genuine header naming every column, not a label-value block. Tables 11 and 12 are one table split apart: 12 has no header row of its own, only a continuation of 11's data, so `headers_start`/`headers_end` both point at table 11 while `rows_end` points at table 12's last line. Table 13 is a crosstab with two key columns (Segment, Cohort) and three stacked dimension rows (Year, Channel, Metric) rather than one — each dimension is reported on its own line instead of merging Year+Channel+Metric into a single combined column label.

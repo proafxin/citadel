@@ -82,7 +82,7 @@ from citadel.services.pdf import (
 )
 from citadel.services.presentation import parse_pptx
 from citadel.services.tabular import extract_json_tables, grid_from_html, structure_csv_tables
-from citadel.tabular.structure import structure_tables
+from citadel.tabular.structure import structure_tables_ocr
 from citadel.utils import normalize_file
 from config import CPU_EIGHTH, CPU_THIRD
 
@@ -1190,28 +1190,6 @@ async def handle_structure(fields: dict[str, str]) -> None:
     await redis.xadd(STREAM_TABLE_STRUCTURE, {"doc_id": doc_id, "unit": "document"})
 
 
-_ADJACENT_MAX_CHARS = 400
-
-
-def _adjacent_piece(block: Block, label: str) -> str | None:
-    text = (block.text or "").strip()
-    if block.type == "table" or not text or len(text) > _ADJACENT_MAX_CHARS:
-        return None
-    return f"{label}: {text}"
-
-
-def _adjacent_context(blocks: list[Block], index: int) -> str:
-    parts = []
-    if index > 0 and (piece := _adjacent_piece(blocks[index - 1], "context before")):
-        parts.append(piece)
-    if index + 1 < len(blocks) and (piece := _adjacent_piece(blocks[index + 1], "context after")):
-        parts.append(piece)
-    return "\n".join(parts)
-
-
-_RELIABLE_HEADER_KINDS = {"html", "pptx"}
-
-
 async def handle_table_structure(fields: dict[str, str]) -> None:
     if fields["unit"] == "sheet":
         await handle_tabular(fields)
@@ -1220,15 +1198,8 @@ async def handle_table_structure(fields: dict[str, str]) -> None:
     redis = get_redis()
     prepared = load_structures(await redis.get(f"structures:{doc_id}"))
     indices = table_block_indices(prepared.stitched)
-    extracted = [grid_from_html(prepared.stitched[index].text or "") for index in indices]
-    grids = [grid for grid, _ in extracted]
-    doc_kind = await redis.hget(f"doc:{doc_id}", "kind")
-    trust_header = (doc_kind.decode() if isinstance(doc_kind, bytes) else doc_kind) in _RELIABLE_HEADER_KINDS
-    header_hints = [header_rows if trust_header else [] for _, header_rows in extracted]
-    adjacent = [_adjacent_context(prepared.stitched, index) for index in indices]
-    structured = await structure_tables(
-        grids, prompt_name="table_structure_ocr", label=doc_id, adjacent=adjacent, header_hints=header_hints
-    )
+    grids = [grid_from_html(prepared.stitched[index].text or "") for index in indices]
+    structured = await structure_tables_ocr(grids, label=doc_id)
     by_block: dict[int, list[MaterializedTable]] = {}
     for table, blocks in structured:
         by_block.setdefault(indices[min(blocks)], []).append(table)
