@@ -1,6 +1,6 @@
 # Table Structure Extractor
 
-You will be given some blocks of lines. In each block, there will be some lines. These blocks were extracted from tabular data which we considered to be candidate tables. Your job is to give us the actual structure of the table schema as well as any metadata. For the table structure, you should specify which line ranges form the actual rows of the table, which line ranges form the header rows and which line ranges form metadata such as title, caption, notes/comments, or any remaining metadata as well as which category the metadata belongs to. The output format should be a json. Note that some blocks may not even be valid tables. So, first decide if the table is valid or not. In the output only return the valid tables keyed by their id. Note that you need to parse each table properly to understand the underlying row column style structure first and there can be many deviations from a standard clean table (for example, a column may span multiple cells and there can be many other deviations which we can't really put cleanly in heuristics or fixed set of exhaustive rules. That's what you have to figure out). The following examples should be used to verify your understanding of the intent rather than treating them as exhaustive set of possibilities. Omit any key from your output whose value would otherwise be empty, null, or not applicable to that table — do not emit empty objects, empty arrays, or null values, just leave the key out entirely. Sometimes a table is in fact a form which we can consider to be a transposed table. This means detecting layout or relation between the data lines of the candidate table is also your job. You should also give us the layout type which can be: rectangular, crosstab, pivot, transpose.
+You will be given some blocks of lines. In each block, there will be some lines. These blocks were extracted from tabular data which we considered to be candidate tables. Your job is to give us the actual structure of the table schema as well as any metadata. For the table structure, you should specify which line ranges form the actual rows of the table, which line ranges form the header rows and which line ranges form metadata such as title, caption, notes/comments, or any remaining metadata as well as which category the metadata belongs to. The output format should be a json. Note that some blocks may not even be valid tables. So, first decide if the table is valid or not. In the output only return the valid tables keyed by their id. Note that you need to parse each table properly to understand the underlying row column style structure first and there can be many deviations from a standard clean table (for example, a column may span multiple cells and there can be many other deviations which we can't really put cleanly in heuristics or fixed set of exhaustive rules. That's what you have to figure out). The following examples should be used to verify your understanding of the intent rather than treating them as exhaustive set of possibilities. Omit any key from your output whose value would otherwise be empty, null, or not applicable to that table — do not emit empty objects, empty arrays, or null values, just leave the key out entirely. Sometimes a table is in fact a form which we can consider to be a transposed table. This means detecting layout or relation between the data lines of the candidate table is also your job. You should also give us the layout type, which is exactly one of: rectangular, transpose, crosstab. For crosstab, give `key_columns`, `dimensions` (each `{label, line}`), and `value_start`/`value_end` instead of `columns`. If candidates are really one table split apart (only ever adjacent ones), report one entry with a `tables` list and line references as `{table, line}` instead of a bare line number.
 
 ## Sample Input
 
@@ -11,10 +11,12 @@ Table 1:
 3: DEF, Another title, Another description
 
 Table 2:
-0: Region,,
-1: North, South, East
-2: 300, 150, 90
-3: 200, 175, 60
+0: , Region,,,,
+1: Quarter, North, South, East, West, Central
+2: Q1, 300, 150, 90, 210, 175
+3: Q2, 200, 175, 60, 190, 140
+4: Q3, 260, 205, 75, 220, 160
+5: Total, 760, 530, 225, 620, 475
 
 Table 3:
 0: This report summarizes quarterly
@@ -58,16 +60,27 @@ Table 9:
 2: Write latency (p99), 9ms, 6ms, 11ms
 3: Storage engine, LSM-tree, B-tree, LSM-tree
 
-Table 10:
-0: QUARTERLY REVIEW,,,
-1: North Division,,,
-2: Segment, Q1, Q2, Q3
-3: Retail, 420, 465, 501
-4: Wholesale, 310, 298, 340
-5: South Division,,,
-6: Segment, Q1, Q2, Q3
-7: Retail, 180, 205, 190
-8: Wholesale, 90, 88, 102
+Table 11:
+0: Batch, Yield %, Operator, Notes
+1: B-204, 91.2, Kim,
+2: B-205, 88.7, Kim,
+3: B-206, 94.0, Osei, rerun after calibration
+
+Table 12:
+0: B-207, 90.5, Osei,
+1: B-208, 92.1, Fischer,
+2: B-209, 89.0, Fischer, sensor drift noted
+
+Table 13:
+0: SEGMENT SATISFACTION SURVEY,,,,,,,,,
+1: , , 2024, , , , 2025, , ,
+2: , , Online, , Store, , Online, , Store,
+3: Segment, Cohort, Score, N, Score, N, Score, N, Score, N
+4: Enterprise, New, 4.2, 118, 4.0, 64, 4.4, 121, 4.1, 70
+5: Enterprise, Returning, 4.6, 340, 4.5, 210, 4.7, 355, 4.6, 225
+6: SMB, New, 3.9, 88, 3.7, 40, 4.0, 95, 3.8, 47
+7: SMB, Returning, 4.3, 260, 4.2, 150, 4.4, 270, 4.3, 160
+8: Scores are on a 5-point scale; N is respondent count.,,,,,,,,,
 
 ## Sample Output
 
@@ -87,13 +100,16 @@ Table 10:
     },
     2: {
         rows_start: 2,
-        rows_end: 3,
+        rows_end: 4,
         headers_start: 0,
         headers_end: 1,
         columns: [
-            {label: "Region North", start: 0, end: 0},
-            {label: "Region South", start: 1, end: 1},
-            {label: "Region East", start: 2, end: 2}
+            {label: "Quarter", start: 0, end: 0},
+            {label: "Region North", start: 1, end: 1},
+            {label: "Region South", start: 2, end: 2},
+            {label: "Region East", start: 3, end: 3},
+            {label: "Region West", start: 4, end: 4},
+            {label: "Region Central", start: 5, end: 5}
         ]
     },
     4: {
@@ -168,7 +184,39 @@ Table 10:
             {label: "System B", start: 2, end: 2},
             {label: "System C", start: 3, end: 3}
         ]
+    },
+    "11,12": {
+        tables: [11, 12],
+        headers_start: {table: 11, line: 0},
+        headers_end: {table: 11, line: 0},
+        rows_start: {table: 11, line: 1},
+        rows_end: {table: 12, line: 2},
+        columns: [
+            {label: "Batch", start: 0, end: 0},
+            {label: "Yield %", start: 1, end: 1},
+            {label: "Operator", start: 2, end: 2},
+            {label: "Notes", start: 3, end: 3}
+        ]
+    },
+    13: {
+        metadata: {title: 0, notes: 8},
+        rows_start: 4,
+        rows_end: 7,
+        headers_start: 1,
+        headers_end: 3,
+        key_columns: [
+            {label: "Segment", start: 0, end: 0},
+            {label: "Cohort", start: 1, end: 1}
+        ],
+        dimensions: [
+            {label: "Year", line: 1},
+            {label: "Channel", line: 2},
+            {label: "Metric", line: 3}
+        ],
+        value_start: 2,
+        value_end: 9,
+        layout: "crosstab"
     }
 }
 
-Table 3 is not a real table (plain running text broken across lines) and is correctly absent from the output entirely. Table 7's rows 3 and 4 break the shape established by rows 0-2 (a bare label, then a row whose cells are mostly a repeated echo of one column's own values rather than a new record) and are correctly excluded by `rows_end: 2` rather than folded in as more data or reported as metadata. Table 8 is left in its given orientation (row 0 is still literally the header row as shown) rather than pre-transposed — `layout: "transpose"` tells the consumer to flip it afterward, the same way `layout: "rectangular"` needs no flip. Table 9 looks label-value at a glance (column 0 reads like field names) but has two or more real value columns, not one, so its first row is a genuine header naming every column, not a label-value block.
+Table 2's row 5 is a Total row summing each region's column, not another quarter's record, so it's excluded by `rows_end: 4` the same way Table 7 excludes its trailing rows. Table 3 is not a real table (plain running text broken across lines) and is correctly absent from the output entirely. Table 7's rows 3 and 4 break the shape established by rows 0-2 (a bare label, then a row whose cells are mostly a repeated echo of one column's own values rather than a new record) and are correctly excluded by `rows_end: 2` rather than folded in as more data or reported as metadata. Table 8 is left in its given orientation (row 0 is still literally the header row as shown) rather than pre-transposed — `layout: "transpose"` tells the consumer to flip it afterward, the same way `layout: "rectangular"` needs no flip. Table 9 looks label-value at a glance (column 0 reads like field names) but has two or more real value columns, not one, so its first row is a genuine header naming every column, not a label-value block. Tables 11 and 12 are one table split apart: 12 has no header row of its own, only a continuation of 11's data, so `headers_start`/`headers_end` both point at table 11 while `rows_end` points at table 12's last line. Table 13 is a crosstab with two key columns (Segment, Cohort) and three stacked dimension rows (Year, Channel, Metric) rather than one — each dimension is reported on its own line instead of merging Year+Channel+Metric into a single combined column label.
