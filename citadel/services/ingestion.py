@@ -115,7 +115,6 @@ PDFIUM_WORKERS = 4
 RENDER_TIMEOUT = 120
 PDF_POOL_MAX_TASKS = 100
 DETECT_WORKERS = 1
-UNCHARGED_PAGES = 512
 CROP_BUFFER = 12288
 CROP_BOUND = CROP_CONCURRENCY + CROP_BUFFER
 DECODE_CONCURRENCY = 16
@@ -162,21 +161,6 @@ class _CropBudget:
             self.waiters.popleft()
             self.used += need
             waiter.set_result(None)
-
-
-@dataclass
-class _Admission:
-    limit: int
-    pending: set[tuple[str, int]] = field(default_factory=set)
-
-    def free(self) -> int:
-        return self.limit - len(self.pending)
-
-    def enter(self, doc_id: str, page_idx: int) -> None:
-        self.pending.add((doc_id, page_idx))
-
-    def settle(self, doc_id: str, page_idx: int) -> None:
-        self.pending.discard((doc_id, page_idx))
 
 
 TIMELINE_BUCKET = 10.0
@@ -239,11 +223,6 @@ def log_timeline() -> None:
         " ".join(f"{flight:.0f}" for flight, _ in points),
     )
     get_timeline.cache_clear()
-
-
-@lru_cache
-def get_admission() -> _Admission:
-    return _Admission(UNCHARGED_PAGES)
 
 
 @lru_cache
@@ -417,6 +396,8 @@ def _progress_status(state: bytes | None, started: int, done: int) -> str:
         return "Ready"
     if started > 0 or done > 0:
         return "Processing"
+    if internal == "paginating":
+        return "Waiting"
     return "Queued"
 
 
@@ -570,7 +551,12 @@ async def handle_render(fields: dict[str, str]) -> None:
             raise FileNotFoundError(msg)
         return
     redis = get_redis()
-    await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
+    now = time.time()
+    first = await redis.hsetnx(f"doc:{doc_id}", "t_pages", now)
+    if first:
+        paginated = float(await redis.hget(f"doc:{doc_id}", "t_paginated") or 0)
+        if paginated:
+            logger.info("waiting_done doc_id=%s waited=%.1fs", doc_id, now - paginated)
     (image_bytes, digital), render_wait, render_cpu = await _run_pdfium(
         render_pdf_page, str(path), page_idx, dpi, job_timeout=RENDER_TIMEOUT
     )
@@ -912,7 +898,7 @@ async def _read_crop(
         budget.release(1)
 
 
-async def extract_page(doc_id: str, page_idx: int, image: bytes, digital: bool) -> list[Block]:
+async def extract_page(doc_id: str, image: bytes, digital: bool) -> list[Block]:
     budget = get_crop_budget()
     semaphore = get_crop_semaphore()
     spans = _Spans()
@@ -923,7 +909,6 @@ async def extract_page(doc_id: str, page_idx: int, image: bytes, digital: bool) 
 
     mark = time.time()
     granted = await budget.acquire(max(len(indices), 1))
-    get_admission().settle(doc_id, page_idx)
     spans.budget_wait = time.time() - mark
     mark = time.time()
     async with get_decode_gate():
@@ -1065,7 +1050,7 @@ async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
     digital = fields.get("digital") == "1"
     await get_redis().hincrby(f"doc:{doc_id}", "started_count", 1)
     ocr_t = time.time()
-    blocks = await extract_page(doc_id, page_idx, image, digital)
+    blocks = await extract_page(doc_id, image, digital)
     for block in blocks:
         block.page_idx = page_idx
 
@@ -1128,7 +1113,7 @@ def _stage_line(doc: dict[bytes, bytes]) -> str:
     proc, paginate, paginated = g("t_proc"), g("t_paginate"), g("t_paginated")
     pages, merge, done = g("t_pages"), g("t_merge"), g("t_done")
     units = {"pg": g("page_count"), "crop": g("crops_n")}
-    head = (("normalize", proc, paginate), ("paginate", paginate, paginated), ("queued", paginated, pages))
+    head = (("normalize", proc, paginate), ("paginate", paginate, paginated), ("waiting", paginated, pages))
     tail = (("pages_wall", pages, merge), ("merge", merge, done))
     walls = [f"{name}={end - start:.1f}s" for name, start, end in head if start and end]
     walls += [

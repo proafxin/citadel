@@ -11,7 +11,6 @@ from citadel.db import get_engine
 from citadel.services.batching import STREAM_BATCH, record_summary, summarize_document
 from citadel.services.ingestion import (
     CROP_BOUND,
-    DECODE_CONCURRENCY,
     GROUP,
     MAX_ATTEMPTS,
     PAGINATE_CONCURRENCY,
@@ -27,7 +26,6 @@ from citadel.services.ingestion import (
     ensure_group,
     fail_document,
     fail_page,
-    get_admission,
     get_crop_budget,
     handle_merge,
     handle_normalize,
@@ -56,7 +54,6 @@ logger = logging.getLogger(__name__)
 NORMALIZE_CONCURRENCY = CPU_THIRD
 MERGE_CONCURRENCY = CPU_EIGHTH
 STRUCTURE_CONCURRENCY = CPU_EIGHTH
-PAGES_BUFFER = DECODE_CONCURRENCY
 
 BLOCK_MS = 5000
 
@@ -248,27 +245,21 @@ async def _render_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> N
         cap.release()
 
 
-async def _ocr_job(doc_id: str, page_idx: int, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _ocr_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_PAGES
-    try:
-        fields = await _decode_or_settle(stream, msg_id, raw)
-        if fields is None:
-            return
-        work = await _run_cancelable(handle_ocr(fields, raw.get(b"image", b"")))
-        if work.exception() is None:
-            await _settle(stream, msg_id)
-            return
-        logger.error("ocr failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
-        await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
-    finally:
-        get_admission().settle(doc_id, page_idx)
+    fields = await _decode_or_settle(stream, msg_id, raw)
+    if fields is None:
+        return
+    work = await _run_cancelable(handle_ocr(fields, raw.get(b"image", b"")))
+    if work.exception() is None:
+        await _settle(stream, msg_id)
+        return
+    logger.error("ocr failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
+    await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
 
 
 def _ocr_claim(msg_id: str, raw: dict[bytes, bytes]) -> None:
-    doc_id = raw[b"doc_id"].decode()
-    page_idx = int(raw[b"page_idx"])
-    get_admission().enter(doc_id, page_idx)
-    _spawn(_ocr_job(doc_id, page_idx, msg_id, raw))
+    _spawn(_ocr_job(msg_id, raw))
 
 
 DRAINED_STREAMS = (
@@ -390,29 +381,25 @@ async def paginate() -> None:
     await _drive(STREAM_NORMALIZED, cap, lambda mid, raw: _spawn(_paginate_job(cap, mid, raw)))
 
 
-async def _pages_room() -> int:
-    redis = get_redis()
-    claimed = int((await redis.xpending(STREAM_PAGES, GROUP))["pending"])
-    unclaimed = await redis.xlen(STREAM_PAGES) - claimed
-    return PAGES_BUFFER - unclaimed
-
-
 async def _claim_ready(consumer: str, cap: _Capacity, spawn: Spawn, room: int) -> int:
     redis = get_redis()
     docs = sorted(name.decode() for name in cast("set[bytes]", await redis.smembers(RENDER_DOCS)))
+    if not docs:
+        return 0
+    for doc_id in docs:
+        await ensure_group(render_stream(doc_id))
+    per_stream = max(1, room // len(docs))
+    streams = {render_stream(doc_id): ">" for doc_id in docs}
+    fresh = cast(
+        "list[tuple[bytes, list[tuple[bytes, dict[bytes, bytes]]]]]",
+        await redis.xreadgroup(GROUP, consumer, streams, count=per_stream),
+    )
+    returned = {name.decode(): entries for name, entries in fresh}
     claimed = 0
     for doc_id in docs:
-        if claimed >= room:
-            break
-        stream = render_stream(doc_id)
-        await ensure_group(stream)
-        fresh = cast(
-            "list[tuple[bytes, list[tuple[bytes, dict[bytes, bytes]]]]]",
-            await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=room - claimed),
-        )
-        entries = fresh[0][1] if fresh else []
+        entries = returned.get(render_stream(doc_id), [])
         if not entries:
-            if not await redis.xlen(stream):
+            if not await redis.xlen(render_stream(doc_id)):
                 await redis.srem(RENDER_DOCS, doc_id)
             continue
         for msg_id, raw in entries:
@@ -443,13 +430,13 @@ async def render() -> None:
         if cap.free() <= 0:
             await cap.wait_free()
             continue
-        room = min(cap.free(), await _pages_room())
+        room = min(cap.free(), get_crop_budget().free())
         if room <= 0 or not await _claim_ready(consumer, cap, spawn, room):
             await asyncio.sleep(0.1)
 
 
 async def _ocr_room() -> int:
-    return min(get_crop_budget().free(), get_admission().free())
+    return get_crop_budget().free()
 
 
 async def ocr() -> None:

@@ -349,7 +349,7 @@ _VALIDATE_SCHEMA = {
 }
 
 
-def _pack_indices(counts: list[int], budget: int) -> list[list[int]]:
+def pack_indices(counts: list[int], budget: int) -> list[list[int]]:
     groups: list[list[int]] = []
     current: list[int] = []
     used = 0
@@ -373,7 +373,7 @@ async def validate_tables(candidates: list[str]) -> list[bool]:
     if not candidates:
         return []
     counts = await asyncio.to_thread(count_tokens_batch, candidates)
-    packs = _pack_indices(counts, RESOLVE_BUDGET)
+    packs = pack_indices(counts, RESOLVE_BUDGET)
     jobs: list[tuple[list[int], str]] = []
     for pack in packs:
         job_id = await emit_slm(_validate_prompt([candidates[i] for i in pack]), _VALIDATE_SCHEMA, False)

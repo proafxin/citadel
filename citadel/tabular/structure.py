@@ -6,8 +6,10 @@ from citadel.llm import (
     STRUCTURE_BUDGET_OCR,
     collect_structure_candidates,
     collect_structure_candidates_ocr,
+    count_tokens_batch,
     emit_structure_candidates,
     emit_structure_candidates_ocr,
+    pack_indices,
     structure_prompt_tokens_ocr,
 )
 from citadel.schemas.table import TableStructure
@@ -395,6 +397,18 @@ def _table_from_ocr_spec(
     return _rectangular_structure(spec, stitched, default_table, offsets, width, rows_start, rows_end, title, notes)
 
 
+async def _ocr_specs(candidates: list[list[list[str]]]) -> tuple[dict[str, dict], int]:
+    texts = [_ocr_candidate_text(grid, index) for index, grid in enumerate(candidates)]
+    counts = count_tokens_batch(texts)
+    overhead = structure_prompt_tokens_ocr("")
+    groups = pack_indices(counts, STRUCTURE_BUDGET_OCR - overhead)
+    jobs = [await emit_structure_candidates_ocr("\n\n".join(texts[i] for i in group)) for group in groups]
+    specs: dict[str, dict] = {}
+    for job_id in jobs:
+        specs.update(await collect_structure_candidates_ocr(job_id))
+    return specs, len(groups)
+
+
 async def structure_tables_ocr(
     candidates: list[list[list[str]]],
     *,
@@ -403,16 +417,7 @@ async def structure_tables_ocr(
     if not candidates:
         return []
     started = time.perf_counter()
-    payload = "\n\n".join(_ocr_candidate_text(grid, index) for index, grid in enumerate(candidates))
-    tokens = structure_prompt_tokens_ocr(payload)
-    if tokens > STRUCTURE_BUDGET_OCR:
-        logger.warning(
-            "table_structure_ocr%s payload=%d tokens exceeds budget=%d — sending anyway, every candidate is kept",
-            f" doc={label}" if label else "",
-            tokens,
-            STRUCTURE_BUDGET_OCR,
-        )
-    specs = await collect_structure_candidates_ocr(await emit_structure_candidates_ocr(payload))
+    specs, batches = await _ocr_specs(candidates)
     out: list[tuple[MaterializedTable, list[int]]] = []
     merged = 0
     valid_ids = set(range(len(candidates)))
@@ -434,9 +439,10 @@ async def structure_tables_ocr(
         else:
             logger.info("table_structure_ocr dropped ids=%s — materialized 0 rows", ids)
     logger.info(
-        "table_structure_ocr%s candidates=%d tables=%d merged=%d secs=%.1f",
+        "table_structure_ocr%s candidates=%d batches=%d tables=%d merged=%d secs=%.1f",
         f" doc={label}" if label else "",
         len(candidates),
+        batches,
         len(out),
         merged,
         time.perf_counter() - started,
