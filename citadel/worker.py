@@ -26,7 +26,6 @@ from citadel.services.ingestion import (
     ensure_group,
     fail_document,
     fail_page,
-    get_crop_budget,
     handle_merge,
     handle_normalize,
     handle_ocr,
@@ -44,7 +43,7 @@ from citadel.services.ingestion import (
     sample_timeline,
     shutdown,
 )
-from citadel.services.paddle import log_crop_sizes
+from citadel.services.paddle import CROP_CONCURRENCY, log_crop_sizes
 from citadel.services.query import STREAM_RESOLVE_BATCH, record_resolve_batch, resolve_batch_job
 from citadel.services.slm import read_replies
 from config import CPU_EIGHTH, CPU_THIRD, configure_logging, get_settings
@@ -54,6 +53,7 @@ logger = logging.getLogger(__name__)
 NORMALIZE_CONCURRENCY = CPU_THIRD
 MERGE_CONCURRENCY = CPU_EIGHTH
 STRUCTURE_CONCURRENCY = CPU_EIGHTH
+OCR_CONCURRENCY = CROP_CONCURRENCY
 
 BLOCK_MS = 5000
 
@@ -245,21 +245,20 @@ async def _render_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> N
         cap.release()
 
 
-async def _ocr_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_PAGES
-    fields = await _decode_or_settle(stream, msg_id, raw)
-    if fields is None:
-        return
-    work = await _run_cancelable(handle_ocr(fields, raw.get(b"image", b"")))
-    if work.exception() is None:
-        await _settle(stream, msg_id)
-        return
-    logger.error("ocr failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
-    await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
-
-
-def _ocr_claim(msg_id: str, raw: dict[bytes, bytes]) -> None:
-    _spawn(_ocr_job(msg_id, raw))
+    try:
+        fields = await _decode_or_settle(stream, msg_id, raw)
+        if fields is None:
+            return
+        work = await _run_cancelable(handle_ocr(fields, raw.get(b"image", b"")))
+        if work.exception() is None:
+            await _settle(stream, msg_id)
+            return
+        logger.error("ocr failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
+        await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
+    finally:
+        cap.release()
 
 
 DRAINED_STREAMS = (
@@ -430,17 +429,14 @@ async def render() -> None:
         if cap.free() <= 0:
             await cap.wait_free()
             continue
-        room = min(cap.free(), get_crop_budget().free())
+        room = cap.free()
         if room <= 0 or not await _claim_ready(consumer, cap, spawn, room):
             await asyncio.sleep(0.1)
 
 
-async def _ocr_room() -> int:
-    return get_crop_budget().free()
-
-
 async def ocr() -> None:
-    await _drive(STREAM_PAGES, None, _ocr_claim, _ocr_room)
+    cap = _Capacity(OCR_CONCURRENCY)
+    await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)))
 
 
 async def merge() -> None:
