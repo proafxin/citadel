@@ -1158,6 +1158,8 @@ def _stage_line(doc: dict[bytes, bytes]) -> str:
         if g(key) and units[unit]
     ]
     walls += [f"crops={g('crops_n'):.0f}"]
+    if g("table_structure_s"):
+        walls += [f"table_structure={g('table_structure_s'):.1f}s"]
     if g("rescued_pages"):
         walls += [f"rescued={g('rescued_pages'):.0f}pg/{g('rescued_runs'):.0f}run"]
     if g("ocr_heavy_pages"):
@@ -1201,7 +1203,9 @@ async def handle_table_structure(fields: dict[str, str]) -> None:
     prepared = load_structures(await redis.get(f"structures:{doc_id}"))
     indices = table_block_indices(prepared.stitched)
     grids = [prepared.stitched[index].grid or grid_from_html(prepared.stitched[index].text or "") for index in indices]
+    started = time.time()
     structured = await structure_tables_ocr(grids, label=doc_id)
+    await _add_stage_seconds(doc_id, "table_structure_s", time.time() - started)
     by_block: dict[int, list[MaterializedTable]] = {}
     for table, blocks in structured:
         by_block.setdefault(indices[min(blocks)], []).append(table)

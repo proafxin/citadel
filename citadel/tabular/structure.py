@@ -1,7 +1,6 @@
 import logging
 import time
 from collections import Counter
-from collections.abc import Callable
 
 from citadel.llm import (
     STRUCTURE_BUDGET_OCR,
@@ -191,13 +190,14 @@ def _row_offsets(ids: list[int], candidates: list[list[list[str]]]) -> dict[int,
     return offsets
 
 
-def _resolve_line(ref: object, default_table: int, offsets: dict[int, int]) -> int:
-    if isinstance(ref, dict):
-        return offsets[int(ref["table"])] + int(ref["line"])
+def _resolve_line(ref: object, default_table: int, offsets: dict[int, int]) -> int | None:
+    if isinstance(ref, dict) and isinstance(ref.get("table"), int) and isinstance(ref.get("line"), int):
+        base = offsets.get(ref["table"])
+        return None if base is None else base + ref["line"]
     if isinstance(ref, int):
-        return offsets[default_table] + ref
-    message = f"invalid line reference: {ref!r}"
-    raise TypeError(message)
+        base = offsets.get(default_table)
+        return None if base is None else base + ref
+    return None
 
 
 def _grid_cell(grid: list[list[str]], row: int, col: int) -> str:
@@ -215,14 +215,26 @@ def _labeled_columns(entries: list[dict] | None, width: int) -> list[str] | None
     return labels
 
 
-def _ocr_metadata(
-    spec: dict, default_table: int, offsets: dict[int, int], grid: list[list[str]]
-) -> tuple[str | None, list[str]]:
+def _metadata_line(ref: object, default_table: int, candidates: list[list[list[str]]]) -> str:
+    if isinstance(ref, dict) and isinstance(ref.get("table"), int) and isinstance(ref.get("line"), int):
+        table, line = ref["table"], ref["line"]
+    elif isinstance(ref, int):
+        table, line = default_table, ref
+    else:
+        return ""
+    if not (0 <= table < len(candidates)):
+        return ""
+    grid = candidates[table]
+    if not (0 <= line < len(grid)):
+        return ""
+    return " ".join(cell for cell in grid[line] if cell).strip()
+
+
+def _ocr_metadata(spec: dict, default_table: int, candidates: list[list[list[str]]]) -> tuple[str | None, list[str]]:
     title = None
     notes: list[str] = []
     for category, ref in (spec.get("metadata") or {}).items():
-        line = _resolve_line(ref, default_table, offsets)
-        text = " ".join(cell for cell in grid[line] if cell).strip() if 0 <= line < len(grid) else ""
+        text = _metadata_line(ref, default_table, candidates)
         if category == "title":
             title = text or None
         elif text:
@@ -241,11 +253,23 @@ def _forward_fill(grid: list[list[str]], line: int, start: int, end: int) -> lis
     return filled
 
 
+def _resolved_dimensions(spec: dict, default_table: int, offsets: dict[int, int]) -> list[dict]:
+    resolved = []
+    for dimension in spec.get("dimensions") or []:
+        line = _resolve_line(dimension["line"], default_table, offsets)
+        if line is not None:
+            resolved.append({"label": dimension["label"], "line": line})
+    return resolved
+
+
 def _crosstab_grid(
-    spec: dict, grid: list[list[str]], rows_start: int, rows_end: int, resolve: Callable[[object], int]
+    spec: dict,
+    grid: list[list[str]],
+    rows_start: int,
+    rows_end: int,
+    dimensions: list[dict],
 ) -> list[list[str]]:
     key_columns = spec.get("key_columns") or []
-    dimensions = [{"label": d["label"], "line": resolve(d["line"])} for d in spec.get("dimensions") or []]
     value_start = int(spec["value_start"])
     value_end = int(spec["value_end"])
     filled = [_forward_fill(grid, dimension["line"], value_start, value_end) for dimension in dimensions]
@@ -265,13 +289,15 @@ def _crosstab_grid(
 def _crosstab_structure(
     spec: dict,
     stitched: list[list[str]],
-    resolve: Callable[[object], int],
+    default_table: int,
+    offsets: dict[int, int],
     rows_start: int,
     rows_end: int,
     title: str | None,
     notes: list[str],
 ) -> tuple[list[list[str]], TableStructure]:
-    tidy = _crosstab_grid(spec, stitched, rows_start, rows_end, resolve)
+    dimensions = _resolved_dimensions(spec, default_table, offsets)
+    tidy = _crosstab_grid(spec, stitched, rows_start, rows_end, dimensions)
     structure = TableStructure(
         col_start=0,
         col_end=max((len(row) for row in tidy), default=1) - 1,
@@ -287,13 +313,16 @@ def _crosstab_structure(
 def _transpose_structure(
     spec: dict,
     stitched: list[list[str]],
-    resolve: Callable[[object], int],
+    default_table: int,
+    offsets: dict[int, int],
     width: int,
     rows_end: int,
     title: str | None,
     notes: list[str],
 ) -> tuple[list[list[str]], TableStructure]:
-    data_start = resolve(spec["headers_start"]) if "headers_start" in spec else 0
+    data_start = 0
+    if "headers_start" in spec:
+        data_start = _resolve_line(spec["headers_start"], default_table, offsets) or 0
     structure = TableStructure(
         transposed=True,
         col_start=0,
@@ -310,7 +339,8 @@ def _transpose_structure(
 def _rectangular_structure(
     spec: dict,
     stitched: list[list[str]],
-    resolve: Callable[[object], int],
+    default_table: int,
+    offsets: dict[int, int],
     width: int,
     rows_start: int,
     rows_end: int,
@@ -319,9 +349,16 @@ def _rectangular_structure(
 ) -> tuple[list[list[str]], TableStructure]:
     header_rows: list[int] = []
     if "headers_start" in spec and "headers_end" in spec:
-        header_rows = list(range(resolve(spec["headers_start"]), resolve(spec["headers_end"]) + 1))
+        headers_start = _resolve_line(spec["headers_start"], default_table, offsets)
+        headers_end = _resolve_line(spec["headers_end"], default_table, offsets)
+        if headers_start is not None and headers_end is not None:
+            header_rows = list(range(headers_start, headers_end + 1))
     columns = _labeled_columns(spec.get("columns"), width)
-    section_rows = [resolve(entry["line"]) for entry in spec.get("sections") or []]
+    section_rows = [
+        line
+        for entry in spec.get("sections") or []
+        if (line := _resolve_line(entry["line"], default_table, offsets)) is not None
+    ]
     structure = TableStructure(
         col_start=0,
         col_end=max(width - 1, 0),
@@ -338,25 +375,24 @@ def _rectangular_structure(
 
 def _table_from_ocr_spec(
     spec: dict, ids: list[int], candidates: list[list[list[str]]]
-) -> tuple[list[list[str]], TableStructure]:
+) -> tuple[list[list[str]], TableStructure] | None:
     stitched = stack_candidates([candidates[i] for i in ids])
     offsets = _row_offsets(ids, candidates)
     default_table = ids[0]
     width = max((len(row) for row in stitched), default=0)
 
-    def resolve(ref: object) -> int:
-        return _resolve_line(ref, default_table, offsets)
-
-    rows_start = resolve(spec["rows_start"])
-    rows_end = resolve(spec["rows_end"])
-    title, notes = _ocr_metadata(spec, default_table, offsets, stitched)
+    rows_start = _resolve_line(spec["rows_start"], default_table, offsets)
+    rows_end = _resolve_line(spec["rows_end"], default_table, offsets)
+    if rows_start is None or rows_end is None:
+        return None
+    title, notes = _ocr_metadata(spec, default_table, candidates)
     layout = spec.get("layout", "rectangular")
 
     if layout == "crosstab":
-        return _crosstab_structure(spec, stitched, resolve, rows_start, rows_end, title, notes)
+        return _crosstab_structure(spec, stitched, default_table, offsets, rows_start, rows_end, title, notes)
     if layout == "transpose":
-        return _transpose_structure(spec, stitched, resolve, width, rows_end, title, notes)
-    return _rectangular_structure(spec, stitched, resolve, width, rows_start, rows_end, title, notes)
+        return _transpose_structure(spec, stitched, default_table, offsets, width, rows_end, title, notes)
+    return _rectangular_structure(spec, stitched, default_table, offsets, width, rows_start, rows_end, title, notes)
 
 
 async def structure_tables_ocr(
@@ -386,11 +422,11 @@ async def structure_tables_ocr(
         if not ids:
             logger.info("table_structure_ocr dropped spec key=%r — no valid table id", key)
             continue
-        try:
-            grid, structure = _table_from_ocr_spec(spec, ids, candidates)
-        except KeyError as error:
-            logger.info("table_structure_ocr dropped spec key=%r — invalid line reference %s", key, error)
+        result = _table_from_ocr_spec(spec, ids, candidates)
+        if result is None:
+            logger.info("table_structure_ocr dropped spec key=%r — unresolvable rows_start/rows_end", key)
             continue
+        grid, structure = result
         table = materialize(grid, structure)
         if table.n_rows:
             out.append((table, ids))

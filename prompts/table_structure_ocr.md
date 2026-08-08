@@ -91,6 +91,18 @@ Table 14:
 1: B-208 | 92.1 | Fischer |
 2: B-209 | 89.0 | Fischer | sensor drift noted
 
+Table 15:
+0: QUARTERLY MAINTENANCE LOG
+
+Table 16:
+0: Equipment | Last Serviced | Next Due
+1: Compressor Unit 2 | 2026-01-14 | 2026-07-14
+2: Backup Generator | 2025-11-02 | 2026-05-02
+
+Table 17:
+0: Fire Suppression Panel | 2026-02-20 | 2026-08-20
+1: Water Pump Station | 2025-12-30 | 2026-06-30
+
 ## Sample Output
 
 {
@@ -240,7 +252,20 @@ Table 14:
             {label: "Operator", index: 2},
             {label: "Notes", index: 3}
         ]
+    },
+    "16,17": {
+        metadata: {title: {table: 15, line: 0}},
+        tables: [16, 17],
+        headers_start: {table: 16, line: 0},
+        headers_end: {table: 16, line: 0},
+        rows_start: {table: 16, line: 1},
+        rows_end: {table: 17, line: 1},
+        columns: [
+            {label: "Equipment", index: 0},
+            {label: "Last Serviced", index: 1},
+            {label: "Next Due", index: 2}
+        ]
     }
 }
 
-Table 2's row 5 is a Total row summing each region's column, not another quarter's record — it's real derived data, not junk, so it's kept as `metadata: {total: 5}` rather than silently dropped, while `rows_end: 4` still keeps it out of the actual data rows. Table 2's row 0 shows "Region" repeated 5 times (it spans only the 5 region columns, not the whole line), while Table 1's row 0 shows a single title spanning the entire line and appears once with the rest blank — that's the one case where a span is blanked instead of repeated. Table 3 is not a real table (plain running text broken across lines) and is correctly absent from the output entirely. Table 5 is a label/value form with a literal separator column in the middle (the colon) — still just two logical fields per row, no header, same treatment as Table 4. Table 7's row 1 repeats "Group" from row 0 at position 0 — that's the same single value carrying down from directly above, not a second distinct label, so the combined column stays "Group", not "Group Group"; the other columns combine their group name with their own sub-label ("System A Avg") the same way Table 2 combines "Region" with each region name. Table 8's rows 3 and 4 break the shape established by rows 0-2 (a bare label, then a row whose cells are mostly a repeated echo of one column's own values rather than a new record) and are correctly excluded by `rows_end: 2` rather than folded in as more data or reported as metadata. Table 9 is left in its given orientation (row 0 is still literally the header row as shown) rather than pre-transposed — `layout: "transpose"` tells the consumer to flip it afterward. Table 10 looks label-value at a glance (column 0 reads like field names) but has two or more real value columns, not one, so its first row is a genuine header naming every column, not a label-value block. Table 11's rows 1 and 5 are section labels, not data or metadata — each introduces a run of following rows that still share the table's own two columns, so they're reported as `sections` rather than as their own table or a title. Table 12's row 3 is a Total row, kept the same way as Table 2's. Tables 13 and 14 are one table split apart: 14 has no header row of its own, only a continuation of 13's data, so `headers_start`/`headers_end` both point at table 13 while `rows_end` points at table 14's last line.
+Table 2's row 5 is a Total row summing each region's column, not another quarter's record — it's real derived data, not junk, so it's kept as `metadata: {total: 5}` rather than silently dropped, while `rows_end: 4` still keeps it out of the actual data rows. Table 2's row 0 shows "Region" repeated 5 times (it spans only the 5 region columns, not the whole line), while Table 1's row 0 shows a single title spanning the entire line and appears once with the rest blank — that's the one case where a span is blanked instead of repeated. Table 3 is not a real table (plain running text broken across lines) and is correctly absent from the output entirely. Table 5 is a label/value form with a literal separator column in the middle (the colon) — still just two logical fields per row, no header, same treatment as Table 4. Table 7's row 1 repeats "Group" from row 0 at position 0 — that's the same single value carrying down from directly above, not a second distinct label, so the combined column stays "Group", not "Group Group"; the other columns combine their group name with their own sub-label ("System A Avg") the same way Table 2 combines "Region" with each region name. Table 8's rows 3 and 4 break the shape established by rows 0-2 (a bare label, then a row whose cells are mostly a repeated echo of one column's own values rather than a new record) and are correctly excluded by `rows_end: 2` rather than folded in as more data or reported as metadata. Table 9 is left in its given orientation (row 0 is still literally the header row as shown) rather than pre-transposed — `layout: "transpose"` tells the consumer to flip it afterward. Table 10 looks label-value at a glance (column 0 reads like field names) but has two or more real value columns, not one, so its first row is a genuine header naming every column, not a label-value block. Table 11's rows 1 and 5 are section labels, not data or metadata — each introduces a run of following rows that still share the table's own two columns, so they're reported as `sections` rather than as their own table or a title. Table 12's row 3 is a Total row, kept the same way as Table 2's. Tables 13 and 14 are one table split apart: 14 has no header row of its own, only a continuation of 13's data, so `headers_start`/`headers_end` both point at table 13 while `rows_end` points at table 14's last line. Table 15 is a lone title line that landed in its own candidate — not a table on its own, and not one of the candidates in the 16/17 merge either, but its line is still where the title actually is, so `metadata` points at it directly (`{table: 15, line: 0}`) rather than being forced to reference only the candidates listed in `tables`.
