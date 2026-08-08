@@ -386,7 +386,11 @@ async def structure_tables_ocr(
         if not ids:
             logger.info("table_structure_ocr dropped spec key=%r — no valid table id", key)
             continue
-        grid, structure = _table_from_ocr_spec(spec, ids, candidates)
+        try:
+            grid, structure = _table_from_ocr_spec(spec, ids, candidates)
+        except KeyError as error:
+            logger.info("table_structure_ocr dropped spec key=%r — invalid line reference %s", key, error)
+            continue
         table = materialize(grid, structure)
         if table.n_rows:
             out.append((table, ids))

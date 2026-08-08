@@ -121,6 +121,17 @@ def _spawn(coro: Coroutine[Any, Any, None]) -> None:
     task.add_done_callback(_done)
 
 
+async def _run_cancelable(coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+    work = asyncio.create_task(coro)
+    try:
+        await asyncio.wait({work})
+    except asyncio.CancelledError:
+        work.cancel()
+        await asyncio.wait({work})
+        raise
+    return work
+
+
 async def _retry_or_fail(
     stream: str, msg_id: str, raw: dict[bytes, bytes], giveup: Callable[[], Awaitable[None]]
 ) -> None:
@@ -196,8 +207,7 @@ async def _normalize_job(cap: _Capacity, profiles: asyncio.Queue[str], msg_id: s
         fields = await _decode_or_settle(stream, msg_id, raw)
         if fields is None:
             return
-        work = asyncio.create_task(handle_normalize(fields, profile))
-        await asyncio.wait({work})
+        work = await _run_cancelable(handle_normalize(fields, profile))
         if work.exception() is None:
             await _settle(stream, msg_id)
             return
@@ -214,8 +224,7 @@ async def _paginate_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) ->
         fields = await _decode_or_settle(stream, msg_id, raw)
         if fields is None:
             return
-        work = asyncio.create_task(handle_paginate(fields))
-        await asyncio.wait({work})
+        work = await _run_cancelable(handle_paginate(fields))
         if work.exception() is None:
             await _settle(stream, msg_id)
             return
@@ -231,8 +240,7 @@ async def _render_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> N
         fields = await _decode_or_settle(stream, msg_id, raw)
         if fields is None:
             return
-        work = asyncio.create_task(handle_render(fields))
-        await asyncio.wait({work})
+        work = await _run_cancelable(handle_render(fields))
         if work.exception() is None:
             await _settle(stream, msg_id)
             return
@@ -248,8 +256,7 @@ async def _ocr_job(doc_id: str, page_idx: int, msg_id: str, raw: dict[bytes, byt
         fields = await _decode_or_settle(stream, msg_id, raw)
         if fields is None:
             return
-        work = asyncio.create_task(handle_ocr(fields, raw.get(b"image", b"")))
-        await asyncio.wait({work})
+        work = await _run_cancelable(handle_ocr(fields, raw.get(b"image", b"")))
         if work.exception() is None:
             await _settle(stream, msg_id)
             return
@@ -296,8 +303,7 @@ async def _merge_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> No
         fields = await _decode_or_settle(stream, msg_id, raw)
         if fields is None:
             return
-        work = asyncio.create_task(handle_merge(fields))
-        await asyncio.wait({work})
+        work = await _run_cancelable(handle_merge(fields))
         if work.exception() is not None:
             logger.error("merge failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(work.exception()))
             await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "merge"))
@@ -315,8 +321,7 @@ async def _structure_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -
         fields = await _decode_or_settle(stream, msg_id, raw)
         if fields is None:
             return
-        work = asyncio.create_task(handle_structure(fields))
-        await asyncio.wait({work})
+        work = await _run_cancelable(handle_structure(fields))
         error = work.exception()
         if error is None:
             await _settle(stream, msg_id)
@@ -332,8 +337,7 @@ async def _table_structure_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
     fields = await _decode_or_settle(stream, msg_id, raw)
     if fields is None:
         return
-    work = asyncio.create_task(handle_table_structure(fields))
-    await asyncio.wait({work})
+    work = await _run_cancelable(handle_table_structure(fields))
     error = work.exception()
     if error is None:
         await _settle(stream, msg_id)
@@ -347,8 +351,7 @@ async def _batch_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
     fields = await _decode_or_settle(stream, msg_id, raw)
     if fields is None:
         return
-    work = asyncio.create_task(summarize_document(fields))
-    await asyncio.wait({work})
+    work = await _run_cancelable(summarize_document(fields))
     error = work.exception()
     if error is None:
         await _settle(stream, msg_id)
@@ -363,8 +366,7 @@ async def _resolve_batch_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
     fields = await _decode_or_settle(stream, msg_id, raw)
     if fields is None:
         return
-    work = asyncio.create_task(resolve_batch_job(fields))
-    await asyncio.wait({work})
+    work = await _run_cancelable(resolve_batch_job(fields))
     error = work.exception()
     if error is None:
         await _settle(stream, msg_id)
