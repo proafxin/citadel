@@ -1,7 +1,7 @@
 import type { DocProgress, DocumentItem } from "@/lib/api";
 
-export type Status = "queued" | "processing" | "ingested" | "embedded" | "partial" | "failed" | "skipped";
-export type Bucket = "queued" | "processing" | "ready" | "failed" | "skipped";
+export type Status = "queued" | "waiting" | "processing" | "ingested" | "embedded" | "partial" | "failed" | "skipped";
+export type Bucket = "queued" | "waiting" | "processing" | "ready" | "failed" | "skipped";
 
 export type DocState = {
   id: number;
