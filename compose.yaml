@@ -122,7 +122,7 @@ services:
       # never touched — and that 1.2GB is what the DETECTOR needs: it is a separate process with its own cuda context on
       # the same card, and it does not exist at the moment vLLM profiles, so nothing here reserves room for it.
       - --gpu-memory-utilization
-      - "0.65"
+      - "0.6"
       # a COUNT cap, and count is the wrong unit for two workloads of opposite shape: a table description is ~1k tokens
       # and an evidence-filter batch is ~30k, and no single number serves both. it does not have to — vllm admits by KV,
       # which IS size-aware: ~60 descriptions fit at once, or 4 filter calls, and whatever does not fit simply WAITS,
