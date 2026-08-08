@@ -11,7 +11,7 @@ Raw OTSL:
 
 Raw text/grid (fcel text only, no repetition):
 ```
-0: Class | Pytheas |  | TIRS |  | SP_CRF |  | Heuristics | 
+0: Class | Pytheas |  | TIRS |  | SP_CRF |  | Heuristics |
 1:  | P | R | P | R | P | R | P | R
 2: DATA | \(99.93\pm0.02\) | \(99.90\pm0.02\) | \(99.92\pm0.01\) | \(91.94\pm0.59\) | \(99.27\pm0.11\) | \(99.80\pm0.09\) | \(99.03\pm0.13\) | \(99.89\pm0.01\)
 3: ↳(top only) | \(97.37\pm0.36\) | \(97.18\pm0.76\) | \(93.72\pm0.64\) | \(85.01\pm1.52\) | \(86.89\pm1.40\) | \(84.91\pm2.09\) | \(67.94\pm1.78\) | \(80.99\pm1.55\)
@@ -111,7 +111,7 @@ Raw text/grid (fcel text only, no repetition):
 24: 87 | Departmental Summons Case
 25: 88 | Death Inquiry
 26: 89 | Criminal Application
-27: SECOND CLASS MAGISTRATES' COURTS | 
+27: SECOND CLASS MAGISTRATES' COURTS |
 28: 91 | Civil Summons by Government
 29: 92 | Civil Summons by Individual
 30: 93 | Civil Summons by Firm or Society
@@ -135,7 +135,7 @@ Raw OTSL:
 Raw text/grid (fcel text only, no repetition):
 ```
 0: astana hub | Internal regulatory document\nAstana Hub International Technopark of IT startups Corporate Fund | Page 1
-1: REGISTRATION PROCEDURE FOR PARTICIPANTS OF ASTANA HUB INTERNATIONAL TECHNOLOGY PARK OF IT STARTUPS |  | 
+1: REGISTRATION PROCEDURE FOR PARTICIPANTS OF ASTANA HUB INTERNATIONAL TECHNOLOGY PARK OF IT STARTUPS |  |
 ```
 
 ---
@@ -152,7 +152,7 @@ Raw OTSL:
 Raw text/grid (fcel text only, no repetition):
 ```
 0: astana hub | Internal regulatory document\nAstana Hub International Technopark of IT startups Corporate Fund | Page 2
-1: REGISTRATION PROCEDURE FOR PARTICIPANTS OF ASTANA HUB INTERNATIONAL TECHNOLOGY PARK OF IT STARTUPS |  | 
+1: REGISTRATION PROCEDURE FOR PARTICIPANTS OF ASTANA HUB INTERNATIONAL TECHNOLOGY PARK OF IT STARTUPS |  |
 ```
 
 ---
@@ -169,9 +169,9 @@ Raw OTSL:
 Raw text/grid (fcel text only, no repetition):
 ```
 0: No. Tuntutan | : | TTPM-WP-(P)-1172-2026
-1: Tarikh Pendengaran | : | 
-2: Masa Pendengaran | : | 
-3: No. Resit Borang 1 | : | 
+1: Tarikh Pendengaran | : |
+2: Masa Pendengaran | : |
+3: No. Resit Borang 1 | : |
 ```
 
 ---
@@ -208,14 +208,14 @@ Raw OTSL:
 Raw text/grid (fcel text only, no repetition):
 ```
 0: Nama Penentang/Syarikat/ Pertubuhan Perbadanan/ Pertubuhan/Firma | : | ICONIX CO-LIVING SDN BHD
-1:  | 1439156-A | 
-2: No. Kad Pengenalan/ | : | 
-3: No. Pendaftaran Syarikat/ Pertubuhan Perbadanan/ Pertubuhan/Firma |  | 
+1:  | 1439156-A |
+2: No. Kad Pengenalan/ | : |
+3: No. Pendaftaran Syarikat/ Pertubuhan Perbadanan/ Pertubuhan/Firma |  |
 4: Alamat Surat Menyurat | : | UNIT NO 20-01, MERCU ASPIRE, KL ECO CITY
 5:  | : | 59200 Kuala Lumpur
-6:  | / admin@iconixpropertymgmt.com | 
-7: No. Telefon | : | 
-8: No. Faks/E-mel | : | 
+6:  | / admin@iconixpropertymgmt.com |
+7: No. Telefon | : |
+8: No. Faks/E-mel | : |
 ```
 
 ---
@@ -232,11 +232,11 @@ Raw OTSL:
 Raw text/grid (fcel text only, no repetition):
 ```
 0: DATE / TIME |  | PAGE | CASH SALE NO. |  | USER | SALESMAN
-1: 22/06/2026 13:14 |  | 1 of 1 | LY-G026-864067 |  | Yusri | 
+1: 22/06/2026 13:14 |  | 1 of 1 | LY-G026-864067 |  | Yusri |
 2: NO | ITEM DESCRIPTION |  |  | QTY | UNIT PRICE | AMOUNT (RM)
 3: 1 | NB-MSI-V16HX-AI-A2XWJG-478MY-GRY VECTOR 16HX AI / 16 QHD+ IPS 240HZ / U9-275HX / 16GB D5 / 1TB SSD / NVIDIA RTX5090 24GB D7 / W11 / 2 YR + 1ST YR ITW / GAMING BP / COSMOS GRAY / 9S7-15M352-478 SN#:K2507N0044577 |  |  | 1 | 14,500.00 | 14,500.00
-4:  |  |  |  | 1 | 14,500.00 | 
-5:  |  |  |  | TOTAL | 14,500.00 | 
+4:  |  |  |  | 1 | 14,500.00 |
+5:  |  |  |  | TOTAL | 14,500.00 |
 ```
 
 ---
@@ -252,13 +252,13 @@ Raw OTSL:
 
 Raw text/grid (fcel text only, no repetition):
 ```
-0: A. ENG 101 |  |  |  |  |  | 
+0: A. ENG 101 |  |  |  |  |  |
 1: 2026 Sum | ENG | 101 | College Composition | T | 3.00 | Transfer
-2: 1B. ENG 121 |  |  |  |  |  | 
+2: 1B. ENG 121 |  |  |  |  |  |
 3: 2026 Sum | ENG | 121 | College Composition II | T | 3.00 | Transfer
-4: 1C. POS 101, PCJ 215, or COM 210 |  |  |  |  |  | 
+4: 1C. POS 101, PCJ 215, or COM 210 |  |  |  |  |  |
 5: 2026 Sum | POS | 101 | American Government |  | 3.00 | In Progress
-6: 1D. ENG 101 |  |  |  |  |  | 
+6: 1D. ENG 101 |  |  |  |  |  |
 7: 2026 Sum | ENG | 101 | College Composition | T | 3.00 | Transfer
 ```
 
@@ -276,13 +276,13 @@ Raw OTSL:
 Raw text/grid (fcel text only, no repetition):
 ```
 0: 2026 Sum | SOC | 100 | Introduction to Sociology |  | 3.00 | In Progress
-1: 5B. HTY 115, HTY 116, HTY 161, HTY 162 |  |  |  |  |  | 
+1: 5B. HTY 115, HTY 116, HTY 161, HTY 162 |  |  |  |  |  |
 2: 2026 Sum | HTY | 115 | World Civilization I |  | 3.00 | In Progress
-3: 5C. FRE 101 or SPA 101 |  |  |  |  |  | 
+3: 5C. FRE 101 or SPA 101 |  |  |  |  |  |
 4: 2026 Sum | SPA | 101 | Elementary Spanish I |  | 3.00 | In Progress
-5: 5D. PHI 151, PHI 152 OR POS 211 OR SWK 202 |  |  |  |  |  | 
+5: 5D. PHI 151, PHI 152 OR POS 211 OR SWK 202 |  |  |  |  |  |
 6: 2026 Sum | PHI | 152 | Introduction to Ethics | T | 3.00 | Transfer
-7: 5E. POS 101, POS 211, OR POS 332 |  |  |  |  |  | 
+7: 5E. POS 101, POS 211, OR POS 332 |  |  |  |  |  |
 8: 2026 Sum | POS | 101 | American Government |  | 3.00 | In Progress
 ```
 
@@ -355,7 +355,7 @@ Raw text/grid (fcel text only, no repetition):
 ```
 0: № | Владелец ЭЦП | Сведения о цифровой подписи | Дата и время подписи
 1: 1 | БАЙТУРСЫНОВ ФИЗЗАТ | МПIGigYJ**** | 02.07.2026 в 19:42
-2: Данный документ согласно пункту 1 статьи 7 ЗРК от 7 января 2003 года "Об электронном документе и электронной цифровой подписи" равнозначен документу на бумажном носителе. |  |  | 
+2: Данный документ согласно пункту 1 статьи 7 ЗРК от 7 января 2003 года "Об электронном документе и электронной цифровой подписи" равнозначен документу на бумажном носителе. |  |  |
 ```
 
 ---
@@ -371,7 +371,7 @@ Raw OTSL:
 
 Raw text/grid (fcel text only, no repetition):
 ```
-0: Renewal of Tenancy, based on Point system and Recommendation |  |  |  | 
+0: Renewal of Tenancy, based on Point system and Recommendation |  |  |  |
 1: Community Executives & Manager (CE) | 60% |  | Booking Team | 10%
 2: Credit and Collections | 10% |  | Other Tenants/Residence | 10%
 3: Landlord | 5% |  | JMB/ Others | 5%
@@ -408,7 +408,7 @@ Raw OTSL:
 Raw text/grid (fcel text only, no repetition):
 ```
 0: No. | Surname, name, patronymic (if available), including in Latin letters | Date of birth | Citizenship (country of permanent residence) | Number, date of issue and issuing authority of the passport (identity document) | Availability of a C3 visa obtained under the Technopark benefits | Expected period of stay (month, year) in the territory of the Republic of Kazakhstan | Information about qualifications | Information about visa extension | Purpose of arrival on the territory of the Republic of Kazakhstan | Address of residence in the Republic of Kazakhstan
-1: 1 |  |  |  |  |  |  |  |  |  | 
+1: 1 |  |  |  |  |  |  |  |  |  |
 ```
 
 ---
@@ -425,7 +425,7 @@ Raw OTSL:
 Raw text/grid (fcel text only, no repetition):
 ```
 0: No. | Surname, name, patronymic (if any), including in Latin letters | Date of birth | Citizenship (country of permanent residence) | Number, date of issue and issuing authority of the passport (identity document) | Expected period of stay (month, year) in the territory of the Republic of Kazakhstan | Information about qualifications | Information about visa extension | Purpose of arrival on the territory of the Republic of Kazakhstan | Address of residence in the Republic of Kazakhstan
-1: 1 |  |  |  |  |  |  |  |  | 
+1: 1 |  |  |  |  |  |  |  |  |
 ```
 
 ---
@@ -442,7 +442,7 @@ Raw OTSL:
 Raw text/grid (fcel text only, no repetition):
 ```
 0: No. | EDS Holder | Personal Identifier (IIN) | Participant Identifier (BIN) | Date and time of sig
-1: 1 |  |  |  | 
+1: 1 |  |  |  |
 ```
 
 ---
@@ -534,18 +534,18 @@ Raw OTSL:
 Raw text/grid (fcel text only, no repetition):
 ```
  | Confirmed by TENANT
-Reviewed and explained the Tenancy Agreement (TA) terms & conditions in detail to the Tenant AND explained and answered all of the Tenant's questions in accordance with the provisions of the Tenancy Agreement. | 
-Provided the Tenant with a copy of the signed Tenancy Agreement. | 
-Reviewed, explained, and completed the "Joint Move-In" file together with the Tenant, and ensured it is duly signed. | 
-Verified and confirmed that the Keys and Access Cards issued (Pcs and Serial Codes) to the Tenant are accurate and fully with the Tenant Management System (TMS) Representative records. | 
-Confirmed that the Outstanding Balance has been fully paid into the correct account, and reminded the Tenant that all subsequent rental and payment obligations must be made only to the Tenant's individual account as per the Tenancy Agreement / Invoice issued. | 
+Reviewed and explained the Tenancy Agreement (TA) terms & conditions in detail to the Tenant AND explained and answered all of the Tenant's questions in accordance with the provisions of the Tenancy Agreement. |
+Provided the Tenant with a copy of the signed Tenancy Agreement. |
+Reviewed, explained, and completed the "Joint Move-In" file together with the Tenant, and ensured it is duly signed. |
+Verified and confirmed that the Keys and Access Cards issued (Pcs and Serial Codes) to the Tenant are accurate and fully with the Tenant Management System (TMS) Representative records. |
+Confirmed that the Outstanding Balance has been fully paid into the correct account, and reminded the Tenant that all subsequent rental and payment obligations must be made only to the Tenant's individual account as per the Tenancy Agreement / Invoice issued. |
 Confirmed that my Sales Person (Booking Consultant / Sales Agent) was ON-TIME and Present during the Move-In Tenancy Briefing together with the Tenant. | YES NO\nBC:\nAgent: a/r
-Explained to the Tenant that the Community Executive (CE) in charge may change from time to time, and that the Tenant must contact the CE in charge listed in the official WA House group for related matters. | 
+Explained to the Tenant that the Community Executive (CE) in charge may change from time to time, and that the Tenant must contact the CE in charge listed in the official WA House group for related matters. |
 Conducted and uploaded the relevant information/docs (e.g. Move-In video (clear & multiple), NRICs/Passports, Workplace, Key Card images etc. into the official Google Drive folder. | NA
 I acknowledge that all the above steps have been duly completed and confirm my responsibility for their accuracy and fairness, and that all my actions were carried out fairly, honestly, and with integrity, in line with ICONIX SOP, the Anti-Bribery and Corruption Policy, and professional standards. | NA
-Signed by CE | 
-Name | 
-Date | 
+Signed by CE |
+Name |
+Date |
 ```
 
 ---
@@ -570,16 +570,16 @@ Note: This document is a Required Document for the purpose of Incentive / Commis
 Raw text/grid (fcel text only, no repetition):
 ```
  | Confirmed by CE
-I am PRESENT during the Tenancy Briefing and Joint Move-In Briefing together with the Community Executive (CE). | 
-I explained and answered all of the Tenant's questions in accordance with the provisions of the Tenancy Agreement. | 
-I've provided the Tenant with a copy of the signed Booking Form. | 
-I've ensured that the Move-In Date and Rental Start Date are accurate and tally with this document. Eg. TODAY's date is the Move-In Date on file. | 
+I am PRESENT during the Tenancy Briefing and Joint Move-In Briefing together with the Community Executive (CE). |
+I explained and answered all of the Tenant's questions in accordance with the provisions of the Tenancy Agreement. |
+I've provided the Tenant with a copy of the signed Booking Form. |
+I've ensured that the Move-In Date and Rental Start Date are accurate and tally with this document. Eg. TODAY's date is the Move-In Date on file. |
 (For Sales Representative only: Name ______)
 • I have the required knowledge to answer all Tenant's questions based on TA T&C
 • I have [ attended / will attend ] the official ICONIX Briefing | Representative Capability:
 ______%
 (For Booking Consultant only)
-• I've conducted the Move-In briefing and ensured the Move-In video was taken, approved by the CE, and uploaded into the approved Google Drive folder. | 
+• I've conducted the Move-In briefing and ensured the Move-In video was taken, approved by the CE, and uploaded into the approved Google Drive folder. |
 I acknowledge that all the above steps have been duly completed and confirm my responsibility for their accuracy and fairness, and that all my actions were carried out fairly, honestly, and with integrity, in line with ICONIX SOP, the Anti-Bribery and Corruption Policy, and professional standards.
 Signed by BC/Agent : ________________
 Name : \(\underline{\text{CHEEZHAN YMAO}}\)
@@ -655,6 +655,6 @@ Section | Item | Particulars
 9B | Water Bills\(^{{*}}\) | Payment to be shared between occupants of the Premises, with a subsidy of RM ______ from the Owner
  |  | Payable by Landlord\nWater charges shall be settled either through the Joint Management Body (JMB)/Building Management or directly remitted to Syarikat Bekalan Air Selangor (SYABAS)/Air Selangor, in accordance with the established payment procedures for such utilities.
  |  | Syabas/Air Selangor Provider: SYABAS Account Number: Pay to JMB
-9C | Common Area Utilities | 
+9C | Common Area Utilities |
 10 | Payment Details | All payment shall be made in Ringgit Malaysia (RM) and shall be paid promptly to the account:\nAccount Holder\nICONIX Co-Living Sdn Bhd\nName of Bank\nCIMB Bank Berhad\nAccount No.\n98-300-0121-67363\nImportant Notice: Please make all your payments to this Exact Account Number to avoid any delays or complications with your tenancy. Using this unique account number ensures a smooth and efficient payment process.\n**Please always quote your Tenant Account: MD.M9511-01 when making payments.
 ```

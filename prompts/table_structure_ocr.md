@@ -46,11 +46,12 @@ Table 7:
 3: treatment | 4.6 | 0.2 | 4.3 | 0.3 | 4.5 | 0.2 | 4.0 | 0.4
 
 Table 8:
-0: id | key_a | key_b | key_c | key_d | key_e | amount | price
-1: 1001 | 12 | 4 | | | 1 | 13.99 | 13.99
-2: 1001 | 12 | 5 | 19 | | 3 | 14.99 | 9.99
-3: Reference notes: | | | | | | |
-4: key_a values: | 12 | 12 | 12 | 15 | 8 | 8 | 8
+0: DATE / TIME | | PAGE | ORDER NO. | | USER | CLERK
+1: 03/03/2026 09:15 | | 1 of 1 | OR-1029-448821 | | jdoe | mgray
+2: NO | ITEM DESCRIPTION | | | QTY | UNIT PRICE | AMOUNT
+3: 1 | Wireless Mechanical Keyboard, RGB Backlit, USB-C | | | 2 | 45.00 | 90.00
+4: | | | | 2 | 45.00 |
+5: | | | | TOTAL | 90.00 |
 
 Table 9:
 0: Field | Employee 1 | Employee 2
@@ -102,6 +103,34 @@ Table 16:
 Table 17:
 0: Fire Suppression Panel | 2026-02-20 | 2026-08-20
 1: Water Pump Station | 2025-12-30 | 2026-06-30
+
+Table 18:
+0: Approval Routing, based on Priority Tier and Escalation
+1: Team Lead | 60% | | Vendor Relations | 10%
+2: Finance Review | 10% | | Client Services | 10%
+3: Compliance Officer | 5% | | Legal Affairs | 5%
+
+Table 19:
+0: ACME CORP | Internal regulatory document\nGlobal Trade Compliance Division | Page 1
+1: PROCEDURE FOR ONBOARDING NEW REGIONAL PARTNERS | |
+
+Table 20:
+0: Regulatory Handbook | | 149
+1: Clause | Amending Directive | Effective Date
+2: 99 | Directive 1199 | 01-09-2019
+3: | Directive 1498 | 01-03-2020
+
+Table 21:
+0: GLOBAL DEVICE ADOPTION SURVEY | | |
+1: | Q4 2025 – Revised | |
+2: Region | Devices Shipped | Market Share | Growth YoY
+3: Northern Zone | 82,400 | 21.3% | 14.2%
+4: TOTAL | 386,900 | 100.0% | 9.6%
+
+Table 22:
+0: ID | Signer | Certificate Code | Signed At
+1: 1 | J. Alvarez | AB12CD34** | 2026-03-01 10:15
+2: This document is considered equivalent to a physically signed paper record under applicable electronic signature regulations. | | |
 
 ## Sample Output
 
@@ -173,19 +202,17 @@ Table 17:
         ]
     },
     8: {
-        rows_start: 1,
-        rows_end: 2,
-        headers_start: 0,
-        headers_end: 0,
+        metadata: {notes: 1, total: 5},
+        rows_start: 3,
+        rows_end: 3,
+        headers_start: 2,
+        headers_end: 2,
         columns: [
-            {label: "id", index: 0},
-            {label: "key_a", index: 1},
-            {label: "key_b", index: 2},
-            {label: "key_c", index: 3},
-            {label: "key_d", index: 4},
-            {label: "key_e", index: 5},
-            {label: "amount", index: 6},
-            {label: "price", index: 7}
+            {label: "NO", index: 0},
+            {label: "ITEM DESCRIPTION", index: 1},
+            {label: "QTY", index: 4},
+            {label: "UNIT PRICE", index: 5},
+            {label: "AMOUNT", index: 6}
         ]
     },
     9: {
@@ -265,7 +292,55 @@ Table 17:
             {label: "Last Serviced", index: 1},
             {label: "Next Due", index: 2}
         ]
+    },
+    18: {
+        metadata: {title: 0},
+        rows_start: 1,
+        rows_end: 3,
+        columns: [
+            {label: "Role A", index: 0},
+            {label: "Percent A", index: 1},
+            {label: "Role B", index: 3},
+            {label: "Percent B", index: 4}
+        ]
+    },
+    20: {
+        rows_start: 2,
+        rows_end: 3,
+        headers_start: 1,
+        headers_end: 1,
+        columns: [
+            {label: "Clause", index: 0},
+            {label: "Amending Directive", index: 1},
+            {label: "Effective Date", index: 2}
+        ]
+    },
+    21: {
+        metadata: {title: 0, caption: 1, total: 4},
+        rows_start: 3,
+        rows_end: 3,
+        headers_start: 2,
+        headers_end: 2,
+        columns: [
+            {label: "Region", index: 0},
+            {label: "Devices Shipped", index: 1},
+            {label: "Market Share", index: 2},
+            {label: "Growth YoY", index: 3}
+        ]
+    },
+    22: {
+        metadata: {notes: 2},
+        rows_start: 1,
+        rows_end: 1,
+        headers_start: 0,
+        headers_end: 0,
+        columns: [
+            {label: "ID", index: 0},
+            {label: "Signer", index: 1},
+            {label: "Certificate Code", index: 2},
+            {label: "Signed At", index: 3}
+        ]
     }
 }
 
-Table 2's row 5 is a Total row summing each region's column, not another quarter's record — it's real derived data, not junk, so it's kept as `metadata: {total: 5}` rather than silently dropped, while `rows_end: 4` still keeps it out of the actual data rows. Table 2's row 0 shows "Region" repeated 5 times (it spans only the 5 region columns, not the whole line), while Table 1's row 0 shows a single title spanning the entire line and appears once with the rest blank — that's the one case where a span is blanked instead of repeated. Table 3 is not a real table (plain running text broken across lines) and is correctly absent from the output entirely. Table 5 is a label/value form with a literal separator column in the middle (the colon) — still just two logical fields per row, no header, same treatment as Table 4. Table 7's row 1 repeats "Group" from row 0 at position 0 — that's the same single value carrying down from directly above, not a second distinct label, so the combined column stays "Group", not "Group Group"; the other columns combine their group name with their own sub-label ("System A Avg") the same way Table 2 combines "Region" with each region name. Table 8's rows 3 and 4 break the shape established by rows 0-2 (a bare label, then a row whose cells are mostly a repeated echo of one column's own values rather than a new record) and are correctly excluded by `rows_end: 2` rather than folded in as more data or reported as metadata. Table 9 is left in its given orientation (row 0 is still literally the header row as shown) rather than pre-transposed — `layout: "transpose"` tells the consumer to flip it afterward. Table 10 looks label-value at a glance (column 0 reads like field names) but has two or more real value columns, not one, so its first row is a genuine header naming every column, not a label-value block. Table 11's rows 1 and 5 are section labels, not data or metadata — each introduces a run of following rows that still share the table's own two columns, so they're reported as `sections` rather than as their own table or a title. Table 12's row 3 is a Total row, kept the same way as Table 2's. Tables 13 and 14 are one table split apart: 14 has no header row of its own, only a continuation of 13's data, so `headers_start`/`headers_end` both point at table 13 while `rows_end` points at table 14's last line. Table 15 is a lone title line that landed in its own candidate — not a table on its own, and not one of the candidates in the 16/17 merge either, but its line is still where the title actually is, so `metadata` points at it directly (`{table: 15, line: 0}`) rather than being forced to reference only the candidates listed in `tables`.
+Table 2's row 5 is a Total row summing each region's column, not another quarter's record — it's real derived data, not junk, so it's kept as `metadata: {total: 5}` rather than silently dropped, while `rows_end: 4` still keeps it out of the actual data rows. Table 2's row 0 shows "Region" repeated 5 times (it spans only the 5 region columns, not the whole line), while Table 1's row 0 shows a single title spanning the entire line and appears once with the rest blank — that's the one case where a span is blanked instead of repeated. Table 3 is not a real table (plain running text broken across lines) and is correctly absent from the output entirely. Table 5 is a label/value form with a literal separator column in the middle (the colon) — still just two logical fields per row, no header, same treatment as Table 4. Table 7's row 1 repeats "Group" from row 0 at position 0 — that's the same single value carrying down from directly above, not a second distinct label, so the combined column stays "Group", not "Group Group"; the other columns combine their group name with their own sub-label ("System A Avg") the same way Table 2 combines "Region" with each region name. Table 8's rows 0-1 are an unrelated preamble — order/date/clerk information that isn't part of the item table at all, but is still worth keeping, so it's captured whole as `metadata: {notes: 1}` rather than forced into the table's own columns, and `headers_start`/`headers_end` skip straight to row 2 where the real header is; row 4 is a garbage echo of row 3's quantity and price with no item description and is excluded the same way Table 8 always excluded stray rows, and row 5 is a Total row whose label lands under the QTY column rather than at index 0 — `metadata: {total: 5}` still works because it captures the whole line, not just column 0. Table 9 is left in its given orientation (row 0 is still literally the header row as shown) rather than pre-transposed — `layout: "transpose"` tells the consumer to flip it afterward. Table 10 looks label-value at a glance (column 0 reads like field names) but has two or more real value columns, not one, so its first row is a genuine header naming every column, not a label-value block. Table 11's rows 1 and 5 are section labels, not data or metadata — each introduces a run of following rows that still share the table's own two columns, so they're reported as `sections` rather than as their own table or a title. Table 12's row 3 is a Total row, kept the same way as Table 2's. Tables 13 and 14 are one table split apart: 14 has no header row of its own, only a continuation of 13's data, so `headers_start`/`headers_end` both point at table 13 while `rows_end` points at table 14's last line. Table 15 is a lone title line that landed in its own candidate — not a table on its own, and not one of the candidates in the 16/17 merge either, but its line is still where the title actually is, so `metadata` points at it directly (`{table: 15, line: 0}`) rather than being forced to reference only the candidates listed in `tables`. Table 18 has the same title-in-row-0 shape as Table 1, captured the same way via `metadata: {title: 0}`, but none of its remaining rows are a header — every row from 1 to 3 pairs a role with a percentage twice over, so `headers_start`/`headers_end` are left out entirely rather than forced onto the title line or the first data row; each pair gets its own semantic column pair (`Role A`/`Percent A`, `Role B`/`Percent B`) with the blank spacer column simply skipped, the same non-contiguous-index approach Table 8 uses. Table 19 looks tabular — multiple aligned columns, several rows — but its content is a running letterhead banner and a document title, not real data, so like Table 3 it's correctly absent from the output entirely; unlike Table 3 though, this shows that having a clean multi-column shape doesn't by itself make something a table. Table 20's row 0 is a running page-header banner (a page name and page number repeated at the top of every page) — not part of the table and not meaningful metadata either, so it's simply skipped by starting `headers_start` at row 1 rather than being forced into a metadata category. Table 21 combines a full-width title (row 0, same blank-collapsed span as Table 1) with a second subtitle line (row 1) whose text sits at column 1 instead of column 0 — captured as `metadata: {title: 0, caption: 1}` since a metadata reference resolves the whole line regardless of which column holds the text — plus a Total row handled the same way as Table 2 and Table 12. Table 22's row 2 is a trailing disclaimer sentence with no relation to the ID/Signer/Certificate Code/Signed At columns above it — captured as `metadata: {notes: 2}` and excluded from `rows_end` the same way a Total row is excluded, just filed under a different category.

@@ -618,27 +618,6 @@ async def requeue_message(stream: str, msg_id: str, fields: dict[bytes, bytes]) 
     await _requeue()(keys=[stream], args=[GROUP, msg_id, *flat])
 
 
-async def render_weights(docs: list[str]) -> dict[str, float]:
-    redis = get_redis()
-    pipe = redis.pipeline(transaction=False)
-    for doc_id in docs:
-        pipe.hmget(f"doc:{doc_id}", "page_count", "done_count", "crops_n")
-    rows = await pipe.execute()
-    stats: dict[str, tuple[float, float, float]] = {}
-    seen_crops = seen_pages = 0.0
-    for doc_id, row in zip(docs, rows, strict=True):
-        pages, done, crops = (float(value or 0) for value in row)
-        stats[doc_id] = (pages, done, crops)
-        seen_crops += crops
-        seen_pages += done
-    mean_density = seen_crops / seen_pages if seen_pages else 1.0
-    weights: dict[str, float] = {}
-    for doc_id, (pages, done, crops) in stats.items():
-        density = crops / done if done else mean_density
-        weights[doc_id] = max(1.0, (pages - done) * max(density, 1.0))
-    return weights
-
-
 async def record_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
     await _record_unit()(
         keys=[f"blocks:{doc_id}", f"doc:{doc_id}", STREAM_STRUCTURE],

@@ -4,7 +4,6 @@ import signal
 import traceback
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from functools import lru_cache
 from typing import Any, cast
 
 from citadel.bus import get_redis
@@ -43,7 +42,6 @@ from citadel.services.ingestion import (
     reap_orphan_blobs,
     release_idle,
     render_stream,
-    render_weights,
     requeue_message,
     sample_timeline,
     shutdown,
@@ -399,47 +397,28 @@ async def _pages_room() -> int:
     return PAGES_BUFFER - unclaimed
 
 
-@lru_cache
-def get_render_credit() -> dict[str, float]:
-    return {}
-
-
-async def _claim_by_share(consumer: str, cap: _Capacity, spawn: Spawn, room: int) -> int:
+async def _claim_ready(consumer: str, cap: _Capacity, spawn: Spawn, room: int) -> int:
     redis = get_redis()
     docs = sorted(name.decode() for name in cast("set[bytes]", await redis.smembers(RENDER_DOCS)))
-    if not docs:
-        return 0
-    weights = await render_weights(docs)
-    total = sum(weights.values()) or 1.0
-    credit = get_render_credit()
-    for gone in set(credit) - set(docs):
-        del credit[gone]
-    for doc_id in docs:
-        credit[doc_id] = credit.get(doc_id, 0.0) + room * weights[doc_id] / total
     claimed = 0
-    for doc_id in sorted(docs, key=lambda name: credit[name], reverse=True):
+    for doc_id in docs:
         if claimed >= room:
             break
-        share = min(int(credit[doc_id]), room - claimed)
-        if share <= 0:
-            continue
         stream = render_stream(doc_id)
         await ensure_group(stream)
         fresh = cast(
             "list[tuple[bytes, list[tuple[bytes, dict[bytes, bytes]]]]]",
-            await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=share),
+            await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=room - claimed),
         )
         entries = fresh[0][1] if fresh else []
         if not entries:
             if not await redis.xlen(stream):
                 await redis.srem(RENDER_DOCS, doc_id)
-                credit.pop(doc_id, None)
             continue
         for msg_id, raw in entries:
             cap.take()
             spawn(msg_id.decode(), raw)
             claimed += 1
-        credit[doc_id] -= len(entries)
     return claimed
 
 
@@ -465,7 +444,7 @@ async def render() -> None:
             await cap.wait_free()
             continue
         room = min(cap.free(), await _pages_room())
-        if room <= 0 or not await _claim_by_share(consumer, cap, spawn, room):
+        if room <= 0 or not await _claim_ready(consumer, cap, spawn, room):
             await asyncio.sleep(0.1)
 
 
