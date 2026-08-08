@@ -15,6 +15,7 @@ const PAGE_SIZE = 10;
 const PILLS: { key: Filter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "queued", label: "Queued" },
+  { key: "waiting", label: "Waiting" },
   { key: "processing", label: "Processing" },
   { key: "ready", label: "Ready" },
   { key: "failed", label: "Failed" },
@@ -23,6 +24,7 @@ const PILLS: { key: Filter; label: string }[] = [
 
 const DOT: Record<Bucket, string> = {
   queued: "bg-ink-muted",
+  waiting: "bg-amber-500",
   processing: "bg-accent",
   ready: "bg-emerald-500",
   failed: "bg-red-400",
@@ -40,7 +42,7 @@ export function LibraryProgress({
   filter: Filter;
   onFilter: (next: Filter) => void;
 }) {
-  const counts: Record<Bucket, number> = { queued: 0, processing: 0, ready: 0, failed: 0, skipped: 0 };
+  const counts: Record<Bucket, number> = { queued: 0, waiting: 0, processing: 0, ready: 0, failed: 0, skipped: 0 };
   for (const doc of states) counts[bucketOf(doc)] += 1;
   const settled = states.filter(isSettled).length;
   const overall = states.length > 0 ? settled / states.length : 0;

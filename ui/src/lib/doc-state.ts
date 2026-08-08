@@ -21,15 +21,21 @@ const SETTLED: Record<string, Status> = {
   skipped: "skipped",
 };
 
+const LIVE_STATUS: Record<string, Status> = {
+  queued: "queued",
+  waiting: "waiting",
+  processing: "processing",
+};
+
 export function interpret(docs: DocumentItem[], progress: DocProgress[]): DocState[] {
   const byId = new Map(progress.map((row) => [row.doc_id, row]));
   return docs.map((doc) => {
     const live = byId.get(doc.id);
-    const started = live != null && (live.done > 0 || live.active > 0);
+    const liveStatus = live ? LIVE_STATUS[live.status.toLowerCase()] : undefined;
     return {
       id: doc.id,
       filename: doc.filename,
-      status: SETTLED[doc.status] ?? (started ? "processing" : "queued"),
+      status: SETTLED[doc.status] ?? liveStatus ?? "queued",
       done: live?.done ?? 0,
       active: live?.active ?? 0,
       total: live?.total ?? 0,
@@ -40,6 +46,7 @@ export function interpret(docs: DocumentItem[], progress: DocProgress[]): DocSta
 
 const BUCKET: Record<Status, Bucket> = {
   queued: "queued",
+  waiting: "waiting",
   processing: "processing",
   ingested: "ready",
   embedded: "ready",
@@ -53,7 +60,7 @@ export function bucketOf(state: DocState): Bucket {
 }
 
 export function isSettled(state: DocState): boolean {
-  return state.status !== "queued" && state.status !== "processing";
+  return state.status !== "queued" && state.status !== "waiting" && state.status !== "processing";
 }
 
 export function isViewable(state: DocState): boolean {

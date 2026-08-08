@@ -3,6 +3,7 @@ import type { Status } from "@/lib/doc-state";
 
 const LABELS: Record<Status, string> = {
   queued: "Queued",
+  waiting: "Waiting",
   processing: "Processing",
   ingested: "Ingested",
   embedded: "Embedded",
@@ -15,6 +16,7 @@ type Tone = "ready" | "warn" | "bad" | "muted" | "active";
 
 const TONES: Record<Status, Tone> = {
   queued: "muted",
+  waiting: "warn",
   processing: "active",
   ingested: "ready",
   embedded: "ready",
