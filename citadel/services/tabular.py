@@ -172,34 +172,28 @@ def extract_json_tables(data: bytes, root: str) -> list[tuple[int, MaterializedT
 _PARATEXT = {"header", "footer", "page_number", "page_footnote"}
 
 
-def _columns(html: str) -> int:
-    table = BeautifulSoup(html, "lxml").find("table")
-    if not isinstance(table, Tag):
-        return 0
-    grid = _grid(table)
+def _grid_of(block: Block) -> list[list[str]]:
+    if block.grid is not None:
+        return block.grid
+    table = BeautifulSoup(block.text or "", "lxml").find("table")
+    return _grid(table) if isinstance(table, Tag) else []
+
+
+def _columns(block: Block) -> int:
+    grid = _grid_of(block)
     return len(grid[0]) if grid else 0
 
 
-def _header_row(html: str) -> list[str] | None:
-    table = BeautifulSoup(html, "lxml").find("table")
-    if not isinstance(table, Tag):
-        return None
-    rows = _table_rows(table)
-    if not rows:
-        return None
-    cells = rows[0].find_all(["td", "th"], recursive=False)
-    if not cells or not all(cell.name == "th" for cell in cells):
-        return None
-    return [cell.get_text(separator=" ", strip=True) for cell in cells]
+def _first_row(block: Block) -> list[str] | None:
+    grid = _grid_of(block)
+    return grid[0] if grid else None
 
 
 _HEADER_SIMILARITY_THRESHOLD = 0.6
 
 
 def _same_header(first: list[str] | None, following: list[str] | None) -> bool:
-    if following is None:
-        return True
-    if first is None:
+    if first is None or following is None:
         return False
     return SequenceMatcher(None, " ".join(first).lower(), " ".join(following).lower()).ratio() >= (
         _HEADER_SIMILARITY_THRESHOLD
@@ -232,8 +226,8 @@ def stitch_tables(blocks: list[Block]) -> list[Block]:
             index += 1
             continue
         group = [block]
-        columns = _columns(block.text or "")
-        header = _header_row(block.text or "")
+        columns = _columns(block)
+        header = _first_row(block)
         last_page = block.page_idx
         cursor = index + 1
         while cursor < len(blocks):
@@ -244,8 +238,8 @@ def stitch_tables(blocks: list[Block]) -> list[Block]:
             if (
                 following.type == "table"
                 and following.page_idx > last_page
-                and _columns(following.text or "") == columns
-                and _same_header(header, _header_row(following.text or ""))
+                and _columns(following) == columns
+                and _same_header(header, _first_row(following))
             ):
                 group.append(following)
                 last_page = following.page_idx

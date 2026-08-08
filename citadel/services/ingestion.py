@@ -67,6 +67,7 @@ from citadel.services.paddle import (
     block_text,
     close_vlm_clients,
     is_readable,
+    otsl_to_grid,
     png_bytes,
     prompt_for,
     recognize,
@@ -983,6 +984,7 @@ def _blocks_from_groups(blocks: list[DetBlock], groups: list[list[int]], texts: 
                 page_idx=0,
                 bbox=group_bbox(blocks, group),
                 text=block_text(block.label, text),
+                grid=otsl_to_grid(text) if block.label == "table" else None,
             )
         )
     return out
@@ -1198,7 +1200,7 @@ async def handle_table_structure(fields: dict[str, str]) -> None:
     redis = get_redis()
     prepared = load_structures(await redis.get(f"structures:{doc_id}"))
     indices = table_block_indices(prepared.stitched)
-    grids = [grid_from_html(prepared.stitched[index].text or "") for index in indices]
+    grids = [prepared.stitched[index].grid or grid_from_html(prepared.stitched[index].text or "") for index in indices]
     structured = await structure_tables_ocr(grids, label=doc_id)
     by_block: dict[int, list[MaterializedTable]] = {}
     for table, blocks in structured:

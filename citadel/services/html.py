@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from bs4.element import NavigableString, Tag
 
 from citadel.schemas.content import Block
+from citadel.services.tabular import grid_from_html
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -152,7 +153,8 @@ def _walk(element: Tag, blocks: list[Block]) -> None:
                 blocks.append(Block(page_idx=0, type="code", text=child.get_text()))
         elif name == "table":
             _flush(buffer, blocks)
-            blocks.append(Block(page_idx=0, type="table", text=str(child)))
+            html = str(child)
+            blocks.append(Block(page_idx=0, type="table", text=html, grid=grid_from_html(html)))
         elif name == "math":
             _flush(buffer, blocks)
             latex = _latex(child)

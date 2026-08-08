@@ -6,6 +6,7 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from citadel.schemas.content import Block
+from citadel.services.tabular import grid_from_html
 
 _DRAWINGML_TEXT = "{http://schemas.openxmlformats.org/drawingml/2006/main}t"
 
@@ -83,9 +84,11 @@ def _shape_blocks(shape: Any, slide_index: int, title_id: int | None) -> list[Bl
     if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
         return [block for member in _ordered(shape.shapes) for block in _shape_blocks(member, slide_index, title_id)]
     if shape.has_table:
-        return [Block(page_idx=slide_index, type="table", text=_table_html(shape.table), bbox=_bbox(shape))]
+        html = _table_html(shape.table)
+        return [Block(page_idx=slide_index, type="table", text=html, bbox=_bbox(shape), grid=grid_from_html(html))]
     if shape.has_chart:
-        return [Block(page_idx=slide_index, type="table", text=_chart_html(shape.chart), bbox=_bbox(shape))]
+        html = _chart_html(shape.chart)
+        return [Block(page_idx=slide_index, type="table", text=html, bbox=_bbox(shape), grid=grid_from_html(html))]
     if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
         return [Block(page_idx=slide_index, type="image", text=_alt_text(shape), bbox=_bbox(shape))]
     if shape.has_text_frame:

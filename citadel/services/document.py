@@ -156,7 +156,7 @@ def _reclassify_regions(blocks: list[Block]) -> list[Block]:
         if block.type != "table":
             kept.append(block)
             continue
-        grid = grid_from_html(block.text or "")
+        grid = block.grid if block.grid is not None else grid_from_html(block.text or "")
         text = " ".join(cell for row in grid for cell in row if cell.strip())
         match classify_grid(grid):
             case "empty":

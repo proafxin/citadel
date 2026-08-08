@@ -173,7 +173,7 @@ async def structure_tables(
 
 def _ocr_row_line(index: int, row: list[str], width: int) -> str:
     cells = [(row[col] if col < len(row) else "").strip() for col in range(width)]
-    return f"{index}: " + ", ".join(cells)
+    return f"{index}: " + " | ".join(cells)
 
 
 def _ocr_candidate_text(grid: list[list[str]], index: int) -> str:

@@ -7,3 +7,4 @@ class Block(BaseModel):
     text: str | None = None
     text_level: int | None = None
     bbox: list[float] | None = None
+    grid: list[list[str]] | None = None
