@@ -160,15 +160,8 @@ PAGE_OCR_MAX_TOKENS = 3584
 def _page_ocr_payload(image_key: str, max_tokens: int) -> dict:
     return {
         "model": QWEN_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_ref", "image_key": image_key},
-                    {"type": "text", "text": load_prompt("page_ocr")},
-                ],
-            }
-        ],
+        "image_key": image_key,
+        "prompt": load_prompt("page_ocr"),
         "temperature": 0,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},

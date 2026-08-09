@@ -82,23 +82,28 @@ async def _blocking_call(
     return first
 
 
-async def _resolve_images(payload: dict) -> dict:
-    redis = get_redis()
-    for message in payload.get("messages", []):
-        for item in message.get("content", []):
-            if item.get("type") != "image_ref":
-                continue
-            image_key = item.pop("image_key")
-            data = await redis.get(image_key)
-            if data is None:
-                raise KeyError(image_key)
-            item["type"] = "image_url"
-            item["image_url"] = {"url": "data:image/png;base64," + b64encode(data).decode()}
+async def _resolve_page_ocr(payload: dict) -> dict:
+    image_key = payload.pop("image_key", None)
+    if image_key is None:
+        return payload
+    data = await get_redis().get(image_key)
+    if data is None:
+        raise KeyError(image_key)
+    image_url = "data:image/png;base64," + b64encode(data).decode()
+    payload["messages"] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": payload.pop("prompt")},
+            ],
+        }
+    ]
     return payload
 
 
 async def _call_provider(payload: dict, reply_to: str, job_id: str) -> float | None:
-    payload = await _resolve_images(payload)
+    payload = await _resolve_page_ocr(payload)
     url = f"{get_settings().qwen_base_url}/chat/completions"
     async with httpx.AsyncClient(timeout=NO_TIMEOUT) as client:
         if payload.get("stream"):

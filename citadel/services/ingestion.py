@@ -177,6 +177,10 @@ def blob_path(doc_id: str | int) -> Path:
     return BLOB_DIR / str(doc_id)
 
 
+def page_image_key(doc_id: str, page_idx: int) -> str:
+    return f"page_image:{doc_id}:{page_idx}"
+
+
 async def reap_orphan_blobs() -> None:
     BLOB_DIR.mkdir(parents=True, exist_ok=True)
     async with get_sessionmaker()() as session:
@@ -346,7 +350,8 @@ async def handle_paginate(fields: dict[str, str]) -> None:
         data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
         image_bytes = await asyncio.to_thread(_cap_image_bytes, data)
         await redis.hset(f"doc:{doc_id}", "page_count", 1)
-        await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0, "image": image_bytes})
+        await redis.set(page_image_key(doc_id, 0), image_bytes, ex=DOC_TTL)
+        await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0})
         logger.info("paginate file=%s image", fields["filename"])
         return
     if kind in {"xlsx", "csv", "tsv", "json"}:
@@ -415,10 +420,6 @@ async def handle_render(fields: dict[str, str]) -> None:
         await _emit_page(doc_id, page_idx, blocks)
         return
     await redis.xadd(STREAM_RASTERIZE, {"doc_id": doc_id, "page_idx": page_idx, "dpi": dpi})
-
-
-def page_image_key(doc_id: str, page_idx: int) -> str:
-    return f"page_image:{doc_id}:{page_idx}"
 
 
 async def handle_rasterize(fields: dict[str, str]) -> None:
