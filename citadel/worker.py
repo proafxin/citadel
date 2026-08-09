@@ -37,6 +37,7 @@ from citadel.services.ingestion import (
     handle_structure,
     handle_table_structure,
     make_profile_pool,
+    page_image_key,
     reap_orphan_blobs,
     release_idle,
     render_stream,
@@ -267,6 +268,7 @@ async def _rasterize_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -
 async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_PAGES
     terminal = True
+    fields: dict[str, str] | None = None
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
         if fields is None:
@@ -283,6 +285,8 @@ async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None
         cap.release()
         if terminal:
             get_vision_capacity().release()
+            if fields is not None:
+                await get_redis().delete(page_image_key(fields["doc_id"], int(fields["page_idx"])))
 
 
 DRAINED_STREAMS = (

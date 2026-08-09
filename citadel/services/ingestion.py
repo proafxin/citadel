@@ -602,10 +602,8 @@ def blocks_from_page_markdown(markdown: str) -> list[Block]:
 
 
 async def extract_page(doc_id: str, page_idx: int) -> list[Block]:
-    key = page_image_key(doc_id, page_idx)
-    job_id = await emit_page_ocr(key)
+    job_id = await emit_page_ocr(page_image_key(doc_id, page_idx))
     markdown = await collect_page_ocr(job_id)
-    await get_redis().delete(key)
     return blocks_from_page_markdown(markdown)
 
 
