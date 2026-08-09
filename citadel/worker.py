@@ -411,17 +411,17 @@ async def _claim_ready(consumer: str, cap: _Capacity, spawn: Spawn, room: int) -
     docs = sorted(name.decode() for name in cast("set[bytes]", await redis.smembers(RENDER_DOCS)))
     if not docs:
         return 0
-    for doc_id in docs:
+    active = docs[:room]
+    for doc_id in active:
         await ensure_group(render_stream(doc_id))
-    per_stream = max(1, room // len(docs))
-    streams = {render_stream(doc_id): ">" for doc_id in docs}
+    streams = {render_stream(doc_id): ">" for doc_id in active}
     fresh = cast(
         "list[tuple[bytes, list[tuple[bytes, dict[bytes, bytes]]]]]",
-        await redis.xreadgroup(GROUP, consumer, streams, count=per_stream),
+        await redis.xreadgroup(GROUP, consumer, streams, count=1),
     )
     returned = {name.decode(): entries for name, entries in fresh}
     claimed = 0
-    for doc_id in docs:
+    for doc_id in active:
         entries = returned.get(render_stream(doc_id), [])
         if not entries:
             if not await redis.xlen(render_stream(doc_id)):
