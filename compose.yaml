@@ -21,7 +21,7 @@ services:
       - --gpu-memory-utilization
       - "0.85"
       - --max-num-seqs
-      - "256"
+      - "160"
       - --max-model-len
       - "8192"
       - --mm-processor-cache-gb
