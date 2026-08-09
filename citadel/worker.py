@@ -46,11 +46,11 @@ from citadel.services.ingestion import (
 )
 from citadel.services.query import STREAM_RESOLVE_BATCH, record_resolve_batch, resolve_batch_job
 from citadel.services.slm import read_replies
-from config import CPU_EIGHTH, CPU_THIRD, configure_logging, get_settings
+from config import CPU_EIGHTH, configure_logging, get_settings
 
 logger = logging.getLogger(__name__)
 
-NORMALIZE_CONCURRENCY = CPU_THIRD
+NORMALIZE_CONCURRENCY = 4
 MERGE_CONCURRENCY = CPU_EIGHTH
 STRUCTURE_CONCURRENCY = CPU_EIGHTH
 OCR_CONCURRENCY = 256
