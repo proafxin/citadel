@@ -1,8 +1,9 @@
+import asyncio
 import logging
 import time
 from collections import Counter
 
-from citadel.llm import collect_structure_candidates, emit_structure_candidates
+from citadel.llm import collect_structure_candidates, count_tokens_batch, emit_structure_candidates, pack_indices
 from citadel.schemas.table import TableStructure
 from citadel.tabular.flag import column_kinds, payload_rows
 from citadel.tabular.materialize import MaterializedTable, materialize
@@ -10,6 +11,7 @@ from citadel.tabular.materialize import MaterializedTable, materialize
 logger = logging.getLogger(__name__)
 
 _MAX_CELL = 40
+STRUCTURE_PAYLOAD_BUDGET = 3800
 
 
 def _row_line(index: int, row: list[str], width: int) -> str:
@@ -118,10 +120,13 @@ async def structure_tables(
     started = time.perf_counter()
     context = adjacent or ["" for _ in candidates]
     hints = header_hints or [[] for _ in candidates]
-    payload = "\n\n".join(
-        _candidate_text(grid, index, context[index], hints[index]) for index, grid in enumerate(candidates)
-    )
-    specs = await collect_structure_candidates(await emit_structure_candidates(payload, prompt_name))
+    texts = [_candidate_text(grid, index, context[index], hints[index]) for index, grid in enumerate(candidates)]
+    counts = await asyncio.to_thread(count_tokens_batch, texts)
+    packs = pack_indices(counts, STRUCTURE_PAYLOAD_BUDGET)
+    specs: list[dict] = []
+    for pack in packs:
+        payload = "\n\n".join(texts[index] for index in pack)
+        specs.extend(await collect_structure_candidates(await emit_structure_candidates(payload, prompt_name)))
     prepared: list[tuple[list[int], list[list[str]], TableStructure]] = []
     for spec in specs:
         blocks = [index for index in spec.get("blocks", []) if isinstance(index, int) and 0 <= index < len(candidates)]
@@ -152,9 +157,10 @@ async def structure_tables(
             logger.info("table_structure dropped blocks=%s — materialized 0 rows", blocks)
     split = sum(1 for count in block_uses.values() if count > 1)
     logger.info(
-        "table_structure%s candidates=%d tables=%d merged=%d split=%d secs=%.1f",
+        "table_structure%s candidates=%d packs=%d tables=%d merged=%d split=%d secs=%.1f",
         f" doc={label}" if label else "",
         len(candidates),
+        len(packs),
         len(out),
         merged,
         split,

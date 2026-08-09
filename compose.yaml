@@ -21,7 +21,7 @@ services:
       - --gpu-memory-utilization
       - "0.85"
       - --max-num-seqs
-      - "384"
+      - "256"
       - --max-model-len
       - "8192"
       - --enable-auto-tool-choice

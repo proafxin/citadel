@@ -52,10 +52,8 @@ logger = logging.getLogger(__name__)
 NORMALIZE_CONCURRENCY = CPU_THIRD
 MERGE_CONCURRENCY = CPU_EIGHTH
 STRUCTURE_CONCURRENCY = CPU_EIGHTH
-OCR_CONCURRENCY = 384
+OCR_CONCURRENCY = 256
 VISION_BUFFER = OCR_CONCURRENCY
-
-BLOCK_MS = 5000
 
 _tasks: set[asyncio.Task[None]] = set()
 
@@ -134,13 +132,14 @@ async def _run_cancelable(coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]
 
 async def _retry_or_fail(
     stream: str, msg_id: str, raw: dict[bytes, bytes], giveup: Callable[[], Awaitable[None]]
-) -> None:
+) -> bool:
     attempt = int(raw.get(b"attempt", b"0")) + 1
     if attempt > MAX_ATTEMPTS:
         await giveup()
         await _settle(stream, msg_id)
-    else:
-        await requeue_message(stream, msg_id, {**raw, b"attempt": str(attempt).encode()})
+        return True
+    await requeue_message(stream, msg_id, {**raw, b"attempt": str(attempt).encode()})
+    return False
 
 
 async def _recover(stream: str, consumer: str, cap: _Capacity | None, spawn: Spawn) -> None:
@@ -183,7 +182,7 @@ async def _pump(
         if room is not None and room <= 0:
             await asyncio.sleep(0.1)
             continue
-        fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=room, block=BLOCK_MS)
+        fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=room, block=0)
         for msg_id, raw in fresh[0][1] if fresh else []:
             if cap is not None:
                 cap.take()
@@ -267,6 +266,7 @@ async def _rasterize_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -
 
 async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_PAGES
+    terminal = True
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
         if fields is None:
@@ -276,10 +276,13 @@ async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None
             await _settle(stream, msg_id)
             return
         logger.error("ocr failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
-        await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
+        terminal = await _retry_or_fail(
+            stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"]))
+        )
     finally:
         cap.release()
-        get_vision_capacity().release()
+        if terminal:
+            get_vision_capacity().release()
 
 
 DRAINED_STREAMS = (

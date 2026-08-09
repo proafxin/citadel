@@ -16,7 +16,7 @@ from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL
 logger = logging.getLogger(__name__)
 
 STRUCT_MAX_TOKENS = 4096
-STRUCTURE_MAX_TOKENS = 8192
+STRUCTURE_MAX_TOKENS = 1536
 SYNTH_MAX_TOKENS = 8192
 SLM_MODEL_LEN = 65536
 RESOLVE_BUDGET = SLM_MODEL_LEN - STRUCT_MAX_TOKENS - 2048
@@ -173,7 +173,6 @@ def _page_ocr_payload(image: bytes, max_tokens: int) -> dict:
         "temperature": 0,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
-        "stream": True,
     }
 
 
