@@ -328,7 +328,6 @@ async def handle_normalize(fields: dict[str, str], profile_dir: str) -> None:
         await redis.hset(normalize_media_key(doc_id), mapping=media)
         await redis.expire(normalize_media_key(doc_id), DOC_TTL)
     await get_redis().xadd(STREAM_NORMALIZED, {"doc_id": doc_id, "kind": kind, "filename": fields["filename"]})
-    logger.info("normalize file=%s kind=%s", fields["filename"], kind)
 
 
 def _cap_image_bytes(image_bytes: bytes) -> bytes:
@@ -340,16 +339,15 @@ def _cap_image_bytes(image_bytes: bytes) -> bytes:
         return out.getvalue()
 
 
-async def _paginate_text(doc_id: str, filename: str) -> None:
+async def _paginate_text(doc_id: str) -> None:
     data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
     text = data.decode("utf-8", errors="replace")
     blocks = [Block(type="text", page_idx=0, text=part.strip()) for part in re.split(r"\n\s*\n", text) if part.strip()]
     await get_redis().hset(f"doc:{doc_id}", "page_count", 1)
     await record_page(doc_id, 0, blocks)
-    logger.info("paginate file=%s text paragraphs=%d", filename, len(blocks))
 
 
-async def _paginate_html(doc_id: str, filename: str) -> None:
+async def _paginate_html(doc_id: str) -> None:
     redis = get_redis()
     data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
     raw_media = await redis.hgetall(normalize_media_key(doc_id))
@@ -359,17 +357,15 @@ async def _paginate_html(doc_id: str, filename: str) -> None:
     resolved = await resolve_embedded_images(doc_id, "html", blocks, images)
     await redis.hset(f"doc:{doc_id}", "page_count", 1)
     await record_page(doc_id, 0, resolved)
-    logger.info("paginate file=%s html blocks=%d", filename, len(blocks))
 
 
-async def _paginate_pptx(doc_id: str, filename: str) -> None:
+async def _paginate_pptx(doc_id: str) -> None:
     data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
     slides = await asyncio.to_thread(parse_pptx, data)
     await get_redis().hset(f"doc:{doc_id}", "page_count", max(len(slides), 1))
     for index, (slide_blocks, images) in enumerate(slides or [([], {})]):
         resolved = await resolve_embedded_images(doc_id, f"slide{index}", slide_blocks, images)
         await record_page(doc_id, index, resolved)
-    logger.info("paginate file=%s pptx slides=%d", filename, len(slides))
 
 
 _BLOCK_PAGINATORS = {
@@ -389,7 +385,7 @@ async def handle_paginate(fields: dict[str, str]) -> None:
     await redis.hsetnx(f"doc:{doc_id}", "t_paginate", time.time())
     paginator = _BLOCK_PAGINATORS.get(kind)
     if paginator is not None:
-        await paginator(doc_id, fields["filename"])
+        await paginator(doc_id)
         return
     if kind.startswith("image:"):
         data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
@@ -397,7 +393,6 @@ async def handle_paginate(fields: dict[str, str]) -> None:
         await redis.hset(f"doc:{doc_id}", "page_count", 1)
         await redis.set(page_image_key(doc_id, 0), image_bytes, ex=DOC_TTL)
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0})
-        logger.info("paginate file=%s image", fields["filename"])
         return
     if kind in {"xlsx", "csv", "tsv", "json"}:
         await redis.hset(f"doc:{doc_id}", "mode", "tabular")
@@ -406,25 +401,21 @@ async def handle_paginate(fields: dict[str, str]) -> None:
             if not names:
                 await redis.hset(f"doc:{doc_id}", "page_count", 0)
                 await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
-                logger.info("paginate file=%s sheets=0 → merge", fields["filename"])
                 return
             await redis.hset(f"doc:{doc_id}", "page_count", len(names))
             for sheet_no in range(1, len(names) + 1):
                 await redis.xadd(
                     STREAM_TABLE_STRUCTURE, {"doc_id": doc_id, "unit": "sheet", "kind": kind, "sheet_no": sheet_no}
                 )
-            logger.info("paginate file=%s sheets=%d", fields["filename"], len(names))
         else:
             await redis.hset(f"doc:{doc_id}", "page_count", 1)
             await redis.xadd(STREAM_TABLE_STRUCTURE, {"doc_id": doc_id, "unit": "sheet", "kind": kind, "sheet_no": 0})
-            logger.info("paginate file=%s kind=%s", fields["filename"], kind)
         return
     dpi = RENDER_DPI
     count, _, _ = await _run_pdfium(count_pdf_pages, str(blob_path(doc_id)), job_timeout=RENDER_TIMEOUT)
     if count <= 0:
         await redis.hset(f"doc:{doc_id}", "page_count", 0)
         await get_redis().xadd(STREAM_MERGE, {"doc_id": doc_id})
-        logger.info("paginate file=%s pages=0 → merge", fields["filename"])
         return
     await redis.hset(f"doc:{doc_id}", "page_count", count)
     stream = render_stream(doc_id)
@@ -434,7 +425,6 @@ async def handle_paginate(fields: dict[str, str]) -> None:
     await pipe.execute()
     await redis.sadd(RENDER_DOCS, doc_id)
     await redis.hsetnx(f"doc:{doc_id}", "t_paginated", time.time())
-    logger.info("paginate file=%s pages=%d", fields["filename"], count)
 
 
 async def handle_render(fields: dict[str, str]) -> None:
@@ -748,9 +738,6 @@ async def _read_doc_blocks(doc_id: str) -> list[Block]:
 async def handle_structure(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
-    proc, pages = (float(value or 0) for value in await redis.hmget(f"doc:{doc_id}", "t_proc", "page_count"))
-    elapsed = time.time() - proc if proc else 0.0
-    logger.info("ocr_complete doc=%s elapsed=%.1fs pages=%.0f", doc_id, elapsed, pages)
     blocks = await _read_doc_blocks(doc_id)
     prepared = prepare_document(blocks)
     await redis.set(f"structures:{doc_id}", dump_structures(prepared), ex=DOC_TTL)
