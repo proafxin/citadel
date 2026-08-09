@@ -15,7 +15,6 @@ CPU_EIGHTH = max((os.cpu_count() or 8) // 8, 1)
 QWEN_MODEL = "qwen"
 QWEN_HF_REPO = "Qwen/Qwen3.5-9B"
 QWEN_CACHE_DIR = Path.home() / ".cache" / "citadel-qwen" / "hub"
-PADDLEOCR_MODEL = "paddleocr-vl"
 EMBED_MODEL = "BAAI/bge-m3"
 EMBED_DEVICE = "cuda"
 EMBED_MAX_TOKENS = 8192
@@ -29,9 +28,6 @@ def configure_logging() -> None:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CITADEL_", env_file=".env", extra="ignore")
-
-    paddleocr_host: str = "localhost"
-    paddleocr_port: int = 8099
 
     qwen_host: str = "localhost"
     qwen_port: int = 8100
@@ -47,10 +43,6 @@ class Settings(BaseSettings):
     tree_store_dir: Path = Path("data/trees")
 
     worker_id: str
-
-    @property
-    def paddleocr_base_url(self) -> str:
-        return f"http://{self.paddleocr_host}:{self.paddleocr_port}"
 
     @property
     def qwen_base_url(self) -> str:

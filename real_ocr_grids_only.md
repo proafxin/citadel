@@ -121,40 +121,66 @@ REGISTRATION PROCEDURE FOR PARTICIPANTS OF ASTANA HUB INTERNATIONAL TECHNOLOGY P
 
 ## Kazakh legal claim form (colon pattern) p4
 
-Source: `defence.pdf` page 4
+Source: `defence.pdf` page 4. Ground-truth verified against a screenshot of the actual page. The real bordered table is only these 4 rows — the "Sistem e-Tribunal" heading above and the "Terima kasih..." closing paragraph below are both outside the box (page furniture, not part of the table; they only show up in a candidate at all because a whole-page OCR test was used instead of a real per-region crop). Confirmed defect: the box uses tab-stop alignment, not drawn gridlines, and OTSL is inconsistent about column count on it — the 3 blank rows correctly get 3 cells (label, colon, implicit empty value), but the one row with an actual value glues the colon and value into a single second cell instead of keeping 3. Real recognition inconsistency, not a source-content difference — all 4 rows are laid out identically.
 
 No. Tuntutan | : | TTPM-WP-(P)-1172-2026
 Tarikh Pendengaran | : |
 Masa Pendengaran | : |
 No. Resit Borang 1 | : |
 
+Perfect output (title and closing note are metadata, not table rows):
+
+```json
+{
+  "No. Tuntutan": ["TTPM-WP-(P)-1172-2026"],
+  "Tarikh Pendengaran": [""],
+  "Masa Pendengaran": [""],
+  "No. Resit Borang 1": [""],
+  "__metadata__": {
+    "title": "Sistem e-Tribunal",
+    "notes": ["Terima kasih kerana berurusan dengan Tribunal Tuntutan Pengguna Malaysia. Sila simpan dokumen ini sebagai rujukan."]
+  }
+}
+```
+
 ---
 
-## Kazakh legal claim form (colon pattern) p6a
+## Kazakh legal claim form (colon pattern) p6, full page (two separate records: claimant, respondent)
 
-Source: `defence.pdf` page 6
+Source: `defence.pdf` page 6. Ground-truth confirmed against a screenshot of the actual page — `1439156-A` really is ICONIX's company registration number, correctly attributed to `No. Kad Pengenalan/ Pertubuhan Perbadanan/ Pertubuhan/Firma`, not a continuation of the `Nama Penentang` field above it. Re-running full-page OCR reproduced the claimant block and the `1439156-A` attribution identically, but regressed on the respondent's address wrap: it folded `59200 Kuala Lumpur Kuala Lumpur` into `No. Telefon`'s value instead of keeping it as the address continuation it is, and dropped the blank `No. Telefon` row. The grid below is reconciled to the verified-correct shape.
 
 Nama Pihak Yang Menuntut | : | MASUM BILLAL
 No. Kad Pengenalan/Pasport | : | B00580030
 Alamat Surat Menyurat | : | A-12-07-S1, 18, Jalan Dewan Sultan Ismail, The Luxe Colony by Infinitum, Kampung Baru, KLCC, KL 50300 Kuala Lumpur Kuala Lumpur
 No. Telefon | : | 01115631120
 No. Faks/E-mel | : | / billalmasum93@gmail.com
-
----
-
-## Kazakh legal claim form (colon pattern) p6b
-
-Source: `defence.pdf` page 6
-
 Nama Penentang/Syarikat/ Pertubuhan Perbadanan/ Pertubuhan/Firma | : | ICONIX CO-LIVING SDN BHD
- | 1439156-A |
-No. Kad Pengenalan/ | : |
-No. Pendaftaran Syarikat/ Pertubuhan Perbadanan/ Pertubuhan/Firma |  |
+No. Kad Pengenalan/ Pertubuhan Perbadanan/ Pertubuhan/Firma | : | 1439156-A
 Alamat Surat Menyurat | : | UNIT NO 20-01, MERCU ASPIRE, KL ECO CITY
- | : | 59200 Kuala Lumpur
- | / admin@iconixpropertymgmt.com |
+ | : | 59200 Kuala Lumpur Kuala Lumpur
 No. Telefon | : |
-No. Faks/E-mel | : |
+No. Faks/E-mel | : | / admin@iconixpropertymgmt.com
+
+Perfect output (two separate records — claimant and respondent must not be merged under shared field names):
+
+```json
+[
+  {
+    "Nama Pihak Yang Menuntut": ["MASUM BILLAL"],
+    "No. Kad Pengenalan/Pasport": ["B00580030"],
+    "Alamat Surat Menyurat": ["A-12-07-S1, 18, Jalan Dewan Sultan Ismail, The Luxe Colony by Infinitum, Kampung Baru, KLCC, KL 50300 Kuala Lumpur Kuala Lumpur"],
+    "No. Telefon": ["01115631120"],
+    "No. Faks/E-mel": ["billalmasum93@gmail.com"]
+  },
+  {
+    "Nama Penentang/Syarikat/ Pertubuhan Perbadanan/ Pertubuhan/Firma": ["ICONIX CO-LIVING SDN BHD"],
+    "No. Kad Pengenalan/ Pertubuhan Perbadanan/ Pertubuhan/Firma": ["1439156-A"],
+    "Alamat Surat Menyurat": ["UNIT NO 20-01, MERCU ASPIRE, KL ECO CITY, 59200 Kuala Lumpur Kuala Lumpur"],
+    "No. Telefon": [""],
+    "No. Faks/E-mel": ["admin@iconixpropertymgmt.com"]
+  }
+]
+```
 
 ---
 
@@ -433,21 +459,55 @@ Section | Item | Particulars
 
 ## Legal Act amendment-history table (3-page continuation, page-header + repeated table-header)
 
-Source: `CONSUMER PROTECTION ACT 1999 AMENDMENT 2019 .pdf` pages 148-150
+Source: `CONSUMER PROTECTION ACT 1999 AMENDMENT 2019 .pdf` pages 148-150. Pages 148 and 149 are ground-truth verified against real screenshots of the actual pages — page 149's OCR grid is an exact, cell-for-cell match against the screenshot, including every forward-filled duplicate Section number and every section-range label. Page 148's earlier "Page 1 of 3" excerpt below was a truncated fragment of a much longer real page (screenshot showed 15 rows, not 2) — replaced here with the full page. Both pages carry a full repeated header (`Section | Amending authority | In force from`) — this document uses the header-repeated-every-page continuation pattern, not the headerless one, which matters for whatever cross-page merge signal gets built later: "no header" alone would not catch this continuation.
 
-Page 1 of 3:
+Page 1 of 3 (full page, ground-truth verified; the printed page number "148" and running header confirmed present on the real page but correctly excluded from the table candidate itself when given full-page context):
 Section | Amending authority | In force from
 2 | Act A1298 | 15-08-2007
  | Act A1381 | 01-02-2011
 3 | Act A1533 | 01-01-2018
+9 | Act A1381 | 01-02-2011
+11 | Act A1381 | 01-02-2011
+21A | Act A1381 | 01-02-2011
+23 | Act A1381 | 01-02-2011
+PART IIIA | Act A1381 | 01-02-2011
+24A-24J | Act A1381 | 01-02-2011
+PART IIIB | Act A1533 | 01-01-2018
+24K-24AA | Act A1533 | 01-01-2018
+53 | Act A1381 | 01-02-2011
+PART IXA | Act A1381 | 01-02-2011
+84A-84D | Act A1381 | 01-02-2011
+86 | Act A1199 | 01-09-2003
+98 | Act A1199 | 01-09-2003
+ | Act A1381 | 01-02-2011
+ | Act A1598 | 01-10-2019
 
-Page 2 of 3 (note the running page-header BEFORE the repeated table header):
-Consumer Protection |  | 149
+Page 2 of 3 (full page, ground-truth verified exact match; running page-header `Consumer Protection | | 149` confirmed present on the real page, correctly excluded from the table when given full-page context — it only leaks into the candidate when the crop is tight enough to include it with no surrounding context, as happened in the original truncated excerpt this entry replaces):
 Section | Amending authority | In force from
 99 | Act A1199 | 01-09-2003
  | Act A1498 | 01-03-2016
+100 | Act A1199 | 01-09-2003
+ | Act A1598 | 01-10-2019
+101 | Act A1199 | 01-09-2003
+ | Act A1598 | 01-10-2019
+103 | Act A1381 | 01-02-2011
+109A | Act A1199 | 01-09-2003
+117 | Act A1598 | 01-10-2019
+123 | Act A1533 | 01-01-2018
+123A | Act A1533 | 01-01-2018
+124A-124E | Act A1533 | 01-01-2018
+125 | Act A1533 | 01-01-2018
+126A-126B | Act A1533 | 01-01-2018
+128 | Act A1533 | 01-01-2018
+129 | Act A1533 | 01-01-2018
+130 | Act A1533 | 01-01-2018
+131 | Act A1533 | 01-01-2018
+134A-134B | Act A1533 | 01-01-2018
+135A | Act A1533 | 01-01-2018
+136 | Act A1533 | 01-01-2018
+137 | Act A1533 | 01-01-2018
 
-Page 3 of 3 (different page-header text, table header repeats again):
+Page 3 of 3 (not re-verified this session, kept as originally recorded — different page-header text, table header repeats again):
  | Laws of Malaysia | ACT 599
 Section | Amending authority | In force from
 138 | Act A1533 | 01-01-2018

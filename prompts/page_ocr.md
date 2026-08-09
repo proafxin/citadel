@@ -1,0 +1,1 @@
+Read everything on this page exactly as printed, in reading order. Where the content forms a table or a label/value form, give it back as a markdown table (header row, delimiter row, data rows) — never as plain running text. Use markdown headings for titles and section headings, exactly as they appear. Do not invent or infer anything that is not literally visible on the page.

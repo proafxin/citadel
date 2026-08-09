@@ -40,7 +40,29 @@ def count_pdf_pages(path: str) -> int:
         return len(pdf)
 
 
-def render_pdf_page(path: str, page_idx: int, dpi: int) -> tuple[bytes, bool]:
+TEXT_OBJ_TYPE = 1
+
+
+def _pure_text(page: pdfium.PdfPage) -> bool:
+    return all(obj.type == TEXT_OBJ_TYPE for obj in page.get_objects())
+
+
+def classify_pdf_page(path: str, page_idx: int) -> tuple[bool, bool]:
+    pdf = _open_pdf(path)
+    page = pdf[page_idx]
+    try:
+        textpage = page.get_textpage()
+        try:
+            digital = page.get_rotation() == 0 and textpage.count_chars() > 16
+        finally:
+            textpage.close()
+        needs_vision = not digital or not _pure_text(page)
+        return digital, needs_vision
+    finally:
+        page.close()
+
+
+def render_pdf_page(path: str, page_idx: int, dpi: int) -> bytes:
     pdf = _open_pdf(path)
     page = pdf[page_idx]
     try:
@@ -51,12 +73,7 @@ def render_pdf_page(path: str, page_idx: int, dpi: int) -> tuple[bytes, bool]:
             bitmap.to_pil().save(bio, format="PNG")
         finally:
             bitmap.close()
-        textpage = page.get_textpage()
-        try:
-            digital = page.get_rotation() == 0 and textpage.count_chars() > 16
-        finally:
-            textpage.close()
-        return bio.getvalue(), digital
+        return bio.getvalue()
     finally:
         page.close()
 

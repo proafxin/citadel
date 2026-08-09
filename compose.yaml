@@ -1,99 +1,5 @@
 
 services:
-  # PaddleOCR-VL-1.6-0.9B: the RECOGNITION model. It reads the crops our detector cuts — one request per region, with
-  # the task prompt chosen by what the region is (OCR / Table / Formula / Chart / Seal). It does NOT do layout: that is
-  # a detector (PP-DocLayoutV3) running in the worker's own pool, which is the whole reason for the switch.
-  # Served by stock vLLM — the architecture is registered upstream, so it needs no vendor image and inherits every
-  # Blackwell fix we already rely on for qwen. bf16, not fp8: at 0.9B the weights are only 1.8GB and quality is the
-  # point. Tables come back as OTSL (one token per cell), so a dense table costs a fraction of what styled HTML would.
-  paddleocr:
-    image: vllm/vllm-openai:latest
-    container_name: citadel-paddleocr
-    restart: always
-    ipc: host
-    command:
-      - --model
-      - PaddlePaddle/PaddleOCR-VL-1.6
-      - --served-model-name
-      - paddleocr-vl
-      - --host
-      - 0.0.0.0
-      - --port
-      - "${CITADEL_PADDLEOCR_PORT:-8099}"
-      # NOT quantized: the weights stay bf16. at 0.9B they are only 1.8GB, and fp8 measured a saving of just 380MiB —
-      # the cache and the cuda graphs dominate what this server holds, not the weights. 380MiB is under 4% of the card
-      # and we are not short of it. this is the model we switched to FOR fidelity, and a quantization error in a table
-      # corrupts a cell, which is the one thing the whole design refuses to let a model do.
-      - --gpu-memory-utilization
-      - "0.20"
-      # the KV cache is SIZED here rather than left to the memory profiler, which measured whatever happened to be free
-      # at boot and so varied with how far the other models had got loading: one boot took 1.98GiB, another 4.08GiB.
-      # 8000 x 16 = 128,000 tokens. measured peak over a 2,175-page run (14,446 crops on the densest book) was ~77k, with
-      # Waiting: 0 on every log line — we never queued a request even once. 128k is 1.7x that peak and still holds a
-      # crop's real prompt (~200 tokens) many hundreds of times over. it was 200k; the 0.6GB that buys back is worth more
-      # to the DETECTOR process, which shares this card and OOMs before it can load if the two servers take everything.
-      - --block-size
-      - "16"
-      - --num-gpu-blocks-override
-      - "8000"
-      # every crop image is unique, and the image tokens begin within the first block or two — so the cache can only ever
-      # hit on the few chat-template tokens ahead of the image. measured: 30% at warmup decaying to a steady 0.0%. it
-      # buys nothing and costs a hash of every prompt plus the blocks held to store them.
-      - --no-enable-prefix-caching
-      # must EQUAL the crop semaphore: below it the GPU cannot fill its sequence slots, above it the excess merely
-      # queues INSIDE the model, where every waiting request pins a decoded image. vLLM also pre-allocates HOST memory
-      # for multimodal staging in proportion to this, worse than linearly.
-      - --max-num-seqs
-      - "128"
-      # NOT the model default of 131072, which leaves a KV cache that holds barely two full-length sequences. A crop is
-      # a region of one page: its prompt is ~1.3k image tokens and its answer is at most a dense table.
-      - --max-model-len
-      - "8192"
-      - --kv-cache-dtype
-      - fp8
-      # every image we send is unique — one crop per region, nothing repeats — so a cache keyed on the image cannot hit.
-      # it lives in HOST RAM, which is the scarce resource here.
-      - --mm-processor-cache-gb
-      - "0"
-      # already the default; pinned so a future default cannot silently un-overlap the CPU scheduler from GPU execution.
-      # NOT set: --api-server-count. It measured no throughput at all and it DISABLES vLLM's stats logging — the
-      # Running/Waiting lines are the only window we have into whether we are feeding the model, and that log is what
-      # caught a socket pool silently capping us at half the GPU. Do not trade it for nothing.
-      - --async-scheduling
-      # info, not warning: at warning the server logs NOTHING about a request it drops, which is why the disconnects
-      # could only be guessed at. the access log says whether a failing request ever reached uvicorn — if it did, the
-      # server chose to drop it and will say why; if it did not, it died in the socket layer beneath. those are
-      # different bugs and nothing else distinguishes them.
-      - --uvicorn-log-level
-      - info
-    ports:
-      - "${CITADEL_PADDLEOCR_PORT:-8099}:${CITADEL_PADDLEOCR_PORT:-8099}"
-    ulimits:
-      memlock: -1
-      stack: 67108864
-    volumes:
-      # HF weights on a HOST dir so `compose down -v` never wipes the download; torch.compile cache in a named volume.
-      - ${HOME}/.cache/citadel-paddleocr:/root/.cache/huggingface
-      - vllm-cache:/root/.cache/vllm
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
-  # Qwen3.5-9B (Gated DeltaNet hybrid) served by vLLM with strict guided decoding (xgrammar) so structured
-  # output (table structure, filters) is grammar-enforced, not best-effort. fp8 online-quantized; multimodal
-  # model served text-only (no images sent). co-locates with the recognition model + the BGE-M3 embedder.
-  #
-  # 9B, not 4B, and the KV cache is WHY it is affordable. the 9B is architecturally identical to the 4B everywhere the
-  # cache is concerned — 32 layers of which 8 are full attention, 4 kv heads, head_dim 256 — and the cache is sized by
-  # exactly those three numbers. only hidden_size grows (2560 -> 4096), and that is weights. so 2.25x the parameters
-  # costs ~4.7GB of weights and NOT ONE BYTE of extra cache: 17.8 KB/token either way.
-  # every open weakness in the query layer is a judgment call (a stray query on a prose question, a filter that keeps too
-  # little on a broad one), and judgment is what parameters buy. there is no official fp8/fp4 checkpoint for this size —
-  # only bf16 — so quantization is vLLM's online fp8, the same path the 4B already used.
   qwen:
     image: vllm/vllm-openai:latest
     container_name: citadel-qwen
@@ -112,52 +18,17 @@ services:
       - fp8
       - --kv-cache-dtype
       - auto
-      # 0.30 was sized when the OCR model owned the card. it left 1.79GiB of KV = 94,854 tokens, and vLLM's own boot
-      # line said what that means: "Maximum concurrency for 32,768 tokens per request: 2.89x". the filter packs each
-      # call up to BUDGET (~30k tokens) and runs 32 of them at once — so ~3 ran and 29 queued, every query, invisibly.
-      # size the cache for the requests this pipeline actually MAKES, not for vLLM's worst case. its "Maximum concurrency
-      # for 65,536 tokens per request" line assumes every slot holds a full-length sequence at once, and ours never can:
-      # the filter runs 3 at a time at ~30k each (~92k tokens), and synthesis is ONE call that runs alone, after the
-      # filtering is done. peak demand is ~92k tokens, not 3 x 64k. sizing for the worst case cost 1.2GB of cache that is
-      # never touched — and that 1.2GB is what the DETECTOR needs: it is a separate process with its own cuda context on
-      # the same card, and it does not exist at the moment vLLM profiles, so nothing here reserves room for it.
       - --gpu-memory-utilization
-      - "0.6"
-      # a COUNT cap, and count is the wrong unit for two workloads of opposite shape: a table description is ~1k tokens
-      # and an evidence-filter batch is ~30k, and no single number serves both. it does not have to — vllm admits by KV,
-      # which IS size-aware: ~60 descriptions fit at once, or 4 filter calls, and whatever does not fit simply WAITS,
-      # holding token ids and no cache. so this is set high and left alone; the real bound is the 125,373-token cache.
-      # at 8 it was a throttle and nothing else — measured `Running: 3, Waiting: 0` across a whole 557s ingestion.
+      - "0.85"
       - --max-num-seqs
-      - "128"
-      # 64k total, prompt AND completion together — that is how vLLM counts it. the model is native 256k
-      # (max_position_embeddings=262144), so nothing here is rope-extended or degraded.
+      - "384"
       - --max-model-len
-      - "65536"
-      - --enforce-eager
-      - --enable-prefix-caching
-      - --language-model-only
-      # any OpenAI-compatible client that is an agent (an editor extension, a commit-message generator) sends
-      # tool_choice="auto" on every call. without these vLLM rejects the request outright — 400, before a single token,
-      # "auto tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set". citadel's own calls never
-      # use tools, so this costs us nothing and it is what makes the server usable by anything other than us.
-      # qwen3_xml, not hermes: this model's chat template emits <tool_call><function=name><parameter=x> — XML, not JSON.
+      - "8192"
       - --enable-auto-tool-choice
       - --tool-call-parser
       - qwen3_xml
-      # the stock chat template leaves thinking ON unless the caller passes enable_thinking=false, and only OUR calls do
-      # (citadel/llm.py) — so any other client burns its whole token budget reasoning and returns content=None,
-      # finish_reason=length. measured: 800 tokens, not one of them an answer. vLLM has no flag for the template's
-      # default, so this template is the stock one with that single branch inverted: thinking is off unless a caller
-      # explicitly asks for it. our own enable_thinking=false still lands in the same place it always did.
       - --chat-template
       - /etc/citadel/qwen-no-think.jinja
-      # NOT set: --reasoning-parser. it is incompatible with the template above and silently eats the answer. the qwen3
-      # parser assumes the model STARTS inside a think block and treats everything up to </think> as reasoning — but the
-      # template already closes that block in the PROMPT, so the generated text never contains the tag the parser looks
-      # for, and the whole reply lands in `reasoning` with content=null. thinking is off; there is no trace to separate.
-      # info, not warning: at warning the server logs NOTHING per request, so a client getting a 400 or a 404 has
-      # nowhere to look and the failure is indistinguishable from the request never arriving
       - --uvicorn-log-level
       - info
     environment:
@@ -168,7 +39,6 @@ services:
       memlock: -1
       stack: 67108864
     volumes:
-      # HF model cache on a HOST dir (bind mount) so `docker compose down -v` never wipes the ~8GB download.
       - ${HOME}/.cache/citadel-qwen:/root/.cache/huggingface
       - qwen-vllm-cache:/root/.cache/vllm
       - ./scripts/qwen-no-think.jinja:/etc/citadel/qwen-no-think.jinja:ro
@@ -186,10 +56,6 @@ services:
     restart: always
     ports:
       - "${CITADEL_REDIS_PORT:-6379}:6379"
-    # Ephemeral ingestion bus — NO persistence. Redis carries transient streams + multi-MB page images;
-    # the DB is the source of truth and run.sh FLUSHALLs each run. AOF/RDB here only fork- and fsync-stall
-    # the single-threaded server under image load → those freezes time out client connects and crash the
-    # worker. Keep it purely in-memory (no --save, no appendonly).
     command:
       - redis-server
       - --save
@@ -205,13 +71,10 @@ services:
       POSTGRES_USER: ${CITADEL_POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${CITADEL_POSTGRES_PASSWORD}
       POSTGRES_DB: ${CITADEL_POSTGRES_DB:-citadel}
-    # app pool (50) + worker pool (50) + listener + migrations must fit; default 100 is too tight, so lift the ceiling
     command:
       - postgres
       - -c
       - max_connections=200
-      # reap a backend whose client vanished (hard-killed app) even mid-statement, so its locks don't strand the next
-      # run: send keepalives after 30s idle, retry every 10s x3 → dead peer detected and rolled back within ~60s.
       - -c
       - tcp_keepalives_idle=30
       - -c
@@ -222,10 +85,8 @@ services:
       - "${CITADEL_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      # runs on first DB init (empty data dir) → creates the pgvector extension; persists in the volume across restarts
       - ./scripts/db:/docker-entrypoint-initdb.d:ro
 
 volumes:
   postgres-data:
-  vllm-cache:
   qwen-vllm-cache:

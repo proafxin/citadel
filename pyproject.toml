@@ -7,7 +7,7 @@ requires-python = ">=3.13"
 authors = [{ name = "Masum Billal", email = "billalmasum93@gmail.com" }]
 
 dependencies = [
-    "alembic>=1.19.0",
+    "alembic>=1.19.1",
     "asyncpg>=0.31.0",
     "beautifulsoup4>=4.15.0",
     "cachetools>=7.1.7",
@@ -18,11 +18,7 @@ dependencies = [
     "lxml>=6.1.1",
     "markdown-it-py>=4.2.0",
     "mdit-py-plugins>=0.6.1",
-    "nvidia-nccl-cu13>=2.30.7",
-    "opencv-python>=5.0.0.93",
     "openpyxl>=3.1.5",
-    "paddleocr>=3.7.0",
-    "paddlepaddle-gpu>=3.3.1 ; sys_platform == 'linux'",
     "pebble>=5.2.1",
     "pgvector>=0.5.0",
     "pillow>=12.3.0",
@@ -58,16 +54,8 @@ name = "nvidia"
 url = "https://pypi.nvidia.com"
 explicit = true
 
-# cu130, to match pytorch-cu130: paddle also ships cu126/cu128/cu129 builds, and taking one of those would put a SECOND
-# cuda runtime in the venv alongside torch's. verified on this box: cp313, sm_120 (compute capability 12.0), runtime 13.0
-[[tool.uv.index]]
-name = "paddle-cu130"
-url = "https://www.paddlepaddle.org.cn/packages/stable/cu130/"
-explicit = true
-
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
-paddlepaddle-gpu = [{ index = "paddle-cu130", marker = "sys_platform == 'linux'" }]
 # torchvision = { index = "pytorch-cu130" }
 # vllm = { index = "pytorch-cu130" }
 
@@ -153,26 +141,6 @@ cache-keys = [{ file = "uv.lock" }, { git = { commit = true } }]
 concurrent-builds = 4
 concurrent-downloads = 4
 concurrent-installs = 4
-# torch and paddle each hard-pin their own PATCH version of the same cuda 13 libraries (torch wants cudnn 9.19.0.56,
-# paddle wants 9.13.0.50, and likewise for cublas/nccl/...), so out of the box they cannot co-resolve at all. these are
-# the same shared objects both frameworks dlopen at runtime; cuda 13 is abi-stable within its major, so installing ONE
-# version of each — the newer — is exactly what a system-wide cuda install does. relax the pins to a floor and let the
-# resolver pick. verified after: paddle.utils.run_check() and torch.cuda both pass on sm_120.
-override-dependencies = [
-    "nvidia-cublas>=13.0.0",
-    "nvidia-cuda-cupti>=13.0.0",
-    "nvidia-cuda-nvrtc>=13.0.0",
-    "nvidia-cuda-runtime>=13.0.0",
-    "nvidia-cudnn-cu13>=9.13.0",
-    "nvidia-cufft>=12.0.0",
-    "nvidia-curand>=10.4.0",
-    "nvidia-cusolver>=12.0.0",
-    "nvidia-cusparse>=12.6.0",
-    "nvidia-cusparselt-cu13>=0.8.0",
-    "nvidia-nccl-cu13>=2.28.0",
-    "nvidia-nvjitlink>=13.0.0",
-    "nvidia-nvtx>=13.0.0",
-]
 
 [tool.uv.build-backend]
 module-root = ""

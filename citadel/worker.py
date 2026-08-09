@@ -4,13 +4,14 @@ import signal
 import traceback
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, cast
 
 from citadel.bus import get_redis
 from citadel.db import get_engine
 from citadel.services.batching import STREAM_BATCH, record_summary, summarize_document
 from citadel.services.ingestion import (
-    CROP_BOUND,
+    BULK_READ_COUNT,
     GROUP,
     MAX_ATTEMPTS,
     PAGINATE_CONCURRENCY,
@@ -20,6 +21,7 @@ from citadel.services.ingestion import (
     STREAM_MERGE,
     STREAM_NORMALIZED,
     STREAM_PAGES,
+    STREAM_RASTERIZE,
     STREAM_STRUCTURE,
     STREAM_TABLE_STRUCTURE,
     cleanup,
@@ -30,20 +32,17 @@ from citadel.services.ingestion import (
     handle_normalize,
     handle_ocr,
     handle_paginate,
+    handle_rasterize,
     handle_render,
     handle_structure,
     handle_table_structure,
-    log_group_closes,
-    log_timeline,
     make_profile_pool,
     reap_orphan_blobs,
     release_idle,
     render_stream,
     requeue_message,
-    sample_timeline,
     shutdown,
 )
-from citadel.services.paddle import CROP_CONCURRENCY, log_crop_sizes
 from citadel.services.query import STREAM_RESOLVE_BATCH, record_resolve_batch, resolve_batch_job
 from citadel.services.slm import read_replies
 from config import CPU_EIGHTH, CPU_THIRD, configure_logging, get_settings
@@ -53,7 +52,8 @@ logger = logging.getLogger(__name__)
 NORMALIZE_CONCURRENCY = CPU_THIRD
 MERGE_CONCURRENCY = CPU_EIGHTH
 STRUCTURE_CONCURRENCY = CPU_EIGHTH
-OCR_CONCURRENCY = CROP_CONCURRENCY
+OCR_CONCURRENCY = 384
+VISION_BUFFER = OCR_CONCURRENCY
 
 BLOCK_MS = 5000
 
@@ -83,6 +83,11 @@ class _Capacity:
         if self.free() > 0:
             return
         await self.slot.wait()
+
+
+@lru_cache
+def get_vision_capacity() -> _Capacity:
+    return _Capacity(OCR_CONCURRENCY + VISION_BUFFER)
 
 
 def _tb(exc: BaseException) -> str:
@@ -145,7 +150,7 @@ async def _recover(stream: str, consumer: str, cap: _Capacity | None, spawn: Spa
         if cap is not None and cap.free() <= 0:
             await cap.wait_free()
             continue
-        count = cap.free() if cap is not None else CROP_BOUND
+        count = cap.free() if cap is not None else BULK_READ_COUNT
         fresh = await redis.xreadgroup(GROUP, consumer, {stream: last}, count=count)
         entries = fresh[0][1] if fresh else []
         if not entries:
@@ -190,7 +195,7 @@ async def _drive(
 ) -> None:
     await ensure_group(stream)
     consumer = f"{stream}-{get_settings().worker_id}"
-    logger.info("consuming %s concurrency=%s", stream, cap.limit if cap is not None else "crop-gated")
+    logger.info("consuming %s concurrency=%s", stream, cap.limit if cap is not None else "unbounded")
     await _recover(stream, consumer, cap, spawn)
     await _pump(stream, consumer, cap, spawn, downstream)
 
@@ -245,6 +250,21 @@ async def _render_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> N
         cap.release()
 
 
+async def _rasterize_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+    stream = STREAM_RASTERIZE
+    fields = await _decode_or_settle(stream, msg_id, raw)
+    if fields is None:
+        cap.release()
+        return
+    work = await _run_cancelable(handle_rasterize(fields))
+    if work.exception() is None:
+        await _settle(stream, msg_id)
+        return
+    cap.release()
+    logger.error("rasterize failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
+    await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
+
+
 async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_PAGES
     try:
@@ -259,11 +279,13 @@ async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None
         await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
     finally:
         cap.release()
+        get_vision_capacity().release()
 
 
 DRAINED_STREAMS = (
     STREAM_INGEST,
     STREAM_NORMALIZED,
+    STREAM_RASTERIZE,
     STREAM_PAGES,
     STREAM_STRUCTURE,
     STREAM_TABLE_STRUCTURE,
@@ -279,9 +301,6 @@ async def _release_if_drained() -> None:
     if await redis.scard(RENDER_DOCS):
         return
     await asyncio.to_thread(release_idle)
-    log_crop_sizes()
-    log_timeline()
-    log_group_closes()
     logger.info("pipeline drained → released process pools")
 
 
@@ -434,6 +453,11 @@ async def render() -> None:
             await asyncio.sleep(0.1)
 
 
+async def rasterize() -> None:
+    cap = get_vision_capacity()
+    await _drive(STREAM_RASTERIZE, cap, lambda mid, raw: _spawn(_rasterize_job(cap, mid, raw)))
+
+
 async def ocr() -> None:
     cap = _Capacity(OCR_CONCURRENCY)
     await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)))
@@ -467,9 +491,9 @@ async def _main() -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    stages = (normalize, paginate, render, ocr, structure, table_structure, merge, batch, resolve_batches)
+    stages = (normalize, paginate, render, rasterize, ocr, structure, table_structure, merge, batch, resolve_batches)
     consumers = [asyncio.create_task(stage()) for stage in stages]
-    consumers.extend((asyncio.create_task(read_replies()), asyncio.create_task(sample_timeline())))
+    consumers.append(asyncio.create_task(read_replies()))
     stop_task = asyncio.create_task(stop.wait())
     try:
         await asyncio.wait([stop_task, *consumers], return_when=asyncio.FIRST_COMPLETED)

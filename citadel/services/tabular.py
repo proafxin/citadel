@@ -86,6 +86,16 @@ def grid_from_html(html: str) -> list[list[str]]:
     return _grid(table) if isinstance(table, Tag) else []
 
 
+def _md_row(line: str) -> list[str]:
+    stripped = line.strip().strip("|")
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def grid_from_markdown(markdown: str) -> list[list[str]]:
+    lines = [line for line in markdown.splitlines() if "|" in line]
+    return [_md_row(line) for index, line in enumerate(lines) if index != 1]
+
+
 def single_table_structure(grid: list[list[str]], header_rows: int) -> TableStructure:
     return TableStructure(
         col_start=0,

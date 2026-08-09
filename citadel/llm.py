@@ -3,6 +3,7 @@ import functools
 import json
 import logging
 import time
+from base64 import b64encode
 from collections.abc import AsyncIterator
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -154,84 +155,34 @@ async def collect_structure_candidates(job_id: str) -> list[dict]:
     return _structure_tables(await collect_slm(job_id))
 
 
-_TABLE_REF_SCHEMA = {
-    "oneOf": [
-        {"type": "integer"},
-        {
-            "type": "object",
-            "properties": {"table": {"type": "integer"}, "line": {"type": "integer"}},
-            "required": ["table", "line"],
-        },
-    ]
-}
-
-_LABELED_COLUMN_SCHEMA = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {"label": {"type": "string"}, "index": {"type": "integer"}},
-        "required": ["label", "index"],
-    },
-}
-
-_STRUCTURE_SCHEMA_OCR = {
-    "type": "object",
-    "additionalProperties": {
-        "type": "object",
-        "properties": {
-            "tables": {"type": "array", "items": {"type": "integer"}},
-            "metadata": {"type": "object", "additionalProperties": _TABLE_REF_SCHEMA},
-            "rows_start": _TABLE_REF_SCHEMA,
-            "rows_end": _TABLE_REF_SCHEMA,
-            "headers_start": _TABLE_REF_SCHEMA,
-            "headers_end": _TABLE_REF_SCHEMA,
-            "columns": _LABELED_COLUMN_SCHEMA,
-            "key_columns": _LABELED_COLUMN_SCHEMA,
-            "sections": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {"label": {"type": "string"}, "line": _TABLE_REF_SCHEMA},
-                    "required": ["label", "line"],
-                },
-            },
-            "dimensions": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {"label": {"type": "string"}, "line": _TABLE_REF_SCHEMA},
-                    "required": ["label", "line"],
-                },
-            },
-            "value_start": {"type": "integer"},
-            "value_end": {"type": "integer"},
-            "layout": {"type": "string", "enum": ["rectangular", "transpose", "crosstab"]},
-        },
-        "required": ["rows_start", "rows_end"],
-    },
-}
+PAGE_OCR_MAX_TOKENS = 3584
 
 
-STRUCTURE_BUDGET_OCR = SLM_MODEL_LEN - STRUCTURE_MAX_TOKENS
+def _page_ocr_payload(image: bytes, max_tokens: int) -> dict:
+    return {
+        "model": QWEN_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64encode(image).decode()}},
+                    {"type": "text", "text": load_prompt("page_ocr")},
+                ],
+            }
+        ],
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "stream": True,
+    }
 
 
-def resolve_structure_prompt_ocr(payload: str) -> str:
-    return f"{load_prompt('table_structure_ocr')}\n{payload}"
+async def emit_page_ocr(image: bytes, max_tokens: int = PAGE_OCR_MAX_TOKENS) -> str:
+    return await emit(_page_ocr_payload(image, max_tokens), interactive=False)
 
 
-def structure_prompt_tokens_ocr(payload: str) -> int:
-    return count_tokens(resolve_structure_prompt_ocr(payload))
-
-
-async def emit_structure_candidates_ocr(payload: str) -> str:
-    return await emit_slm(
-        resolve_structure_prompt_ocr(payload), _STRUCTURE_SCHEMA_OCR, interactive=False, max_tokens=STRUCTURE_MAX_TOKENS
-    )
-
-
-async def collect_structure_candidates_ocr(job_id: str) -> dict[str, dict]:
-    data = await collect_slm(job_id)
-    return data if isinstance(data, dict) else {}
+async def collect_page_ocr(job_id: str) -> str:
+    return (await collect_reply(job_id)).strip()
 
 
 async def _chat_stream(prompt: str) -> AsyncIterator[str]:
