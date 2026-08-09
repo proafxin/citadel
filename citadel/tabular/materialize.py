@@ -1,6 +1,5 @@
 import logging
 import re
-from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -124,23 +123,6 @@ def _section_columns(sections: list[list[str | None]], names: list[str]) -> list
     ]
 
 
-def _dedupe_headers(
-    grid: list[list[str]], header_rows: list[int], col_start: int, headers: list[str | None]
-) -> list[str | None]:
-    counts = Counter(name for name in headers if name)
-    resolved: list[str | None] = []
-    for index, name in enumerate(headers):
-        if name and counts[name] > 1:
-            resolved.append(_grid_header(grid, header_rows, col_start + index) or name)
-        else:
-            resolved.append(name)
-    counts = Counter(name for name in resolved if name)
-    duplicates = sorted({name for name, count in counts.items() if count > 1})
-    if duplicates:
-        logger.warning("materialize duplicate column names survive grid fallback: %s", duplicates)
-    return resolved
-
-
 def _materialize_relational(
     grid: list[list[str]],
     structure: TableStructure,
@@ -161,7 +143,6 @@ def _materialize_relational(
         ]
     else:
         headers = [_grid_header(grid, header_rows, structure.col_start + index) for index in range(count)]
-    headers = _dedupe_headers(grid, header_rows, structure.col_start, headers)
     columns = [
         Column(header=_clean_name(headers[index]) or f"col{index}", dtype=dtypes[index]) for index in range(count)
     ]
