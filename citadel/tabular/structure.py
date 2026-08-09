@@ -124,9 +124,10 @@ async def structure_tables(
     counts = await asyncio.to_thread(count_tokens_batch, texts)
     packs = pack_indices(counts, STRUCTURE_PAYLOAD_BUDGET)
     specs: list[dict] = []
-    for pack in packs:
+    for pack_no, pack in enumerate(packs):
         payload = "\n\n".join(texts[index] for index in pack)
-        specs.extend(await collect_structure_candidates(await emit_structure_candidates(payload, prompt_name)))
+        key = f"structure:{label or prompt_name}:{sheet_no}:{pack_no}"
+        specs.extend(await collect_structure_candidates(await emit_structure_candidates(payload, prompt_name, key)))
     prepared: list[tuple[list[int], list[list[str]], TableStructure]] = []
     for spec in specs:
         blocks = [index for index in spec.get("blocks", []) if isinstance(index, int) and 0 <= index < len(candidates)]

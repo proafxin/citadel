@@ -147,7 +147,7 @@ async def _run_job(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
     try:
         await _call_provider(payload, reply_to, job_id)
     except httpx.HTTPStatusError as error:
-        logger.exception("slm job failed job=%s attempt=%d", job_id, attempt)
+        logger.exception("slm job failed key=%s attempt=%d", job_id, attempt)
         if error.response.is_client_error:
             await _emit(reply_to, job_id, FAILED, f"provider rejected the request: {error.response.status_code}")
             await _settle(stream, msg_id)
@@ -155,11 +155,11 @@ async def _run_job(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
             await _fail(stream, msg_id, raw, attempt)
         return
     except (httpx.HTTPError, json.JSONDecodeError, KeyError):
-        logger.exception("slm job failed job=%s attempt=%d", job_id, attempt)
+        logger.exception("slm job failed key=%s attempt=%d", job_id, attempt)
         await _fail(stream, msg_id, raw, attempt)
         return
     done = time.time()
-    logger.info("slm job stream=%s call=%.1fs", stream, done - started)
+    logger.info("slm job stream=%s key=%s call=%.1fs", stream, job_id, done - started)
     await _emit(reply_to, job_id, DONE, "")
     await _settle(stream, msg_id)
 

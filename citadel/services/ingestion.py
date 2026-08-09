@@ -448,12 +448,7 @@ async def handle_render(fields: dict[str, str]) -> None:
             raise FileNotFoundError(msg)
         return
     redis = get_redis()
-    now = time.time()
-    first = await redis.hsetnx(f"doc:{doc_id}", "t_pages", now)
-    if first:
-        paginated = float(await redis.hget(f"doc:{doc_id}", "t_paginated") or 0)
-        if paginated:
-            logger.info("waiting_done doc_id=%s waited=%.1fs", doc_id, now - paginated)
+    await redis.hsetnx(f"doc:{doc_id}", "t_pages", time.time())
     await redis.xadd(STREAM_RASTERIZE, {"doc_id": doc_id, "page_idx": page_idx, "dpi": dpi})
 
 
@@ -560,7 +555,7 @@ async def handle_tabular(fields: dict[str, str]) -> None:
         return
     if kind == "xlsx":
         sheet = await _get_sheet(doc_id, sheet_no)
-        items = await extract_sheet_content(sheet)
+        items = await extract_sheet_content(doc_id, sheet)
         image_items = await resolve_sheet_images(doc_id, f"sheet{sheet_no}", sheet_no, sheet.images)
         if image_items:
             start = (items[-1][0] + 1) if items else 1

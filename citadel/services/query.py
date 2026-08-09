@@ -504,7 +504,8 @@ async def resolve_batch_job(fields: dict[str, str]) -> None:
     library_id = int(fields["library_id"])
     items = json.loads(fields["items"])
     index_map = [(kind, index) for kind, index in json.loads(fields["index_map"])]
-    job_id = await emit_resolve(fields["question"], items, fields["library"])
+    key = f"resolve:{library_id}:{fields['batch_no']}"
+    job_id = await emit_resolve(fields["question"], items, key, fields["library"])
     doc_coverage, table_coverage = await collect_resolve(job_id, len(items))
     coverage = _split_coverage(doc_coverage, table_coverage, index_map)
     payload = json.dumps({"documents": coverage.documents, "tables": coverage.tables})

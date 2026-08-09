@@ -232,7 +232,8 @@ async def _document_summary(doc_id: int, summaries: list[str]) -> str | None:
         return None
     async with get_sessionmaker()() as session:
         filename = await session.scalar(select(Document.filename).where(Document.id == doc_id)) or ""
-    return await collect_text(await emit_text(*_document_summary_prompt(filename, summaries), interactive=False))
+    prompt, max_tokens = _document_summary_prompt(filename, summaries)
+    return await collect_text(await emit_text(prompt, max_tokens, interactive=False, key=f"doc={doc_id}:summary"))
 
 
 def _batch_row(doc_id: int, spec: BatchSpec, summary: str) -> ContentBatch:
@@ -255,7 +256,10 @@ async def summarize_document(fields: dict[str, str]) -> None:
     async with get_sessionmaker()() as session, session.begin():
         specs = await build_document_specs(session, doc_id)
     packed = time.time()
-    jobs = [(spec, await emit_text(*_summary_prompt(spec), interactive=False)) for spec in specs]
+    jobs = [
+        (spec, await emit_text(*_summary_prompt(spec), interactive=False, key=f"doc={doc_id}:batch={spec.batch_no}"))
+        for spec in specs
+    ]
     rows = [_batch_row(doc_id, spec, await collect_text(job_id)) for spec, job_id in jobs]
     summary = await _document_summary(doc_id, [row.summary for row in rows])
     summarized = time.time()

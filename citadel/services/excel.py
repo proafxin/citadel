@@ -324,7 +324,7 @@ def _pivot_covers(region: Region, pivots: list[SheetPivot]) -> bool:
     )
 
 
-async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, SheetItem]]:
+async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tuple[int, SheetItem]]:
     text: list[SheetItem] = []
     grids: list[list[list[str]]] = []
     cells: list[Cell] = []
@@ -348,7 +348,11 @@ async def extract_sheet_content(sheet: SheetExtraction) -> list[tuple[int, Sheet
             "max_col": max(cell.col for cell in cells),
         }
         structured = await structure_tables(
-            grids, prompt_name="table_structure_excel", sheet_no=sheet.sheet_no, anchors=anchors
+            grids,
+            prompt_name="table_structure_excel",
+            sheet_no=sheet.sheet_no,
+            anchors=anchors,
+            label=f"{doc_id}:sheet{sheet.sheet_no}",
         )
         items.extend(table for table, _blocks in structured)
     return list(enumerate(items, start=1))

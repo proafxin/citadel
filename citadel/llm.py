@@ -1,5 +1,5 @@
-import asyncio
 import functools
+import itertools
 import json
 import logging
 import time
@@ -9,10 +9,17 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from citadel.prompts import load_prompt
 from citadel.schemas.query import QueryPlan
-from citadel.services.slm import collect, collect_reply, emit, submit
+from citadel.services.slm import collect, collect_reply, emit, reply_stream, submit
 from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL
 
 logger = logging.getLogger(__name__)
+
+_call_no = itertools.count()
+
+
+def _local_key(label: str) -> str:
+    return f"{reply_stream()}:{label}:{next(_call_no)}"
+
 
 STRUCT_MAX_TOKENS = 4096
 STRUCTURE_MAX_TOKENS = 1536
@@ -70,13 +77,13 @@ def _inline_refs(schema: dict) -> dict:
     return resolved if isinstance(resolved, dict) else schema
 
 
-async def call_slm(prompt: str, schema: dict, interactive: bool, max_tokens: int = STRUCT_MAX_TOKENS) -> dict:
-    raw = await collect(_struct_payload(prompt, _inline_refs(schema), max_tokens), interactive)
+async def call_slm(prompt: str, schema: dict, interactive: bool, key: str, max_tokens: int = STRUCT_MAX_TOKENS) -> dict:
+    raw = await collect(_struct_payload(prompt, _inline_refs(schema), max_tokens), interactive, key)
     return json.loads(_extract_json(raw))
 
 
-async def emit_slm(prompt: str, schema: dict, interactive: bool, max_tokens: int = STRUCT_MAX_TOKENS) -> str:
-    return await emit(_struct_payload(prompt, _inline_refs(schema), max_tokens), interactive)
+async def emit_slm(prompt: str, schema: dict, interactive: bool, key: str, max_tokens: int = STRUCT_MAX_TOKENS) -> str:
+    return await emit(_struct_payload(prompt, _inline_refs(schema), max_tokens), interactive, key)
 
 
 async def collect_slm(job_id: str) -> dict:
@@ -94,8 +101,8 @@ def _text_payload(prompt: str, max_tokens: int) -> dict:
     }
 
 
-async def emit_text(prompt: str, max_tokens: int, interactive: bool) -> str:
-    return await emit(_text_payload(prompt, max_tokens), interactive)
+async def emit_text(prompt: str, max_tokens: int, interactive: bool, key: str) -> str:
+    return await emit(_text_payload(prompt, max_tokens), interactive, key)
 
 
 async def collect_text(job_id: str) -> str:
@@ -145,9 +152,9 @@ def _structure_tables(data: dict) -> list[dict]:
     return tables if isinstance(tables, list) else []
 
 
-async def emit_structure_candidates(payload: str, prompt_name: str) -> str:
+async def emit_structure_candidates(payload: str, prompt_name: str, key: str) -> str:
     prompt = f"{load_prompt(prompt_name)}\n{payload}"
-    return await emit_slm(prompt, _STRUCTURE_SCHEMA, interactive=False, max_tokens=STRUCTURE_MAX_TOKENS)
+    return await emit_slm(prompt, _STRUCTURE_SCHEMA, interactive=False, key=key, max_tokens=STRUCTURE_MAX_TOKENS)
 
 
 async def collect_structure_candidates(job_id: str) -> list[dict]:
@@ -169,7 +176,7 @@ def _page_ocr_payload(image_key: str, max_tokens: int) -> dict:
 
 
 async def emit_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -> str:
-    return await emit(_page_ocr_payload(image_key, max_tokens), interactive=False)
+    return await emit(_page_ocr_payload(image_key, max_tokens), interactive=False, key=image_key)
 
 
 async def collect_page_ocr(job_id: str) -> str:
@@ -185,7 +192,7 @@ async def _chat_stream(prompt: str) -> AsyncIterator[str]:
         "chat_template_kwargs": {"enable_thinking": False},
         "stream": True,
     }
-    async for delta in submit(payload, interactive=True):
+    async for delta in submit(payload, interactive=True, key=_local_key("synthesize")):
         yield delta
 
 
@@ -198,9 +205,8 @@ _MERGE_SCHEMA = {
 
 async def merge_evidence(query: str, items: list[str]) -> str:
     listing = "\n\n".join(f"[{index}] {item}" for index, item in enumerate(items))
-    data = await call_slm(
-        f"{load_prompt('evidence_merge')}\nquestion: {query}\npassages:\n{listing}", _MERGE_SCHEMA, interactive=True
-    )
+    prompt = f"{load_prompt('evidence_merge')}\nquestion: {query}\npassages:\n{listing}"
+    data = await call_slm(prompt, _MERGE_SCHEMA, interactive=True, key=_local_key("merge"))
     return str(data.get("summary", ""))
 
 
@@ -260,12 +266,12 @@ def resolve_prompt_tokens(query: str, items: list[str], library: str = "") -> in
     return count_tokens(_resolve_prompt(query, items, library))
 
 
-async def emit_resolve(query: str, items: list[str], library: str = "") -> str:
+async def emit_resolve(query: str, items: list[str], key: str, library: str = "") -> str:
     prompt = _resolve_prompt(query, items, library)
     tokens = count_tokens(prompt)
     if tokens > RESOLVE_BUDGET:
         logger.warning("resolve inventory does not fit one call tokens=%d budget=%d", tokens, RESOLVE_BUDGET)
-    return await emit_slm(prompt, _RESOLVE_SCHEMA, interactive=True)
+    return await emit_slm(prompt, _RESOLVE_SCHEMA, interactive=True, key=key)
 
 
 async def collect_resolve(job_id: str, count: int) -> tuple[dict[int, str], dict[int, str]]:
@@ -284,13 +290,6 @@ async def collect_resolve(job_id: str, count: int) -> tuple[dict[int, str], dict
     return doc_coverage, table_coverage
 
 
-_VALIDATE_SCHEMA = {
-    "type": "object",
-    "properties": {"tables": {"type": "array", "items": {"type": "integer"}}},
-    "required": ["tables"],
-}
-
-
 def pack_indices(counts: list[int], budget: int) -> list[list[int]]:
     groups: list[list[int]] = []
     current: list[int] = []
@@ -306,37 +305,13 @@ def pack_indices(counts: list[int], budget: int) -> list[list[int]]:
     return groups
 
 
-def _validate_prompt(candidates: list[str]) -> str:
-    listing = "\n\n".join(f"[{index}] {candidate}" for index, candidate in enumerate(candidates))
-    return f"{load_prompt('table_validation')}\ncandidates:\n{listing}"
-
-
-async def validate_tables(candidates: list[str]) -> list[bool]:
-    if not candidates:
-        return []
-    counts = await asyncio.to_thread(count_tokens_batch, candidates)
-    packs = pack_indices(counts, RESOLVE_BUDGET)
-    jobs: list[tuple[list[int], str]] = []
-    for pack in packs:
-        job_id = await emit_slm(_validate_prompt([candidates[i] for i in pack]), _VALIDATE_SCHEMA, False)
-        jobs.append((pack, job_id))
-    keep = [False] * len(candidates)
-    for pack, job_id in jobs:
-        data = await collect_slm(job_id)
-        for local in data.get("tables", []):
-            if isinstance(local, int) and 0 <= local < len(pack):
-                keep[pack[local]] = True
-    logger.info("validate_tables candidates=%d packs=%d kept=%d", len(candidates), len(packs), sum(keep))
-    return keep
-
-
 async def write_queries(query: str, tables: list[str], library: str = "") -> QueryPlan:
     if not tables:
         return QueryPlan()
     listing = "\n\n".join(tables)
     prompt = f"{load_prompt('text_to_sql')}\nlibrary: {library}\nquestion: {query}\ntables:\n{listing}"
     started = time.time()
-    data = await call_slm(prompt, _QUERIES_SCHEMA, interactive=True)
+    data = await call_slm(prompt, _QUERIES_SCHEMA, interactive=True, key=_local_key("queries"))
     queries = [str(sql) for sql in data.get("queries", []) if str(sql).strip()]
     plan = QueryPlan(queries=queries)
     logger.info(
@@ -355,5 +330,6 @@ async def write_queries(query: str, tables: list[str], library: str = "") -> Que
 
 async def synthesize(query: str, passages: list[str], results: list[str]) -> AsyncIterator[str]:
     evidence = "passages:\n" + "\n".join(passages) + "\n\ntable results:\n" + "\n".join(results)
-    async for token in _chat_stream(f"{load_prompt('synthesize')}\nquestion: {query}\n{evidence}"):
+    prompt = f"{load_prompt('synthesize')}\nquestion: {query}\n{evidence}"
+    async for token in _chat_stream(prompt):
         yield token
