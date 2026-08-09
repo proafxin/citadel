@@ -150,9 +150,10 @@ async def _run_job(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
     reply_to = raw[b"reply_to"].decode()
     attempt = int(raw.get(b"attempt", b"0"))
     emitted = float(raw.get(b"t_emit", b"0") or 0)
-    started = time.time()
+    payload = json.loads(raw[b"payload"].decode())
+    streaming = bool(payload.get("stream"))
     try:
-        first = await _call_provider(json.loads(raw[b"payload"].decode()), reply_to, job_id)
+        first = await _call_provider(payload, reply_to, job_id)
     except httpx.HTTPStatusError as error:
         logger.exception("slm job failed job=%s attempt=%d", job_id, attempt)
         if error.response.is_client_error:
@@ -166,10 +167,10 @@ async def _run_job(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
         await _fail(stream, msg_id, raw, attempt)
         return
     done = time.time()
-    ttft = (first - emitted) if first and emitted else (started - emitted if emitted else 0.0)
-    gen = (done - first) if first else (done - started)
-    level = logging.INFO if stream == STREAM_SLM_INTERACTIVE else logging.DEBUG
-    logger.log(level, "slm job stream=%s ttft=%.1fs gen=%.1fs", stream, ttft, gen)
+    if streaming and first:
+        logger.info("slm job stream=%s gen=%.1fs", stream, done - first)
+    else:
+        logger.info("slm job stream=%s total=%.1fs", stream, done - emitted if emitted else 0.0)
     await _emit(reply_to, job_id, DONE, "")
     await _settle(stream, msg_id)
 

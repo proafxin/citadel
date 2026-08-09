@@ -53,14 +53,7 @@ from citadel.services.excel import (
 )
 from citadel.services.html import parse_html
 from citadel.services.library import library_exists
-from citadel.services.pdf import (
-    MAX_IMAGE_SIDE,
-    classify_pdf_page,
-    count_pdf_pages,
-    downscale,
-    render_pdf_page,
-    uncovered_layer_runs,
-)
+from citadel.services.pdf import MAX_IMAGE_SIDE, count_pdf_pages, downscale, render_pdf_page
 from citadel.services.presentation import parse_pptx
 from citadel.services.tabular import (
     extract_json_tables,
@@ -409,16 +402,6 @@ async def handle_render(fields: dict[str, str]) -> None:
         paginated = float(await redis.hget(f"doc:{doc_id}", "t_paginated") or 0)
         if paginated:
             logger.info("waiting_done doc_id=%s waited=%.1fs", doc_id, now - paginated)
-    (digital, needs_vision), classify_wait, classify_cpu = await _run_pdfium(
-        classify_pdf_page, str(path), page_idx, job_timeout=RENDER_TIMEOUT
-    )
-    await _add_stage_seconds(doc_id, "render_wait_s", classify_wait)
-    await _add_stage_seconds(doc_id, "render_s", classify_cpu)
-    if digital and not needs_vision:
-        blocks = await extract_pure_text_page(doc_id, page_idx)
-        await redis.hincrby(f"doc:{doc_id}", "started_count", 1)
-        await _emit_page(doc_id, page_idx, blocks)
-        return
     await redis.xadd(STREAM_RASTERIZE, {"doc_id": doc_id, "page_idx": page_idx, "dpi": dpi})
 
 
@@ -607,14 +590,6 @@ async def extract_page(doc_id: str, page_idx: int) -> list[Block]:
     return blocks_from_page_markdown(markdown)
 
 
-async def extract_pure_text_page(doc_id: str, page_idx: int) -> list[Block]:
-    path = blob_path(doc_id)
-    runs, wait, cpu = await _run_pdfium(uncovered_layer_runs, str(path), page_idx, [], job_timeout=RENDER_TIMEOUT)
-    await _add_stage_seconds(doc_id, "layer_wait_s", wait)
-    await _add_stage_seconds(doc_id, "layer_s", cpu)
-    return [Block(page_idx=page_idx, type="text", bbox=list(run.bbox), text=run.text) for run in runs]
-
-
 async def handle_ocr(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     page_idx = int(fields["page_idx"])
@@ -635,8 +610,6 @@ STAGE_SECONDS = (
     ("render_wait", "render_wait_s"),
     ("render_cpu", "render_s"),
     ("ocr_wall", "ocr_s"),
-    ("layer_wait", "layer_wait_s"),
-    ("layer_cpu", "layer_s"),
 )
 
 
