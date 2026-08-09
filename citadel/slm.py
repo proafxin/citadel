@@ -49,8 +49,7 @@ async def _emit(reply_to: str, job_id: str, kind: str, value: str) -> None:
     await redis.xtrim(reply_to, maxlen=REPLY_MAXLEN, approximate=True)
 
 
-async def _stream_call(client: httpx.AsyncClient, url: str, payload: dict, reply_to: str, job_id: str) -> float | None:
-    first: float | None = None
+async def _stream_call(client: httpx.AsyncClient, url: str, payload: dict, reply_to: str, job_id: str) -> None:
     async with client.stream("POST", url, json=payload) as response:
         if response.is_error:
             body = await response.aread()
@@ -64,22 +63,15 @@ async def _stream_call(client: httpx.AsyncClient, url: str, payload: dict, reply
                 break
             delta = json.loads(data)["choices"][0]["delta"].get("content")
             if delta:
-                if first is None:
-                    first = time.time()
                 await _emit(reply_to, job_id, CHUNK, delta)
-    return first
 
 
-async def _blocking_call(
-    client: httpx.AsyncClient, url: str, payload: dict, reply_to: str, job_id: str
-) -> float | None:
+async def _blocking_call(client: httpx.AsyncClient, url: str, payload: dict, reply_to: str, job_id: str) -> None:
     response = await client.post(url, json=payload)
     if response.is_error:
         logger.error("provider %d job=%s body=%s", response.status_code, job_id, response.text[:2000])
     response.raise_for_status()
-    first = time.time()
     await _emit(reply_to, job_id, CHUNK, response.json()["choices"][0]["message"]["content"])
-    return first
 
 
 async def _resolve_page_ocr(payload: dict) -> dict:
@@ -102,13 +94,14 @@ async def _resolve_page_ocr(payload: dict) -> dict:
     return payload
 
 
-async def _call_provider(payload: dict, reply_to: str, job_id: str) -> float | None:
+async def _call_provider(payload: dict, reply_to: str, job_id: str) -> None:
     payload = await _resolve_page_ocr(payload)
     url = f"{get_settings().qwen_base_url}/chat/completions"
     async with httpx.AsyncClient(timeout=NO_TIMEOUT) as client:
         if payload.get("stream"):
-            return await _stream_call(client, url, payload, reply_to, job_id)
-        return await _blocking_call(client, url, payload, reply_to, job_id)
+            await _stream_call(client, url, payload, reply_to, job_id)
+        else:
+            await _blocking_call(client, url, payload, reply_to, job_id)
 
 
 async def _settle(stream: str, msg_id: str) -> None:
@@ -149,11 +142,10 @@ async def _run_job(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
     job_id = raw[b"job_id"].decode()
     reply_to = raw[b"reply_to"].decode()
     attempt = int(raw.get(b"attempt", b"0"))
-    emitted = float(raw.get(b"t_emit", b"0") or 0)
     payload = json.loads(raw[b"payload"].decode())
-    streaming = bool(payload.get("stream"))
+    started = time.time()
     try:
-        first = await _call_provider(payload, reply_to, job_id)
+        await _call_provider(payload, reply_to, job_id)
     except httpx.HTTPStatusError as error:
         logger.exception("slm job failed job=%s attempt=%d", job_id, attempt)
         if error.response.is_client_error:
@@ -167,10 +159,7 @@ async def _run_job(stream: str, msg_id: str, raw: dict[bytes, bytes]) -> None:
         await _fail(stream, msg_id, raw, attempt)
         return
     done = time.time()
-    if streaming and first:
-        logger.info("slm job stream=%s gen=%.1fs", stream, done - first)
-    else:
-        logger.info("slm job stream=%s total=%.1fs", stream, done - emitted if emitted else 0.0)
+    logger.info("slm job stream=%s call=%.1fs", stream, done - started)
     await _emit(reply_to, job_id, DONE, "")
     await _settle(stream, msg_id)
 
