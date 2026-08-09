@@ -1,4 +1,5 @@
 import re
+from base64 import b64decode
 from typing import TYPE_CHECKING
 
 from bs4 import BeautifulSoup
@@ -117,7 +118,25 @@ def _latex(element: Tag) -> str:
     return element.get_text(separator=" ", strip=True)
 
 
-def _walk(element: Tag, blocks: list[Block]) -> None:
+def _image_data(element: Tag, media: dict[str, bytes]) -> bytes | None:
+    src = (element.get("src") or "").strip()
+    if src.startswith("data:"):
+        header, _, encoded = src.partition(",")
+        return b64decode(encoded) if ";base64" in header else None
+    return media.get(src) or media.get(src.rsplit("/", 1)[-1])
+
+
+def _nested_images(element: Tag, blocks: list[Block], images: dict[int, bytes], media: dict[str, bytes]) -> None:
+    for img in element.find_all("img"):
+        if not _keep_image(img):
+            continue
+        data = _image_data(img, media)
+        if data is not None:
+            images[len(blocks)] = data
+        blocks.append(Block(page_idx=0, type="image", text=(img.get("alt") or "").strip()))
+
+
+def _walk(element: Tag, blocks: list[Block], images: dict[int, bytes], media: dict[str, bytes]) -> None:
     stack: list[tuple[Iterator[object], list[str]]] = [(iter(element.children), [])]
     while stack:
         iterator, buffer = stack[-1]
@@ -144,6 +163,7 @@ def _walk(element: Tag, blocks: list[Block]) -> None:
             text = _text(child)
             if text:
                 blocks.append(Block(page_idx=0, type="text", text=text))
+            _nested_images(child, blocks, images, media)
         elif name in {"ul", "ol"}:
             _flush(buffer, blocks)
             _walk_list(child, 0, blocks)
@@ -163,6 +183,9 @@ def _walk(element: Tag, blocks: list[Block]) -> None:
         elif name == "img":
             if _keep_image(child):
                 _flush(buffer, blocks)
+                data = _image_data(child, media)
+                if data is not None:
+                    images[len(blocks)] = data
                 blocks.append(Block(page_idx=0, type="image", text=(child.get("alt") or "").strip()))
         elif name in _INLINE:
             piece = child.get_text(separator=" ", strip=True)
@@ -173,9 +196,10 @@ def _walk(element: Tag, blocks: list[Block]) -> None:
             stack.append((iter(child.children), []))
 
 
-def parse_html(data: bytes) -> list[Block]:
+def parse_html(data: bytes, media: dict[str, bytes] | None = None) -> tuple[list[Block], dict[int, bytes]]:
     soup = BeautifulSoup(data, "lxml")
     _inline_links(soup)
     blocks: list[Block] = []
-    _walk(soup.body or soup, blocks)
-    return blocks
+    images: dict[int, bytes] = {}
+    _walk(soup.body or soup, blocks, images, media or {})
+    return blocks, images

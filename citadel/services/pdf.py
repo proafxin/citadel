@@ -33,6 +33,13 @@ def downscale(img: Image.Image) -> Image.Image:
     return img.resize((round(img.width * scale), round(img.height * scale)))
 
 
+def to_png_bytes(data: bytes) -> bytes:
+    with Image.open(io.BytesIO(data)) as img:
+        out = io.BytesIO()
+        downscale(img.convert("RGB") if img.mode == "CMYK" else img).save(out, format="PNG")
+        return out.getvalue()
+
+
 def count_pdf_pages(path: str) -> int:
     with pdfium.PdfDocument(path) as pdf:
         return len(pdf)

@@ -10,7 +10,9 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from functools import lru_cache
+from hashlib import sha256
 from pathlib import Path
 from typing import TypeVar
 
@@ -47,13 +49,15 @@ from citadel.services.document import (
 )
 from citadel.services.excel import (
     SheetExtraction,
+    SheetItem,
+    SheetText,
     extract_sheet_content,
     load_all_sheets,
     sheet_names,
 )
 from citadel.services.html import parse_html
 from citadel.services.library import library_exists
-from citadel.services.pdf import MAX_IMAGE_SIDE, count_pdf_pages, downscale, render_pdf_page
+from citadel.services.pdf import MAX_IMAGE_SIDE, count_pdf_pages, downscale, render_pdf_page, to_png_bytes
 from citadel.services.presentation import parse_pptx
 from citadel.services.tabular import (
     extract_json_tables,
@@ -91,6 +95,41 @@ PDFIUM_WORKERS = 4
 RENDER_TIMEOUT = 120
 PDF_POOL_MAX_TASKS = 100
 BULK_READ_COUNT = 256
+OCR_CONCURRENCY = 160
+VISION_BUFFER = OCR_CONCURRENCY
+
+
+@dataclass
+class _Capacity:
+    limit: int
+    inflight: int = 0
+    slot: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def free(self) -> int:
+        return self.limit - self.inflight
+
+    def take(self) -> None:
+        self.inflight += 1
+
+    def release(self) -> None:
+        self.inflight -= 1
+        self.slot.set()
+
+    async def wait_free(self) -> None:
+        self.slot.clear()
+        if self.free() > 0:
+            return
+        await self.slot.wait()
+
+    async def acquire(self) -> None:
+        while self.free() <= 0:
+            await self.wait_free()
+        self.take()
+
+
+@lru_cache
+def get_vision_capacity() -> _Capacity:
+    return _Capacity(OCR_CONCURRENCY + VISION_BUFFER)
 
 
 T = TypeVar("T")
@@ -272,6 +311,10 @@ async def library_progress(library_id: int) -> list[DocProgress]:
     return progress
 
 
+def normalize_media_key(doc_id: str) -> str:
+    return f"normalize_media:{doc_id}"
+
+
 async def handle_normalize(fields: dict[str, str], profile_dir: str) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
@@ -279,8 +322,11 @@ async def handle_normalize(fields: dict[str, str], profile_dir: str) -> None:
     await redis.hsetnx(f"doc:{doc_id}", "t_proc", time.time())
     await mark_processing(int(doc_id))
     data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
-    kind, normalized = await asyncio.to_thread(normalize_file, data, fields["filename"], profile_dir)
+    kind, normalized, media = await asyncio.to_thread(normalize_file, data, fields["filename"], profile_dir)
     await asyncio.to_thread(blob_path(doc_id).write_bytes, normalized)
+    if media:
+        await redis.hset(normalize_media_key(doc_id), mapping=media)
+        await redis.expire(normalize_media_key(doc_id), DOC_TTL)
     await get_redis().xadd(STREAM_NORMALIZED, {"doc_id": doc_id, "kind": kind, "filename": fields["filename"]})
     logger.info("normalize file=%s kind=%s", fields["filename"], kind)
 
@@ -304,10 +350,15 @@ async def _paginate_text(doc_id: str, filename: str) -> None:
 
 
 async def _paginate_html(doc_id: str, filename: str) -> None:
+    redis = get_redis()
     data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
-    blocks = await asyncio.to_thread(parse_html, data)
-    await get_redis().hset(f"doc:{doc_id}", "page_count", 1)
-    await record_page(doc_id, 0, blocks)
+    raw_media = await redis.hgetall(normalize_media_key(doc_id))
+    media = {key.decode(): value for key, value in raw_media.items()}
+    await redis.delete(normalize_media_key(doc_id))
+    blocks, images = await asyncio.to_thread(parse_html, data, media)
+    resolved = await resolve_embedded_images(doc_id, "html", blocks, images)
+    await redis.hset(f"doc:{doc_id}", "page_count", 1)
+    await record_page(doc_id, 0, resolved)
     logger.info("paginate file=%s html blocks=%d", filename, len(blocks))
 
 
@@ -315,8 +366,9 @@ async def _paginate_pptx(doc_id: str, filename: str) -> None:
     data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
     slides = await asyncio.to_thread(parse_pptx, data)
     await get_redis().hset(f"doc:{doc_id}", "page_count", max(len(slides), 1))
-    for index, slide_blocks in enumerate(slides or [[]]):
-        await record_page(doc_id, index, slide_blocks)
+    for index, (slide_blocks, images) in enumerate(slides or [([], {})]):
+        resolved = await resolve_embedded_images(doc_id, f"slide{index}", slide_blocks, images)
+        await record_page(doc_id, index, resolved)
     logger.info("paginate file=%s pptx slides=%d", filename, len(slides))
 
 
@@ -509,6 +561,10 @@ async def handle_tabular(fields: dict[str, str]) -> None:
     if kind == "xlsx":
         sheet = await _get_sheet(doc_id, sheet_no)
         items = await extract_sheet_content(sheet)
+        image_items = await resolve_sheet_images(doc_id, f"sheet{sheet_no}", sheet_no, sheet.images)
+        if image_items:
+            start = (items[-1][0] + 1) if items else 1
+            items = items + list(enumerate(image_items, start=start))
         sheet_name = sheet.sheet_name
     else:
         data = await asyncio.to_thread(path.read_bytes)
@@ -588,6 +644,64 @@ async def extract_page(doc_id: str, page_idx: int) -> list[Block]:
     job_id = await emit_page_ocr(page_image_key(doc_id, page_idx))
     markdown = await collect_page_ocr(job_id)
     return blocks_from_page_markdown(markdown)
+
+
+def embedded_image_key(doc_id: str, unit: str, index: int) -> str:
+    return f"embedded_image:{doc_id}:{unit}:{index}"
+
+
+async def _resolve_unique_images(doc_id: str, unit: str, images: dict[int, bytes]) -> dict[int, list[Block]]:
+    if not images:
+        return {}
+    redis = get_redis()
+    cap = get_vision_capacity()
+    normalized = {index: to_png_bytes(data) for index, data in images.items()}
+    by_hash: dict[bytes, list[int]] = {}
+    for index, data in normalized.items():
+        by_hash.setdefault(sha256(data).digest(), []).append(index)
+    keys = {digest: embedded_image_key(doc_id, unit, indices[0]) for digest, indices in by_hash.items()}
+    await asyncio.gather(
+        *(redis.set(keys[digest], normalized[indices[0]], ex=DOC_TTL) for digest, indices in by_hash.items())
+    )
+
+    async def resolve_one(digest: bytes) -> tuple[bytes, list[Block]]:
+        await cap.acquire()
+        try:
+            job_id = await emit_page_ocr(keys[digest])
+            markdown = await collect_page_ocr(job_id)
+            return digest, blocks_from_page_markdown(markdown)
+        finally:
+            cap.release()
+            await redis.delete(keys[digest])
+
+    resolved = dict(await asyncio.gather(*(resolve_one(digest) for digest in by_hash)))
+    return {index: resolved[digest] for digest, indices in by_hash.items() for index in indices}
+
+
+async def resolve_embedded_images(doc_id: str, unit: str, blocks: list[Block], images: dict[int, bytes]) -> list[Block]:
+    resolved = await _resolve_unique_images(doc_id, unit, images)
+    out: list[Block] = []
+    for index, block in enumerate(blocks):
+        if index in resolved:
+            out.extend(resolved[index])
+        else:
+            out.append(block)
+    return out
+
+
+def _sheet_items(sheet_no: int, blocks: list[Block]) -> list[SheetItem]:
+    items: list[SheetItem] = []
+    for block in blocks:
+        if block.type == "table" and block.grid:
+            items.append(materialize(block.grid, single_table_structure(block.grid, header_rows=1)))
+        elif block.text:
+            items.append(SheetText(sheet_no=sheet_no, text=block.text))
+    return items
+
+
+async def resolve_sheet_images(doc_id: str, unit: str, sheet_no: int, images: list[bytes]) -> list[SheetItem]:
+    resolved = await _resolve_unique_images(doc_id, unit, dict(enumerate(images)))
+    return [item for index in range(len(images)) for item in _sheet_items(sheet_no, resolved.get(index, []))]
 
 
 async def handle_ocr(fields: dict[str, str]) -> None:

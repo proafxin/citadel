@@ -3,8 +3,6 @@ import logging
 import signal
 import traceback
 from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass, field
-from functools import lru_cache
 from typing import Any, cast
 
 from citadel.bus import get_redis
@@ -14,6 +12,7 @@ from citadel.services.ingestion import (
     BULK_READ_COUNT,
     GROUP,
     MAX_ATTEMPTS,
+    OCR_CONCURRENCY,
     PAGINATE_CONCURRENCY,
     RENDER_CONCURRENCY,
     RENDER_DOCS,
@@ -24,10 +23,12 @@ from citadel.services.ingestion import (
     STREAM_RASTERIZE,
     STREAM_STRUCTURE,
     STREAM_TABLE_STRUCTURE,
+    _Capacity,
     cleanup,
     ensure_group,
     fail_document,
     fail_page,
+    get_vision_capacity,
     handle_merge,
     handle_normalize,
     handle_ocr,
@@ -53,40 +54,10 @@ logger = logging.getLogger(__name__)
 NORMALIZE_CONCURRENCY = 4
 MERGE_CONCURRENCY = CPU_EIGHTH
 STRUCTURE_CONCURRENCY = CPU_EIGHTH
-OCR_CONCURRENCY = 160
-VISION_BUFFER = OCR_CONCURRENCY
 
 _tasks: set[asyncio.Task[None]] = set()
 
 Spawn = Callable[[str, dict[bytes, bytes]], None]
-
-
-@dataclass
-class _Capacity:
-    limit: int
-    inflight: int = 0
-    slot: asyncio.Event = field(default_factory=asyncio.Event)
-
-    def free(self) -> int:
-        return self.limit - self.inflight
-
-    def take(self) -> None:
-        self.inflight += 1
-
-    def release(self) -> None:
-        self.inflight -= 1
-        self.slot.set()
-
-    async def wait_free(self) -> None:
-        self.slot.clear()
-        if self.free() > 0:
-            return
-        await self.slot.wait()
-
-
-@lru_cache
-def get_vision_capacity() -> _Capacity:
-    return _Capacity(OCR_CONCURRENCY + VISION_BUFFER)
 
 
 def _tb(exc: BaseException) -> str:

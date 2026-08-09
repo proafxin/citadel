@@ -70,6 +70,7 @@ class SheetExtraction:
     merges: list[MergedRange]
     tables: list[SheetTable]
     pivots: list[SheetPivot]
+    images: list[bytes]
 
 
 @dataclass
@@ -174,6 +175,10 @@ def _capture_pivots(worksheet: Worksheet) -> list[SheetPivot]:
     return pivots
 
 
+def _capture_images(worksheet: Worksheet) -> list[bytes]:
+    return [image._data() for image in worksheet._images]
+
+
 def extract_sheet(values_sheet: Worksheet, formulas_sheet: Worksheet, sheet_no: int) -> SheetExtraction:
     return SheetExtraction(
         sheet_no=sheet_no,
@@ -184,6 +189,7 @@ def extract_sheet(values_sheet: Worksheet, formulas_sheet: Worksheet, sheet_no: 
         merges=_capture_merges(formulas_sheet),
         tables=_capture_tables(formulas_sheet),
         pivots=_capture_pivots(formulas_sheet),
+        images=_capture_images(formulas_sheet),
     )
 
 

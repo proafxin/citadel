@@ -9,6 +9,15 @@ from citadel.schemas.content import Block
 from citadel.services.tabular import grid_from_html
 
 _DRAWINGML_TEXT = "{http://schemas.openxmlformats.org/drawingml/2006/main}t"
+_EMU_PER_PX = 9525
+_MIN_PICTURE_PX = 32
+
+
+def _keep_picture(shape: Any) -> bool:
+    width, height = getattr(shape, "width", None), getattr(shape, "height", None)
+    if width is None or height is None:
+        return True
+    return not (width < _MIN_PICTURE_PX * _EMU_PER_PX and height < _MIN_PICTURE_PX * _EMU_PER_PX)
 
 
 def _bbox(shape: Any) -> list[float] | None:
@@ -67,50 +76,64 @@ def _graphic_text(shape: Any) -> str:
     return " ".join(parts)
 
 
-def _text_frame_blocks(shape: Any, slide_index: int, is_title: bool) -> list[Block]:
+_Item = tuple[Block, bytes | None]
+
+
+def _text_frame_blocks(shape: Any, slide_index: int, is_title: bool) -> list[_Item]:
     bbox = _bbox(shape)
     if is_title:
         text = shape.text_frame.text.strip()
-        return [Block(page_idx=slide_index, type="title", text=text, text_level=1, bbox=bbox)] if text else []
-    blocks: list[Block] = []
+        return [(Block(page_idx=slide_index, type="title", text=text, text_level=1, bbox=bbox), None)] if text else []
+    items: list[_Item] = []
     for paragraph in shape.text_frame.paragraphs:
         text = paragraph.text.strip()
         if text:
-            blocks.append(Block(page_idx=slide_index, type="text", text=text, bbox=bbox))
-    return blocks
+            items.append((Block(page_idx=slide_index, type="text", text=text, bbox=bbox), None))
+    return items
 
 
-def _shape_blocks(shape: Any, slide_index: int, title_id: int | None) -> list[Block]:
+def _shape_items(shape: Any, slide_index: int, title_id: int | None) -> list[_Item]:
     if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
-        return [block for member in _ordered(shape.shapes) for block in _shape_blocks(member, slide_index, title_id)]
+        return [item for member in _ordered(shape.shapes) for item in _shape_items(member, slide_index, title_id)]
     if shape.has_table:
         html = _table_html(shape.table)
-        return [Block(page_idx=slide_index, type="table", text=html, bbox=_bbox(shape), grid=grid_from_html(html))]
+        block = Block(page_idx=slide_index, type="table", text=html, bbox=_bbox(shape), grid=grid_from_html(html))
+        return [(block, None)]
     if shape.has_chart:
         html = _chart_html(shape.chart)
-        return [Block(page_idx=slide_index, type="table", text=html, bbox=_bbox(shape), grid=grid_from_html(html))]
+        block = Block(page_idx=slide_index, type="table", text=html, bbox=_bbox(shape), grid=grid_from_html(html))
+        return [(block, None)]
     if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-        return [Block(page_idx=slide_index, type="image", text=_alt_text(shape), bbox=_bbox(shape))]
+        if not _keep_picture(shape):
+            return []
+        block = Block(page_idx=slide_index, type="image", text=_alt_text(shape), bbox=_bbox(shape))
+        return [(block, shape.image.blob)]
     if shape.has_text_frame:
         return _text_frame_blocks(shape, slide_index, shape.shape_id == title_id)
     graphic = _graphic_text(shape)
-    return [Block(page_idx=slide_index, type="text", text=graphic, bbox=_bbox(shape))] if graphic else []
+    return [(Block(page_idx=slide_index, type="text", text=graphic, bbox=_bbox(shape)), None)] if graphic else []
 
 
-def _notes_blocks(slide: Any, slide_index: int) -> list[Block]:
+def _notes_items(slide: Any, slide_index: int) -> list[_Item]:
     if not slide.has_notes_slide:
         return []
     notes = slide.notes_slide.notes_text_frame.text.strip()
-    return [Block(page_idx=slide_index, type="text", text=notes)] if notes else []
+    return [(Block(page_idx=slide_index, type="text", text=notes), None)] if notes else []
 
 
-def _slide_blocks(slide: Any, slide_index: int) -> list[Block]:
+def _slide_items(slide: Any, slide_index: int) -> list[_Item]:
     title = slide.shapes.title
     title_id = title.shape_id if title is not None else None
-    blocks = [block for shape in _ordered(slide.shapes) for block in _shape_blocks(shape, slide_index, title_id)]
-    return blocks + _notes_blocks(slide, slide_index)
+    items = [item for shape in _ordered(slide.shapes) for item in _shape_items(shape, slide_index, title_id)]
+    return items + _notes_items(slide, slide_index)
 
 
-def parse_pptx(data: bytes) -> list[list[Block]]:
+def parse_pptx(data: bytes) -> list[tuple[list[Block], dict[int, bytes]]]:
     presentation = Presentation(BytesIO(data))
-    return [_slide_blocks(slide, index) for index, slide in enumerate(presentation.slides)]
+    slides: list[tuple[list[Block], dict[int, bytes]]] = []
+    for index, slide in enumerate(presentation.slides):
+        items = _slide_items(slide, index)
+        blocks = [block for block, _ in items]
+        images = {i: data for i, (_, data) in enumerate(items) if data is not None}
+        slides.append((blocks, images))
+    return slides

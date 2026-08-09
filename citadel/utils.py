@@ -98,45 +98,54 @@ def _soffice_convert(data: bytes, src_ext: str, target: str, profile_dir: str) -
         return (Path(tmp) / f"input.{target}").read_bytes()
 
 
-def _pandoc_to_html(data: bytes, src_ext: str) -> bytes:
+def _pandoc_to_html(data: bytes, src_ext: str) -> tuple[bytes, dict[str, bytes]]:
     pandoc = shutil.which("pandoc")
     if pandoc is None:
         raise RuntimeError("pandoc not found on PATH")
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / f"input.{src_ext}"
         src.write_bytes(data)
-        return subprocess.run([pandoc, str(src), "-t", "html"], check=True, capture_output=True).stdout
+        media_dir = Path(tmp) / "media_out"
+        html_bytes = subprocess.run(
+            [pandoc, str(src), "-t", "html", f"--extract-media={media_dir}"],
+            check=True,
+            capture_output=True,
+        ).stdout
+        media = {path.name: path.read_bytes() for path in media_dir.rglob("*") if path.is_file()}
+        return html_bytes, media
 
 
-def _spreadsheet_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes] | None:
+def _spreadsheet_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes, dict[str, bytes]] | None:
     if ext in SPREADSHEET_NATIVE_EXTS:
-        return "xlsx", data
+        return "xlsx", data, {}
     if ext in SPREADSHEET_CONVERT_EXTS:
-        return "xlsx", _soffice_convert(data, ext, "xlsx", profile_dir)
+        return "xlsx", _soffice_convert(data, ext, "xlsx", profile_dir), {}
     return None
 
 
-def _markup_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes] | None:
+def _markup_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes, dict[str, bytes]] | None:
     if ext in HTML_EXTS:
-        return "html", data
+        return "html", data, {}
     if ext in MARKDOWN_EXTS:
-        return "html", _MARKDOWN.render(data.decode("utf-8")).encode()
+        return "html", _MARKDOWN.render(data.decode("utf-8")).encode(), {}
     if ext in DOC_CONVERT_EXTS:
-        return "html_pandoc", _pandoc_to_html(_soffice_convert(data, ext, "docx", profile_dir), "docx")
+        html_bytes, media = _pandoc_to_html(_soffice_convert(data, ext, "docx", profile_dir), "docx")
+        return "html_pandoc", html_bytes, media
     if ext in DOC_HTML_EXTS or ext == "epub":
-        return "html_pandoc", _pandoc_to_html(data, ext)
+        html_bytes, media = _pandoc_to_html(data, ext)
+        return "html_pandoc", html_bytes, media
     return None
 
 
-def _presentation_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes] | None:
+def _presentation_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes, dict[str, bytes]] | None:
     if ext in PRESENTATION_NATIVE_EXTS:
-        return "pptx", data
+        return "pptx", data, {}
     if ext in PRESENTATION_CONVERT_EXTS:
-        return "pptx", _soffice_convert(data, ext, "pptx", profile_dir)
+        return "pptx", _soffice_convert(data, ext, "pptx", profile_dir), {}
     return None
 
 
-def _converted_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes] | None:
+def _converted_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes, dict[str, bytes]] | None:
     spreadsheet = _spreadsheet_kind(data, ext, profile_dir)
     if spreadsheet is not None:
         return spreadsheet
@@ -146,16 +155,16 @@ def _converted_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes
     return _presentation_kind(data, ext, profile_dir)
 
 
-def normalize_file(data: bytes, filename: str, profile_dir: str) -> tuple[str, bytes]:
+def normalize_file(data: bytes, filename: str, profile_dir: str) -> tuple[str, bytes, dict[str, bytes]]:
     ext = _detect_ext(data, filename)
     if ext not in _KNOWN_EXTS:
         ext = _sniff_text_ext(data) or ext
     passthrough = _PASSTHROUGH.get(ext)
     if passthrough is not None:
-        return passthrough, data
+        return passthrough, data, {}
     if ext in IMAGE_EXTS:
-        return f"image:{ext}", data
+        return f"image:{ext}", data, {}
     converted = _converted_kind(data, ext, profile_dir)
     if converted is not None:
         return converted
-    return "text", data.decode("utf-8", errors="replace").encode()
+    return "text", data.decode("utf-8", errors="replace").encode(), {}
