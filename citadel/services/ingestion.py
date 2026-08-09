@@ -720,6 +720,9 @@ async def handle_merge(fields: dict[str, str]) -> None:
 async def cleanup(doc_id: str) -> None:
     redis = get_redis()
     _SHEETS_CACHE.pop(doc_id, None)
+    page_count = int(await redis.hget(f"doc:{doc_id}", "page_count") or 0)
+    if page_count:
+        await redis.delete(*(page_image_key(doc_id, page_idx) for page_idx in range(page_count)))
     await redis.delete(f"blocks:{doc_id}", f"sheets:{doc_id}", f"structures:{doc_id}", f"tables:{doc_id}")
     await redis.srem(RENDER_DOCS, doc_id)
     await redis.delete(render_stream(doc_id))
