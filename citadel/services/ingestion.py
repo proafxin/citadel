@@ -417,6 +417,10 @@ async def handle_render(fields: dict[str, str]) -> None:
     await redis.xadd(STREAM_RASTERIZE, {"doc_id": doc_id, "page_idx": page_idx, "dpi": dpi})
 
 
+def page_image_key(doc_id: str, page_idx: int) -> str:
+    return f"page_image:{doc_id}:{page_idx}"
+
+
 async def handle_rasterize(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     page_idx = int(fields["page_idx"])
@@ -432,7 +436,9 @@ async def handle_rasterize(fields: dict[str, str]) -> None:
     )
     await _add_stage_seconds(doc_id, "render_wait_s", render_wait)
     await _add_stage_seconds(doc_id, "render_s", render_cpu)
-    await get_redis().xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": page_idx, "image": image_bytes})
+    redis = get_redis()
+    await redis.set(page_image_key(doc_id, page_idx), image_bytes, ex=DOC_TTL)
+    await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": page_idx})
 
 
 _RECORD_UNIT_LUA = """
@@ -594,9 +600,11 @@ def blocks_from_page_markdown(markdown: str) -> list[Block]:
     return blocks
 
 
-async def extract_page(image: bytes) -> list[Block]:
-    job_id = await emit_page_ocr(image)
+async def extract_page(doc_id: str, page_idx: int) -> list[Block]:
+    key = page_image_key(doc_id, page_idx)
+    job_id = await emit_page_ocr(key)
     markdown = await collect_page_ocr(job_id)
+    await get_redis().delete(key)
     return blocks_from_page_markdown(markdown)
 
 
@@ -608,12 +616,12 @@ async def extract_pure_text_page(doc_id: str, page_idx: int) -> list[Block]:
     return [Block(page_idx=page_idx, type="text", bbox=list(run.bbox), text=run.text) for run in runs]
 
 
-async def handle_ocr(fields: dict[str, str], image: bytes) -> None:
+async def handle_ocr(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     page_idx = int(fields["page_idx"])
     await get_redis().hincrby(f"doc:{doc_id}", "started_count", 1)
     ocr_t = time.time()
-    blocks = await extract_page(image)
+    blocks = await extract_page(doc_id, page_idx)
     for block in blocks:
         block.page_idx = page_idx
     await _add_stage_seconds(doc_id, "ocr_s", time.time() - ocr_t)

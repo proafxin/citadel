@@ -271,7 +271,7 @@ async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None
         fields = await _decode_or_settle(stream, msg_id, raw)
         if fields is None:
             return
-        work = await _run_cancelable(handle_ocr(fields, raw.get(b"image", b"")))
+        work = await _run_cancelable(handle_ocr(fields))
         if work.exception() is None:
             await _settle(stream, msg_id)
             return

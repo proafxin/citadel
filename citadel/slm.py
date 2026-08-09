@@ -5,6 +5,7 @@ import logging
 import signal
 import time
 import traceback
+from base64 import b64encode
 from collections.abc import Coroutine
 from typing import Any, cast
 
@@ -81,7 +82,23 @@ async def _blocking_call(
     return first
 
 
+async def _resolve_images(payload: dict) -> dict:
+    redis = get_redis()
+    for message in payload.get("messages", []):
+        for item in message.get("content", []):
+            if item.get("type") != "image_ref":
+                continue
+            image_key = item.pop("image_key")
+            data = await redis.get(image_key)
+            if data is None:
+                raise KeyError(image_key)
+            item["type"] = "image_url"
+            item["image_url"] = {"url": "data:image/png;base64," + b64encode(data).decode()}
+    return payload
+
+
 async def _call_provider(payload: dict, reply_to: str, job_id: str) -> float | None:
+    payload = await _resolve_images(payload)
     url = f"{get_settings().qwen_base_url}/chat/completions"
     async with httpx.AsyncClient(timeout=NO_TIMEOUT) as client:
         if payload.get("stream"):

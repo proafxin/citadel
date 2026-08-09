@@ -3,7 +3,6 @@ import functools
 import json
 import logging
 import time
-from base64 import b64encode
 from collections.abc import AsyncIterator
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -158,14 +157,14 @@ async def collect_structure_candidates(job_id: str) -> list[dict]:
 PAGE_OCR_MAX_TOKENS = 3584
 
 
-def _page_ocr_payload(image: bytes, max_tokens: int) -> dict:
+def _page_ocr_payload(image_key: str, max_tokens: int) -> dict:
     return {
         "model": QWEN_MODEL,
         "messages": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64encode(image).decode()}},
+                    {"type": "image_ref", "image_key": image_key},
                     {"type": "text", "text": load_prompt("page_ocr")},
                 ],
             }
@@ -176,8 +175,8 @@ def _page_ocr_payload(image: bytes, max_tokens: int) -> dict:
     }
 
 
-async def emit_page_ocr(image: bytes, max_tokens: int = PAGE_OCR_MAX_TOKENS) -> str:
-    return await emit(_page_ocr_payload(image, max_tokens), interactive=False)
+async def emit_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -> str:
+    return await emit(_page_ocr_payload(image_key, max_tokens), interactive=False)
 
 
 async def collect_page_ocr(job_id: str) -> str:
