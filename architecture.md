@@ -402,12 +402,30 @@ why it belongs after ingestion rather than inside it:
   index is built.
 
 Summaries and embeddings do not depend on each other, so they run **concurrently** and the library is ready
-once both land — the summary work is on the SLM, the embedding on the embedder, and running them together
-hides the shorter (embedding) under the longer (summaries) instead of stacking the two. Summaries used to
-stream per document *during* ingestion, overlapping OCR; that overlap paid a GPU-contention tax and, worse,
-let a query in the window resolve over a partial inventory. Running them in this phase, gated on the
-library's last document draining, closes both, and the summary wait is event-driven — the last summary to
-land fires a completion signal — never a poll.
+once both land — the summary work is on Qwen, the embedding on a separately served `bge-m3` (below), and
+running them together hides the shorter (embedding) under the longer (summaries) instead of stacking the two.
+Summaries used to stream per document *during* ingestion, overlapping OCR; that overlap paid a GPU-contention
+tax and, worse, let a query in the window resolve over a partial inventory. Running them in this phase, gated
+on the library's last document draining, closes both.
+
+**Readiness itself is a durable, crash-recoverable stream job, not an in-process wait.** `citadel/app.py`'s
+finalize step no longer blocks on anything — it starts batch-summary jobs, enqueues one embedding job onto
+`STREAM_EMBED`, and returns immediately. Two independent consumers in `citadel/worker.py` each record a flag
+(`citadel/services/readiness.py`) once their half is genuinely done: the last batch summary to complete
+records the `summaries` flag, and the embed job records `embedding` once `embed_library` finishes. Recording a
+flag is one atomic Lua script — set the flag, check whether both are now present, and if so emit one entry to
+`STREAM_LIBRARY_READY`, consumed by a small dedicated job that does the actual `LibraryStatus.READY` write.
+Every piece here is either a Redis Streams consumer-group read or an idempotent Lua script, the same pattern
+every other phase in this pipeline already uses — if `app.py` or a worker restarts mid-flight, nothing about
+the wait is lost, because nothing was held in a process's memory to begin with.
+
+**A library is blocked from ever reaching ready while any document's batch summary has permanently failed,**
+not merely tracked separately from a successful one. This falls out of the completion check itself rather
+than needing a distinct failure state: a document only stops counting as "pending" once `summarized_at` is
+actually set, and a summary job that exhausts its retries deliberately never sets it — it just logs and gives
+up. The library's pending count for that document then never reaches zero, the `summaries` flag for that
+library is never recorded, and `STREAM_LIBRARY_READY` never fires — the library stays at `ingested` until the
+failure is resolved by hand and batch summarization is re-driven for that document.
 
 **The embedding index is disposable; the tree and tables are not.** Nothing about the content tree or the
 canonical tables is specific to any embedding model — they are typed, structured, model-agnostic state,
@@ -670,14 +688,20 @@ table pass that both marked relevant tables and wrote the SQL. That failed diffe
 
 ## Models
 
-One general vision-language model, run without a separate reasoning pass, performs every model step across
-ingestion and query — reading rendered pages and embedded images, table structuring, batch summarization,
-document summarization, query resolution, SQL writing, evidence merging, and synthesis. There is no separate
-layout/detection model and no separate text-only model: the same model that reads a page's pixels also
-structures tables and writes SQL.
+One general vision-language model (Qwen, served by vLLM), run without a separate reasoning pass, performs
+every model step across ingestion and query — reading rendered pages and embedded images, table structuring,
+batch summarization, document summarization, query resolution, SQL writing, evidence merging, and synthesis.
+There is no separate layout/detection model and no separate text-only model: the same model that reads a
+page's pixels also structures tables and writes SQL.
 
-A multilingual dense representation carries meaning for search. Nothing in the pipeline asks a model to hold
-data in its head: it reads, judges, and writes queries; the database keeps the numbers.
+A multilingual dense representation (`BAAI/bge-m3`) carries meaning for search. It is served the same way as
+Qwen — its own vLLM instance, behind an OpenAI-compatible `/v1/embeddings` endpoint — rather than loaded
+in-process; every process that needs an embedding is a stateless HTTP client to that one service, gated by
+`get_embed_capacity()`, the same shared-service-plus-global-pool pattern used for every other model call. It
+used to be loaded directly into whichever process called it (`sentence-transformers`, on-device), which meant
+every replica of that process held its own full copy of the model in GPU memory with no cross-process
+coordination; serving it removes both problems at once. Nothing in the pipeline asks a model to hold data in
+its head: it reads, judges, and writes queries; the database keeps the numbers.
 
 ---
 
