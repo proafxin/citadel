@@ -4,7 +4,6 @@ from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 logger = logging.getLogger(__name__)
@@ -16,7 +15,7 @@ QWEN_MODEL = "qwen"
 QWEN_HF_REPO = "Qwen/Qwen3.5-9B"
 QWEN_CACHE_DIR = Path.home() / ".cache" / "citadel-qwen" / "hub"
 EMBED_MODEL = "BAAI/bge-m3"
-EMBED_DEVICE = "cuda"
+EMBED_SERVED_NAME = "bge"
 EMBED_MAX_TOKENS = 8192
 
 
@@ -31,6 +30,9 @@ class Settings(BaseSettings):
 
     qwen_host: str = "localhost"
     qwen_port: int = 8100
+
+    bge_host: str = "localhost"
+    bge_port: int = 8101
 
     redis_url: str = "redis://localhost:6379/0"
 
@@ -47,6 +49,10 @@ class Settings(BaseSettings):
     @property
     def qwen_base_url(self) -> str:
         return f"http://{self.qwen_host}:{self.qwen_port}/v1"
+
+    @property
+    def bge_base_url(self) -> str:
+        return f"http://{self.bge_host}:{self.bge_port}/v1"
 
     @property
     def database_url(self) -> str:
@@ -66,18 +72,6 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-
-
-@lru_cache
-def get_embedder() -> SentenceTransformer:
-    logger.info("loading embedder model=%s device=%s", EMBED_MODEL, EMBED_DEVICE)
-    model = SentenceTransformer(
-        EMBED_MODEL,
-        device=EMBED_DEVICE,
-        model_kwargs={"torch_dtype": "bfloat16", "attn_implementation": "sdpa"},
-    )
-    logger.info("embedder loaded model=%s", EMBED_MODEL)
-    return model
 
 
 @lru_cache

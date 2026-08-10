@@ -74,6 +74,15 @@ async def _blocking_call(client: httpx.AsyncClient, url: str, payload: dict, rep
     await _emit(reply_to, job_id, CHUNK, response.json()["choices"][0]["message"]["content"])
 
 
+async def _embed_call(client: httpx.AsyncClient, url: str, payload: dict, reply_to: str, job_id: str) -> None:
+    response = await client.post(url, json=payload)
+    if response.is_error:
+        logger.error("provider %d job=%s body=%s", response.status_code, job_id, response.text[:2000])
+    response.raise_for_status()
+    vectors = [item["embedding"] for item in response.json()["data"]]
+    await _emit(reply_to, job_id, CHUNK, json.dumps(vectors))
+
+
 async def _resolve_page_ocr(payload: dict) -> dict:
     image_key = payload.pop("image_key", None)
     if image_key is None:
@@ -95,6 +104,11 @@ async def _resolve_page_ocr(payload: dict) -> dict:
 
 
 async def _call_provider(payload: dict, reply_to: str, job_id: str) -> None:
+    if payload.pop("endpoint", None) == "embeddings":
+        url = f"{get_settings().bge_base_url}/embeddings"
+        async with httpx.AsyncClient(timeout=NO_TIMEOUT) as client:
+            await _embed_call(client, url, payload, reply_to, job_id)
+        return
     payload = await _resolve_page_ocr(payload)
     url = f"{get_settings().qwen_base_url}/chat/completions"
     async with httpx.AsyncClient(timeout=NO_TIMEOUT) as client:

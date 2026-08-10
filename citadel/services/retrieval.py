@@ -5,12 +5,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from itertools import starmap
 
-import torch
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
+from citadel.llm import collect_embed, emit_embed
 from citadel.models.batch import ContentBatch
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
@@ -19,66 +19,26 @@ from citadel.models.library import Library
 from citadel.models.status import DocumentStatus
 from citadel.models.table import Table
 from citadel.services.batching import render_block
-from config import get_embedder
+from citadel.services.capacity import get_embed_capacity
 
 logger = logging.getLogger(__name__)
 
 EMBED_TTL = 86_400
 
-EMBED_VRAM_HEADROOM = 0.7
-EMBED_VRAM_CAP = 2 * 1024**3
-MODEL_MAX_TOKENS = 8192
-BYTES_PER_TOKEN = 21_750
-MASK_BYTES_PER_TOKEN = 2
+EMBED_BATCH_TOKENS = 32768
 UPSERT_COLS = 4
 UPSERT_CHUNK = 32767 // UPSERT_COLS
 
-_EMBED_LOCK = asyncio.Lock()
 
-
-def available_vram() -> int:
-    driver_free, _ = torch.cuda.mem_get_info()
-    cached_free = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
-    return driver_free + cached_free
-
-
-def bytes_per_token(longest: int) -> int:
-    return BYTES_PER_TOKEN + MASK_BYTES_PER_TOKEN * longest
-
-
-def vram_budget() -> int:
-    return min(int(EMBED_VRAM_HEADROOM * available_vram()), EMBED_VRAM_CAP)
-
-
-def token_budget() -> int:
-    return max(MODEL_MAX_TOKENS, vram_budget() // bytes_per_token(MODEL_MAX_TOKENS))
-
-
-def embed_texts(texts: list[str], longest: int) -> list[list[float]]:
+async def _embed(texts: list[str], key: str) -> list[list[float]]:
     if not texts:
         return []
-    budget = vram_budget()
-    batch_size = max(1, budget // (max(longest, 1) * bytes_per_token(longest)))
-    torch.cuda.reset_peak_memory_stats()
-    baseline = torch.cuda.memory_allocated()
-    vectors = get_embedder().encode(texts, batch_size=batch_size, normalize_embeddings=True, show_progress_bar=False)
-    activation = torch.cuda.max_memory_allocated() - baseline
-    logger.debug(
-        "embed_encode rows=%d longest=%d batch=%d per_token=%d budget=%dMiB act=%dMiB avail=%dMiB",
-        len(texts),
-        longest,
-        batch_size,
-        bytes_per_token(longest),
-        budget >> 20,
-        activation >> 20,
-        available_vram() >> 20,
-    )
-    return [vector.tolist() for vector in vectors]
-
-
-async def _embed(texts: list[str], longest: int) -> list[list[float]]:
-    async with _EMBED_LOCK:
-        return await asyncio.to_thread(embed_texts, texts, longest)
+    cap = get_embed_capacity()
+    await cap.acquire(key)
+    try:
+        return await collect_embed(await emit_embed(texts, key))
+    finally:
+        await cap.release(key)
 
 
 @dataclass
@@ -137,8 +97,8 @@ def _take_group(nodes: list[_PendingNode], start: int, budget: int) -> tuple[int
     return end, longest
 
 
-async def _encode_group(library_id: int, batch: list[_PendingNode], longest: int) -> list[dict[str, object]]:
-    vectors = await _embed([node.search_text for node in batch], longest)
+async def _encode_group(library_id: int, batch: list[_PendingNode], key: str) -> list[dict[str, object]]:
+    vectors = await _embed([node.search_text for node in batch], key)
     return [
         {"content_id": node.content_id, "library_id": library_id, "type": node.node_type, "embedding": vector}
         for node, vector in zip(batch, vectors, strict=True)
@@ -179,10 +139,10 @@ async def embed_library(library_id: int) -> int:
     group_no = 0
     writing: asyncio.Task[None] | None = None
     while index < total:
-        end, longest = _take_group(pending, index, token_budget())
+        end, longest = _take_group(pending, index, EMBED_BATCH_TOKENS)
         group_no += 1
         label = f"lib{library_id}.g{group_no}"
-        records = await _encode_group(library_id, pending[index:end], longest)
+        records = await _encode_group(library_id, pending[index:end], label)
         if writing is not None:
             await writing
         writing = asyncio.create_task(_write_group(records, label))

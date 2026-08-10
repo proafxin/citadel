@@ -10,7 +10,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from citadel.prompts import load_prompt
 from citadel.schemas.query import QueryPlan
 from citadel.services.slm import collect, collect_reply, emit, reply_stream, submit
-from config import QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL
+from config import EMBED_SERVED_NAME, QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,6 @@ def _text_payload(prompt: str, max_tokens: int) -> dict:
         "temperature": 0,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
-        "stream": True,
     }
 
 
@@ -107,6 +106,18 @@ async def emit_text(prompt: str, max_tokens: int, interactive: bool, key: str) -
 
 async def collect_text(job_id: str) -> str:
     return (await collect_reply(job_id)).strip()
+
+
+def _embed_payload(texts: list[str]) -> dict:
+    return {"model": EMBED_SERVED_NAME, "input": texts, "endpoint": "embeddings"}
+
+
+async def emit_embed(texts: list[str], key: str) -> str:
+    return await emit(_embed_payload(texts), interactive=False, key=key)
+
+
+async def collect_embed(job_id: str) -> list[list[float]]:
+    return json.loads(await collect_reply(job_id))
 
 
 _STRUCTURE_SCHEMA = {

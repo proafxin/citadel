@@ -52,6 +52,46 @@ services:
               count: all
               capabilities: [gpu]
 
+  bge:
+    image: vllm/vllm-openai:latest
+    container_name: citadel-bge
+    restart: always
+    ipc: host
+    command:
+      - --model
+      - BAAI/bge-m3
+      - --served-model-name
+      - bge
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8101"
+      - --hf-overrides
+      - '{"architectures": ["BgeM3EmbeddingModel"]}'
+      - --gpu-memory-utilization
+      - "0.85"
+      - --max-model-len
+      - "8192"
+      - --uvicorn-log-level
+      - info
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    ports:
+      - "8101:8101"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes:
+      - ${HOME}/.cache/citadel-bge:/root/.cache/huggingface
+      - bge-vllm-cache:/root/.cache/vllm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   redis:
     image: redis:7-alpine
     container_name: citadel-redis
@@ -92,3 +132,4 @@ services:
 volumes:
   postgres-data:
   qwen-vllm-cache:
+  bge-vllm-cache:

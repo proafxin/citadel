@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 import json
 import logging
 import re
@@ -34,6 +35,7 @@ from citadel.llm import (
 )
 from citadel.models.table import TableRow
 from citadel.schemas.query import QueryPlan
+from citadel.services.capacity import get_text_large_capacity
 from citadel.services.retrieval import (
     BatchRef,
     DocRef,
@@ -45,10 +47,17 @@ from citadel.services.retrieval import (
     load_library_name,
     scope_block_ids,
 )
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
 STATEMENT_TIMEOUT_MS = 3000
+_call_no = itertools.count()
+
+
+def _capacity_key(label: str) -> str:
+    return f"{get_settings().worker_id}:{label}:{next(_call_no)}"
+
 
 SYNTH_CTX = 65536
 SYNTH_BUDGET = SYNTH_CTX - SYNTH_MAX_TOKENS - 2048
@@ -243,11 +252,21 @@ async def _execute(tables: list[TableCand], sql: str, labels: dict[int, str]) ->
     )
 
 
+async def _plan_queries(question: str, blocks: list[str], library: str) -> QueryPlan:
+    key = _capacity_key("queries")
+    cap = get_text_large_capacity()
+    await cap.acquire(key)
+    try:
+        return await write_queries(question, blocks, library)
+    finally:
+        await cap.release(key)
+
+
 async def _aggregate(
     question: str, tables: list[TableCand], labels: dict[int, str], library: str = ""
 ) -> list[SqlResult]:
     blocks = [_schema_block(index, table, labels) for index, table in enumerate(tables)]
-    plan = await write_queries(question, blocks, library) if tables else QueryPlan()
+    plan = await _plan_queries(question, blocks, library) if tables else QueryPlan()
     results: list[SqlResult] = []
     for sql in plan.queries:
         resolved = await _execute(tables, sql, labels)
@@ -341,7 +360,13 @@ def _chunk_by_tokens(items: list[_Evidence], budget: int) -> list[list[_Evidence
 
 
 async def _merge_chunk(question: str, chunk: list[_Evidence]) -> _Evidence:
-    summary = await merge_evidence(question, [evidence.text for evidence in chunk])
+    key = _capacity_key("merge")
+    cap = get_text_large_capacity()
+    await cap.acquire(key)
+    try:
+        summary = await merge_evidence(question, [evidence.text for evidence in chunk])
+    finally:
+        await cap.release(key)
     sources = [source for evidence in chunk for source in evidence.sources]
     if summary:
         tokens = count_tokens(summary)
@@ -505,8 +530,13 @@ async def resolve_batch_job(fields: dict[str, str]) -> None:
     items = json.loads(fields["items"])
     index_map = [(kind, index) for kind, index in json.loads(fields["index_map"])]
     key = f"resolve:{library_id}:{fields['batch_no']}"
-    job_id = await emit_resolve(fields["question"], items, key, fields["library"])
-    doc_coverage, table_coverage = await collect_resolve(job_id, len(items))
+    cap = get_text_large_capacity()
+    await cap.acquire(key)
+    try:
+        job_id = await emit_resolve(fields["question"], items, key, fields["library"])
+        doc_coverage, table_coverage = await collect_resolve(job_id, len(items))
+    finally:
+        await cap.release(key)
     coverage = _split_coverage(doc_coverage, table_coverage, index_map)
     payload = json.dumps({"documents": coverage.documents, "tables": coverage.tables})
     await get_redis().hset(_resolve_results_key(library_id), fields["batch_no"], payload)

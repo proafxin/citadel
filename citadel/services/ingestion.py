@@ -687,12 +687,13 @@ async def _resolve_unique_images(doc_id: str, unit: str, images: dict[int, bytes
     )
 
     async def resolve_one(digest: bytes) -> tuple[bytes, list[Block]]:
-        await cap.acquire()
+        key = keys[digest]
+        await cap.acquire(key)
         try:
-            return digest, await _ocr_blocks(keys[digest])
+            return digest, await _ocr_blocks(key)
         finally:
-            cap.release()
-            await redis.delete(keys[digest])
+            await cap.release(key)
+            await redis.delete(key)
 
     resolved = dict(await asyncio.gather(*(resolve_one(digest) for digest in by_hash)))
     return {index: resolved[digest] for digest, indices in by_hash.items() for index in indices}

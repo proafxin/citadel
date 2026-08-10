@@ -8,7 +8,7 @@ from typing import Any, cast
 from citadel.bus import get_redis
 from citadel.db import get_engine
 from citadel.services.batching import STREAM_BATCH, mark_summary_failed, record_summary, summarize_document
-from citadel.services.capacity import OCR_CONCURRENCY, Capacity, get_vision_capacity
+from citadel.services.capacity import OCR_CONCURRENCY, VISION_BUFFER, Capacity, get_vision_capacity
 from citadel.services.ingestion import (
     BULK_READ_COUNT,
     GROUP,
@@ -116,17 +116,17 @@ async def _recover(stream: str, consumer: str, cap: Capacity | None, spawn: Spaw
     redis = get_redis()
     last = "0"
     while True:
-        if cap is not None and cap.free() <= 0:
+        if cap is not None and await cap.free() <= 0:
             await cap.wait_free()
             continue
-        count = cap.free() if cap is not None else BULK_READ_COUNT
+        count = await cap.free() if cap is not None else BULK_READ_COUNT
         fresh = await redis.xreadgroup(GROUP, consumer, {stream: last}, count=count)
         entries = fresh[0][1] if fresh else []
         if not entries:
             return
         for msg_id, raw in entries:
             if cap is not None:
-                cap.take()
+                await cap.take()
             spawn(msg_id.decode(), raw)
         last = entries[-1][0].decode()
 
@@ -142,10 +142,10 @@ async def _pump(
     while True:
         room = None
         if cap is not None:
-            if cap.free() <= 0:
+            if await cap.free() <= 0:
                 await cap.wait_free()
                 continue
-            room = cap.free()
+            room = await cap.free()
         if downstream is not None:
             available = await downstream()
             room = available if room is None else min(room, available)
@@ -155,7 +155,7 @@ async def _pump(
         fresh = await redis.xreadgroup(GROUP, consumer, {stream: ">"}, count=room, block=0)
         for msg_id, raw in fresh[0][1] if fresh else []:
             if cap is not None:
-                cap.take()
+                await cap.take()
             spawn(msg_id.decode(), raw)
 
 
@@ -184,7 +184,7 @@ async def _normalize_job(cap: Capacity, profiles: asyncio.Queue[str], msg_id: st
         await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "normalize"))
     finally:
         profiles.put_nowait(profile)
-        cap.release()
+        await cap.release()
 
 
 async def _paginate_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
@@ -200,7 +200,7 @@ async def _paginate_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> 
         logger.error("paginate failed file=%s\n%s", fields.get("filename", "?"), _tb(work.exception()))
         await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "paginate"))
     finally:
-        cap.release()
+        await cap.release()
 
 
 async def _render_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
@@ -216,22 +216,32 @@ async def _render_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> No
         logger.error("render failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
         await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
     finally:
-        cap.release()
+        await cap.release()
+
+
+def _vision_key(fields: dict[str, str]) -> str:
+    return f"{fields['doc_id']}:{fields['page_idx']}"
 
 
 async def _rasterize_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_RASTERIZE
-    fields = await _decode_or_settle(stream, msg_id, raw)
-    if fields is None:
-        cap.release()
-        return
-    work = await _run_cancelable(handle_rasterize(fields))
-    if work.exception() is None:
-        await _settle(stream, msg_id)
-        return
-    cap.release()
-    logger.error("rasterize failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
-    await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
+    try:
+        fields = await _decode_or_settle(stream, msg_id, raw)
+        if fields is None:
+            return
+        await get_vision_capacity().acquire(_vision_key(fields))
+        work = await _run_cancelable(handle_rasterize(fields))
+        if work.exception() is None:
+            await _settle(stream, msg_id)
+            return
+        logger.error("rasterize failed page=%s\n%s", fields.get("page_idx", "?"), _tb(work.exception()))
+        terminal = await _retry_or_fail(
+            stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"]))
+        )
+        if terminal:
+            await get_vision_capacity().release(_vision_key(fields))
+    finally:
+        await cap.release()
 
 
 async def _ocr_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
@@ -251,11 +261,10 @@ async def _ocr_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
             stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"]))
         )
     finally:
-        cap.release()
-        if terminal:
-            get_vision_capacity().release()
-            if fields is not None:
-                await get_redis().delete(page_image_key(fields["doc_id"], int(fields["page_idx"])))
+        await cap.release()
+        if terminal and fields is not None:
+            await get_vision_capacity().release(_vision_key(fields))
+            await get_redis().delete(page_image_key(fields["doc_id"], int(fields["page_idx"])))
 
 
 DRAINED_STREAMS = (
@@ -295,7 +304,7 @@ async def _merge_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> Non
         await cleanup(fields["doc_id"])
         await _release_if_drained()
     finally:
-        cap.release()
+        await cap.release()
 
 
 async def _structure_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
@@ -312,7 +321,7 @@ async def _structure_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) ->
         logger.error("structure failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(error))
         await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "structure"))
     finally:
-        cap.release()
+        await cap.release()
 
 
 async def _table_structure_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
@@ -397,7 +406,7 @@ async def _claim_ready(consumer: str, cap: Capacity, spawn: Spawn, room: int) ->
                 await redis.srem(RENDER_DOCS, doc_id)
             continue
         for msg_id, raw in entries:
-            cap.take()
+            await cap.take()
             spawn(msg_id.decode(), raw)
             claimed += 1
     return claimed
@@ -421,16 +430,16 @@ async def render() -> None:
 
     await _recover_render(consumer, cap, spawn)
     while True:
-        if cap.free() <= 0:
+        if await cap.free() <= 0:
             await cap.wait_free()
             continue
-        room = cap.free()
+        room = await cap.free()
         if room <= 0 or not await _claim_ready(consumer, cap, spawn, room):
             await asyncio.sleep(0.1)
 
 
 async def rasterize() -> None:
-    cap = get_vision_capacity()
+    cap = Capacity(OCR_CONCURRENCY + VISION_BUFFER)
     await _drive(STREAM_RASTERIZE, cap, lambda mid, raw: _spawn(_rasterize_job(cap, mid, raw)))
 
 

@@ -115,11 +115,11 @@ def _drop_contained_specs(
 async def structure_single_table(grid: list[list[str]], *, key: str) -> MaterializedTable:
     text = _candidate_text(grid, 0)
     cap = get_text_capacity()
-    await cap.acquire()
+    await cap.acquire(key)
     try:
         spec = await structure_table_candidate(text, key)
     finally:
-        cap.release()
+        await cap.release(key)
     structure = _table_from_spec(spec, grid)
     return materialize(grid, structure)
 
@@ -132,11 +132,11 @@ async def _collect_specs(
     for pack_no, pack in enumerate(packs):
         payload = "\n\n".join(texts[index] for index in pack)
         key = f"structure:{label or prompt_name}:{sheet_no}:{pack_no}"
-        await cap.acquire()
+        await cap.acquire(key)
         try:
             specs.extend(await collect_structure_candidates(await emit_structure_candidates(payload, prompt_name, key)))
         finally:
-            cap.release()
+            await cap.release(key)
     return specs
 
 
