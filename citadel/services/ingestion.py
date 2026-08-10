@@ -128,7 +128,6 @@ async def _run_pdfium[T](func: Callable[..., T], *args: object, job_timeout: flo
         wait = time.time() - mark
         mark = time.time()
         pool = get_pdfium_pool()
-        logger.info("pdfium submit args=%r pool_processes=%d", args, len(pool._processes))
         future = pool.submit(func, *args)
         done, pending = await asyncio.wait({asyncio.wrap_future(future)}, timeout=job_timeout)
         if pending:
@@ -139,7 +138,6 @@ async def _run_pdfium[T](func: Callable[..., T], *args: object, job_timeout: flo
             _kill_pdfium_pool(pool)
             msg = f"pdfium job exceeded {job_timeout}s args={args!r}"
             raise TimeoutError(msg)
-        logger.info("pdfium done args=%r elapsed=%.1fs", args, time.time() - mark)
         result = next(iter(done)).result()
         return result, wait, time.time() - mark
 
