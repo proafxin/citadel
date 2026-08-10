@@ -257,6 +257,8 @@ def _table_search(table: MaterializedTable, library_name: str, filename: str) ->
 
 
 async def _insert_blocks(session: AsyncSession, rows: list[dict[str, object]]) -> list[int]:
+    if not rows:
+        return []
     result = await session.execute(insert(ContentNode).returning(ContentNode.id), rows)
     return list(result.scalars())
 

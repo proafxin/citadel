@@ -43,12 +43,14 @@ Plain text is a degenerate markup case: split on blank lines into paragraphs.
 |---|---|---|
 | spreadsheets (XLSX / XLS / ODS) | tabular | cells read directly |
 | CSV / TSV / JSON | tabular | typed parse / structural shred |
+| XML | tabular | shredded to JSON (attributes/text folded by the same convention as any XML→JSON tool), then the JSON path |
 | HTML | markup | parsed as-is |
 | Markdown | markup | converted to HTML (math kept as LaTeX) |
 | Word / ODT / RTF / EPUB | markup | converted to HTML |
 | PowerPoint / ODP | — | converted to PPTX if needed, read directly from shapes/text, never rasterized |
 | PDF | visual | every page rendered to an image and read whole by the vision model |
 | images | visual | read as one page |
+| SVG | visual | rasterized to PNG, then read as one image — SVG carries no accessible data path today, so a chart authored only as SVG is read the same as any other picture |
 
 ## Pipeline
 
@@ -59,31 +61,34 @@ stage is a FIFO-fed sliding window — it claims only as much as it can hold, an
 item completes, never in batches. The phases:
 
 ```
-upload → normalize → paginate → render → ocr → structure ─┬──────────────────────→ merge → relational store
-                                                          └→ table_structure ────→ merge
-                     └───────────────────────────────────────→ table_structure ────→ merge
+                              ┌→ render → rasterize → pages(ocr) ─┐
+upload → normalize → paginate ┤                                   ├→ structure → merge → relational store
+                              └→ (markup: html/pptx/text blocks) ─┘
+                     └──────────────────────────────────→ table_structure ──────→ merge
 ```
 
 | Phase | Work |
 |---|---|
 | normalize | route + convert to one of the three lanes |
-| paginate | count PDF pages and emit one render job each; or split markup/text/tabular into units |
+| paginate | for the visual lane: count PDF pages and emit one render job each. For the markup lane: read HTML/PPTX/plain-text structure directly (no render/ocr — a format-specific parser produces blocks synchronously). For the tabular lane: emit one `table_structure` job per unit (one per spreadsheet sheet, one for a whole CSV/TSV/JSON file) |
 | render | rasterize one PDF page |
-| ocr | read the whole rendered page image with the vision model → blocks |
-| structure | a document's blocks → paratext split, reclassify, stitch tables; then route — no tables goes straight to merge, each table found becomes its own job |
-| table_structure | one job per unit — a document's whole set of candidate table blocks, or a spreadsheet sheet — → canonical Tables; the model sees every candidate at once and in one call structures each real table, drops the spurious ones, and merges those that are one table split apart |
+| ocr | read the whole rendered page image with the vision model → blocks, including any table on that page in the same pass (see "Reading pages" below) |
+| structure | a document's blocks (from either the visual or the markup lane, once every page/unit is in) → paratext split, reclassify, stitch tables; resolve each candidate table's structure — mechanically for a table the vision model already read (see below), or with one model call per bounded table for a markup-sourced table whose header/orientation the markup alone did not state — then merge |
+| table_structure | tabular lane only (xlsx/csv/tsv/json) — one job per unit; for a spreadsheet sheet, the model sees every candidate at once and structures each real table, drops the spurious ones, and merges those that are one table split apart, because a raw cell range is boundary-ambiguous in a way nothing else in the pipeline is; CSV/TSV/JSON take no model call at all |
 | merge | assemble the content tree from the prepared blocks and the finished tables → persist |
 
-**Table structuring is one job per unit, and every unit is the same kind of work item.** Whatever the source —
-a spreadsheet sheet, or all the tables a scanned book yielded — its candidate tables go to one job on one
-stream, claimed the same way as everything else. The job hands the model every candidate at once (each shown
-as bounded sample rows, never full data), and the model makes every call in that single pass: which candidates
-are real tables, each one's structure, and which candidates are one table split across pages or regions and
-should merge. Deterministic code decides nothing about structure — it only gathers the candidates and builds
-what the model returned, placing each table under its first source block. The table job fires merge when it
-finishes, so redelivery is a no-op and merge runs exactly once.
+**Two structuring mechanisms exist, and which one applies is decided by whether a table's boundaries were
+ever in question — not by its source format.** A spreadsheet's raw cell range is the one place boundaries are
+genuinely undecidable, so it alone goes through the `table_structure` job: several candidates at once, one
+call, the model deciding membership as well as shape. Every other table — from a rendered page or from
+markup — is already exactly one bounded table by construction (the vision model already segmented it when it
+read the page; a `<table>` tag or a PPTX table/chart object already has hard edges), so structuring it is a
+`structure`-phase concern, resolved inline, with no candidate list to build or job to queue: mechanically, by
+reading whatever header signal the source already gave, for a table the model already saw once visually;
+with one small model call per table, for a markup-sourced table whose *internal* shape (header rows,
+orientation, section labels) the markup itself left open.
 
-A document with no tables never enters that stream at all: it merges as soon as its pages are read, so it is
+A document with no tables needing a model call merges as soon as its pages/units are read, so it is
 structured and stored *during* the run rather than waiting behind work it does not have. (Becoming
 *searchable* is a later, separate step — the prep phase in Part I's finalize — not part of this pipeline.)
 
@@ -134,7 +139,37 @@ therefore omitted here rather than carried over stale from the retired crop-base
 
 Every page — digital or scanned, dense or sparse — is rendered to one image and read by the vision model in
 one request. There is no region split and no per-block routing: the model returns the page's structured
-content directly (prose, tables, lists, headings) in one pass, and that response is parsed into blocks.
+content directly, as markdown, in one pass — headings, tables, lists, code — and that response is parsed
+into blocks.
+
+**Genuinely blank pages are detected before the model ever sees them.** A page's rendered image is checked
+for near-zero pixel variance first; a page that is blank produces zero blocks without a model call, rather
+than being sent for OCR. This exists because a vision-language model asked to read a page with nothing on it
+does not reliably say so — it can instead produce fluent, structurally plausible content that is not on the
+page at all, and a blank-page guard is the only thing that closes that off entirely rather than depending on
+prompt wording alone.
+
+**The model's own meta-commentary is stripped before parsing, not stored as content.** Even when correctly
+declining a page (a blank one that slipped past the guard, or one it judges unreadable), the model's response
+can carry a preamble or refusal sentence around the actual content — "here is the transcription...", "there
+is no visible text on this page" — and a whole-response code-fence wrapper some replies are wound in. Both
+are recognized and removed from the raw markdown before it is split into blocks, so a refusal never becomes a
+stored content row and a fence wrapper never causes the whole page to be read as one opaque code block by the
+fenced-code detection described next.
+
+**The table/list/code distinction is asked for explicitly, in the same pass, rather than left to the model's
+default.** The prompt tells the model: tabular or record-like data — including a label/value form, a
+transposed layout, or a crosstab — becomes a markdown table shaped by its *true* row/column structure, not a
+literal mirror of the visual layout; a list or enumeration that is not tabular data stays a markdown list;
+code, a formula, or an algorithm listing is fenced and its line breaks preserved. This matters because a
+prompt that only describes what a table should look like, with no equivalent instruction for lists or code,
+measurably pushes the model toward tables as its only structured option — a plain numbered list of clauses
+would otherwise come back as a table with mostly empty cells, observed and fixed as a real, previously-live
+failure mode, not a hypothetical one.
+
+Fenced code blocks are recognized as their own block type by splitting the response on its own fence
+markers before the rest of the markdown is parsed, so a page containing a code sample keeps its exact
+indentation and line breaks rather than being flattened into a paragraph alongside everything else.
 
 **Embedded images** — inside DOCX, XLSX, PPTX, HTML and EPUB sources, not just PDF pages — go through the same
 vision model individually, so a table or text baked into an image is not lost. Before an embedded image is
@@ -142,11 +177,9 @@ sent, it is size-filtered (decorative icons/logos below a pixel threshold are dr
 content-hash deduplicated: identical images that recur across a document (a repeated letterhead or logo) are
 read once, and the result is reused for every occurrence rather than re-reading it each time. Both checks
 share the same admission budget as page rasterization above, so embedded-image OCR cannot bypass the memory
-bound that page rendering is subject to.
-
-Tables come back in a token-efficient grid notation — one token per cell rather than styled markup — and are
-translated to HTML at the model boundary, so a dense table costs a fraction of the tokens and everything
-downstream still sees the one grid format it was written against.
+bound that page rendering is subject to. A standalone SVG file is rasterized the same way a PDF page is and
+then read as one image — SVG has no accessible-data path today, so this is the same visual-lane treatment any
+picture gets, not a special case.
 
 Markup and visual pages converge on the same block shape, so everything after is format-agnostic.
 
@@ -189,13 +222,28 @@ boundary the query side relies on: the model writes the query, the database comp
 because the failure mode of every "AI reads your spreadsheet" system is the model quietly misreading or
 re-adding a number — so the model is never in a position to touch a value.
 
-A second rule decides *when* a model is asked at all: **the model is asked only where the source is
-genuinely ambiguous.** Almost every format states its own structure. A `<table>` marks its header with
-`<thead>` or `<th>`; the vision model marks a header row in its own OCR output; a CSV's first row names
-its columns; a JSON entity's keys *are* its schema. In all of those the header is read, not inferred, and
-no model call is made. Only a **spreadsheet's raw cell grid** is genuinely undecidable — tables can begin
-anywhere on a sheet, several can share one, headers can span rows, and nothing in the file says which cells
-are which. That is the one place structure is asked for.
+A second rule decides *when* a model is asked at all, and it splits into two different questions that used
+to be conflated: **where do a table's boundaries lie**, and **what is its internal shape**. Boundaries are
+genuinely ambiguous only for a **spreadsheet's raw cell grid** — tables can begin anywhere on a sheet,
+several can share one, and nothing in the file says which cells belong to which table. That is the one place
+a model is shown several candidates at once and asked to decide membership, drop the spurious ones, and
+merge fragments of one table split apart.
+
+Internal shape — which rows are the header, whether the table is transposed, where a section label sits —
+is a narrower question that a *bounded, single* table can also need answered even when its boundaries were
+never in doubt. An HTML `<table>` or a PPTX table/chart is already exactly one table; nothing needs to
+decide where it starts or ends. But its *header* is not always in the markup — the same label/value form,
+transposed layout, or crosstab shape a scanned page can carry shows up in real HTML and PPTX just as often,
+and a mechanical "row 0 is the header" guess gets those wrong the same way it would for a scanned page. So
+that one bounded table is still shown to the model — one grid in, one structure out, no candidate list, no
+merge/drop logic, because there is nothing to merge or drop. This is a materially cheaper call than the
+spreadsheet path: no token-budget packing, no multi-table splitting prompt, because a single already-bounded
+table never needs either.
+
+A page read by the vision model is a third case again: the model already saw the table's pixels once, in
+the same call that read the rest of the page, so its structure is asked for **in that same pass** — never
+re-derived from the page's own OCR output afterward. Sending an already-read table back through a second
+model call would be pure reprocessing of content the model had full visual access to the first time.
 
 The routing is therefore by **ambiguity, not by source** — the distinction matters, because a source-shaped
 rule invites a private path per format, and the whole point is that there is exactly one. Every table from
@@ -237,12 +285,18 @@ By source:
 - **JSON** — shredded deterministically into normalized, joinable tables: nested objects flattened by
   dotted key, lists of objects into child tables keyed back to their parent. An entity's keys are its
   schema, so there is nothing to infer. No model.
-- **Embedded HTML/PDF tables** — the grid is built deterministically with spans expanded, and the header
-  band is read from the markup: `<thead>` or a leading run of `<th>` for documents, and for a scanned page
-  the vision model's own header marking, which it emits alongside the cells and which is carried
-  through into the HTML rather than discarded. No structure call. Tables continuing across consecutive
-  pages are stitched into one first — fragments with a matching column count across a page boundary merged,
-  repeated headers dropped, page furniture skipped — so a forty-page table is one table.
+- **Tables on a rendered page (PDF, images)** — the grid is built deterministically from the vision model's
+  own OCR output for that page, and its structure came from the same call: the model already read the
+  table's shape once, visually, so nothing asks it again from the grid afterward. Tables continuing across
+  consecutive pages are stitched into one first — fragments with a matching column count across a page
+  boundary merged, repeated headers dropped, page furniture skipped — so a forty-page table is one table.
+- **Embedded HTML/PPTX tables and charts** — the grid is built deterministically with spans expanded (a
+  PPTX native chart's own category/series/value data is read directly, the same way a spreadsheet cell is —
+  no vision, no model, genuinely lossless). Its *structure* — header row(s), orientation, section labels —
+  is asked of the model exactly as described above: one bounded table, one call, no candidate list. The
+  header is not assumed from markup alone, because `<thead>`/`<th>` marks *that* a row is a header far more
+  reliably than it marks that a form-shaped or transposed table needs restructuring rather than a literal
+  read.
 
 Where a model *is* asked, it is shown a bounded view and never the table: at most **20 rows** — the top few,
 the bottom few, and every Mth in between, with M widened as the sheet grows so the sample spans its whole
@@ -601,21 +655,43 @@ data in its head: it reads, judges, and writes queries; the database keeps the n
 Open gaps in the current build. None corrupts an answer — each is a place the system is weaker than the
 design intends.
 
-- **Missed headers and section-labels in irregular PDFs (targeted, unverified).** A *genuinely* header-less
-  table correctly gets generic `col0…colN` columns — a key-value block, a bare listing — and its rows are
-  faithful, just unnamed; that is the right structure, not a defect. Two narrower failures used to slip
-  through the old per-block path: a header row that *is* present left as a data row (a transfer-credit report
-  whose `Transfer Term | Incoming Course | …` header sat in the data, because the continuation page was
-  structured in isolation with no header), and a section-label row *inside* a table (`1B. ENG 121`) flattened
-  into a data row. The unified stage is built to close both — the model sees the whole document's candidates
-  at once, so it marks section rows and a header-once table's continuation merges back under its header block
-  — but this has not yet been confirmed on a real run.
+- **Missed headers and section-labels on a rendered page (open — the mechanism that would fix this across
+  pages does not apply to this lane).** A *genuinely* header-less table correctly gets generic `col0…colN`
+  columns — a key-value block, a bare listing — and its rows are faithful, just unnamed; that is the right
+  structure, not a defect. A header row that *is* present but a continuation page loses, or a section-label
+  row flattened into a data row, is a fidelity question that today rests entirely on the single vision-model
+  call that read the page — there is no downstream candidate-merging stage for PDF/image tables that could
+  catch it after the fact (that mechanism — several candidates shown to the model at once, so it can mark
+  section rows and merge a header-once table's continuation back under its header block — exists only for a
+  spreadsheet's raw cell range; see "Two structuring mechanisms" above). A model that reads a continuation
+  page in isolation, with no visibility into the header on the page before it, has no way to recover it after
+  the fact under the current architecture. Confirmed as a real fidelity gap, though a different instance of
+  it than the one first described here: an OCR pass was observed dropping a table's own section-header rows
+  entirely (a Malaysian court-circular's `MAHKAMAH TINGGI`/`MAHKAMAH SESYEN` case-code table) — a larger vision
+  model correctly kept both on a re-run of the same page, but this was one comparison, not a systematic
+  re-check, and the transfer-credit-report/continuation-page scenario this bullet originally described has
+  not been specifically re-verified.
 
-- **Prose occasionally survives as a table cell.** The table-structuring call drops most non-tabular
-  candidates, but a page of running text laid out in a way that reads as a two-column grid can still slip
-  through with a whole paragraph stuffed into one "cell" (observed on a block of statute text). Grid-shaped
-  enough to pass, it is a poor representation of what was never a table — harmless unless a question turns
-  on it.
+- **Verified fix (2026-08-10): prose surviving as a table cell.** The case this bullet used to describe —
+  running prose gridded into a table with a whole paragraph stuffed into one cell — was reproduced live on
+  two real, unrelated pages: a Malaysian statute's table of contents (plain numbered section list) and a
+  Kazakhstan immigration-procedure numbered list, both forced into a mostly-empty table by the OCR prompt's
+  earlier wording, which described what a table should look like but said nothing about lists or code as
+  the alternative. Naming that alternative explicitly — a list stays a markdown list, code stays fenced —
+  and checked against the same two pages: both now come back as headings/lists, not tables. Not exhaustively
+  re-checked across every document shape, but the specific previously-observed failure is closed.
+
+- **Verified fix (2026-08-10), root cause not fully isolated: fabrication under concurrent load.** A page
+  dense with real legal text, sent through OCR alone, was transcribed correctly every time. The same exact
+  page, sent as part of a larger concurrent batch, twice came back as a table of roughly seventy blank rows —
+  a fabrication, not a misread, on content the model handled correctly moments earlier under no load.
+  Re-checked after the prompt rewrite above, at the same concurrency, against the same page: the fabrication
+  did not reproduce. Whether the prompt change is what fixed it, or whether it was closely coupled to a
+  vision-concurrency setting also being tuned in the same window, was not disentangled — flagging this as
+  fixed against the configuration actually shipped, not as a mechanism fully understood. Separately: genuinely
+  blank pages showed the same failure shape (fabricated content instead of empty output) and are now closed
+  structurally by the blank-page pixel-variance guard described above, which is a different, load-independent
+  fix from whatever closed this one.
 
 - **Stray query on a prose question.** A purely narrative question ("what is this dispute about")
   sometimes still draws a single read-only query against a loosely related table. It is harmless — the
