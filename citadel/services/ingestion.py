@@ -19,7 +19,7 @@ from typing import TypeVar
 from cachetools import LRUCache
 from fastapi import HTTPException, UploadFile
 from pebble import ProcessPool
-from PIL import Image
+from PIL import Image, ImageStat
 from redis.commands.core import AsyncScript
 from redis.exceptions import ResponseError
 from sqlalchemy import select
@@ -65,7 +65,8 @@ from citadel.services.tabular import (
     single_table_structure,
     structure_csv_tables,
 )
-from citadel.tabular.materialize import materialize
+from citadel.tabular.materialize import MaterializedTable, materialize
+from citadel.tabular.structure import structure_single_table
 from citadel.utils import normalize_file
 from config import CPU_EIGHTH, CPU_THIRD
 
@@ -549,7 +550,7 @@ async def handle_tabular(fields: dict[str, str]) -> None:
         image_items = await resolve_sheet_images(doc_id, f"sheet{sheet_no}", sheet_no, sheet.images)
         if image_items:
             start = (items[-1][0] + 1) if items else 1
-            items = items + list(enumerate(image_items, start=start))
+            items += list(enumerate(image_items, start=start))
         sheet_name = sheet.sheet_name
     else:
         data = await asyncio.to_thread(path.read_bytes)
@@ -585,7 +586,22 @@ def _heading_level(line: str) -> int | None:
     return level
 
 
-def blocks_from_page_markdown(markdown: str) -> list[Block]:
+def _split_code_fences(markdown: str) -> list[tuple[bool, str]]:
+    segments: list[tuple[bool, str]] = []
+    current: list[str] = []
+    in_code = False
+    for line in markdown.splitlines():
+        if line.strip().startswith("```"):
+            segments.append((in_code, "\n".join(current)))
+            current = []
+            in_code = not in_code
+            continue
+        current.append(line)
+    segments.append((in_code, "\n".join(current)))
+    return segments
+
+
+def _blocks_from_plain_markdown(markdown: str) -> list[Block]:
     blocks: list[Block] = []
     paragraph: list[str] = []
     table: list[str] = []
@@ -625,10 +641,66 @@ def blocks_from_page_markdown(markdown: str) -> list[Block]:
     return blocks
 
 
-async def extract_page(doc_id: str, page_idx: int) -> list[Block]:
-    job_id = await emit_page_ocr(page_image_key(doc_id, page_idx))
+def blocks_from_page_markdown(markdown: str) -> list[Block]:
+    blocks: list[Block] = []
+    for in_code, chunk in _split_code_fences(markdown):
+        if in_code:
+            if chunk.strip():
+                blocks.append(Block(page_idx=0, type="code", text=chunk))
+        else:
+            blocks.extend(_blocks_from_plain_markdown(chunk))
+    return blocks
+
+
+BLANK_STDDEV_THRESHOLD = 1.0
+
+
+def _is_blank_image(image_bytes: bytes) -> bool:
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        return ImageStat.Stat(img.convert("L")).stddev[0] < BLANK_STDDEV_THRESHOLD
+
+
+_WRAP_FENCE = re.compile(r"^```[a-zA-Z]*\s*\n(.*)\n```\s*$", re.DOTALL)
+
+_META_LINE_PATTERNS = (
+    re.compile(r"^here is the (content|text|transcription)\b", re.IGNORECASE),
+    re.compile(r"^this transcription includes\b", re.IGNORECASE),
+    re.compile(r"^i (cannot|can't|am unable to)\b", re.IGNORECASE),
+    re.compile(r"^the (provided )?image (is|appears)\b.*(blank|empty)", re.IGNORECASE),
+    re.compile(r"^there is no (visible )?(text|content)\b", re.IGNORECASE),
+    re.compile(r"^therefore,.*(cannot|no markdown|no table)\b", re.IGNORECASE),
+)
+
+
+def _strip_wrapping_fence(markdown: str) -> str:
+    match = _WRAP_FENCE.match(markdown.strip())
+    return match.group(1) if match else markdown
+
+
+def _strip_meta_commentary(markdown: str) -> str:
+    kept = [
+        line
+        for line in markdown.splitlines()
+        if line.strip() != "---" and not any(pattern.match(line.strip()) for pattern in _META_LINE_PATTERNS)
+    ]
+    return "\n".join(kept)
+
+
+async def _ocr_blocks(image_key: str) -> list[Block]:
+    image_bytes = await get_redis().get(image_key)
+    if isinstance(image_bytes, str):
+        image_bytes = image_bytes.encode()
+    if image_bytes is not None and await asyncio.to_thread(_is_blank_image, image_bytes):
+        return []
+    job_id = await emit_page_ocr(image_key)
     markdown = await collect_page_ocr(job_id)
+    markdown = _strip_wrapping_fence(markdown)
+    markdown = _strip_meta_commentary(markdown)
     return blocks_from_page_markdown(markdown)
+
+
+async def extract_page(doc_id: str, page_idx: int) -> list[Block]:
+    return await _ocr_blocks(page_image_key(doc_id, page_idx))
 
 
 def embedded_image_key(doc_id: str, unit: str, index: int) -> str:
@@ -652,9 +724,7 @@ async def _resolve_unique_images(doc_id: str, unit: str, images: dict[int, bytes
     async def resolve_one(digest: bytes) -> tuple[bytes, list[Block]]:
         await cap.acquire()
         try:
-            job_id = await emit_page_ocr(keys[digest])
-            markdown = await collect_page_ocr(job_id)
-            return digest, blocks_from_page_markdown(markdown)
+            return digest, await _ocr_blocks(keys[digest])
         finally:
             cap.release()
             await redis.delete(keys[digest])
@@ -735,21 +805,33 @@ async def _read_doc_blocks(doc_id: str) -> list[Block]:
     return blocks
 
 
+_TEXTUAL_TABLE_KINDS = {"html", "html_pandoc", "pptx"}
+
+
+async def _structured_table(
+    doc_id: str, kind: str, index: int, grid: list[list[str]] | None
+) -> MaterializedTable | None:
+    if not grid:
+        return None
+    if kind in _TEXTUAL_TABLE_KINDS:
+        return await structure_single_table(grid, key=f"structure_single:{doc_id}:{index}")
+    return materialize(grid, single_table_structure(grid, header_rows=1))
+
+
 async def handle_structure(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
+    kind = (await redis.hget(f"doc:{doc_id}", "kind") or b"").decode()
     blocks = await _read_doc_blocks(doc_id)
     prepared = prepare_document(blocks)
     await redis.set(f"structures:{doc_id}", dump_structures(prepared), ex=DOC_TTL)
     indices = table_block_indices(prepared.stitched)
     if indices:
+        results = await asyncio.gather(
+            *(_structured_table(doc_id, kind, index, prepared.stitched[index].grid) for index in indices)
+        )
         tables = {
-            str(index): dump_tables(
-                [materialize(grid, single_table_structure(grid, header_rows=1))]
-                if (grid := prepared.stitched[index].grid)
-                else []
-            )
-            for index in indices
+            str(index): dump_tables([table] if table else []) for index, table in zip(indices, results, strict=True)
         }
         await redis.hset(f"tables:{doc_id}", mapping=tables)
     await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})

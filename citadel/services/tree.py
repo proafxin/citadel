@@ -8,8 +8,12 @@ from citadel.services.grid import is_math_text
 _KIND_BY_TYPE = {
     "paragraph_title": "heading",
     "reference": "heading",
+    "title": "heading",
     "algorithm": "code",
+    "code": "code",
+    "list_item": "list",
     "display_formula": "equation",
+    "equation": "equation",
     "table": "table",
 }
 

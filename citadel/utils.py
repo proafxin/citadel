@@ -1,4 +1,5 @@
 import html
+import json
 import re
 import shutil
 import subprocess
@@ -6,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 import filetype
+import xmltodict
 from markdown_it import MarkdownIt
 from mdit_py_plugins.dollarmath import dollarmath_plugin
 
@@ -27,6 +29,8 @@ HTML_EXTS = {"html", "htm", "xhtml"}
 IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"}
 SPREADSHEET_NATIVE_EXTS = {"xlsx", "xlsm"}
 SPREADSHEET_CONVERT_EXTS = {"xls", "xlsb", "ods", "fods"}
+XML_EXTS = {"xml"}
+SVG_EXTS = {"svg"}
 
 _KNOWN_EXTS = (
     PRESENTATION_NATIVE_EXTS
@@ -38,6 +42,8 @@ _KNOWN_EXTS = (
     | IMAGE_EXTS
     | SPREADSHEET_NATIVE_EXTS
     | SPREADSHEET_CONVERT_EXTS
+    | XML_EXTS
+    | SVG_EXTS
     | {"csv", "tsv", "tab", "json", "pdf", "epub"}
 )
 _SNIFF_BYTES = 65536
@@ -123,6 +129,18 @@ def _spreadsheet_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, byt
     return None
 
 
+def _xml_kind(data: bytes, ext: str) -> tuple[str, bytes, dict[str, bytes]] | None:
+    if ext not in XML_EXTS:
+        return None
+    return "json", json.dumps(xmltodict.parse(data)).encode(), {}
+
+
+def _svg_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes, dict[str, bytes]] | None:
+    if ext not in SVG_EXTS:
+        return None
+    return "image:png", _soffice_convert(data, ext, "png", profile_dir), {}
+
+
 def _markup_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes, dict[str, bytes]] | None:
     if ext in HTML_EXTS:
         return "html", data, {}
@@ -149,6 +167,12 @@ def _converted_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes
     spreadsheet = _spreadsheet_kind(data, ext, profile_dir)
     if spreadsheet is not None:
         return spreadsheet
+    xml = _xml_kind(data, ext)
+    if xml is not None:
+        return xml
+    svg = _svg_kind(data, ext, profile_dir)
+    if svg is not None:
+        return svg
     markup = _markup_kind(data, ext, profile_dir)
     if markup is not None:
         return markup

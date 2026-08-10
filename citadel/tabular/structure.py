@@ -3,7 +3,13 @@ import logging
 import time
 from collections import Counter
 
-from citadel.llm import collect_structure_candidates, count_tokens_batch, emit_structure_candidates, pack_indices
+from citadel.llm import (
+    collect_structure_candidates,
+    count_tokens_batch,
+    emit_structure_candidates,
+    pack_indices,
+    structure_table_candidate,
+)
 from citadel.schemas.table import TableStructure
 from citadel.tabular.flag import column_kinds, payload_rows
 from citadel.tabular.materialize import MaterializedTable, materialize
@@ -103,6 +109,13 @@ def _drop_contained_specs(
             if i != j and _index_comparable(blocks_i, blocks_j) and _contained(structure_i, structure_j):
                 dropped.add(i)
     return [item for index, item in enumerate(prepared) if index not in dropped]
+
+
+async def structure_single_table(grid: list[list[str]], *, key: str) -> MaterializedTable:
+    text = _candidate_text(grid, 0)
+    spec = await structure_table_candidate(text, key)
+    structure = _table_from_spec(spec, grid)
+    return materialize(grid, structure)
 
 
 async def structure_tables(

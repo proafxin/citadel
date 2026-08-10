@@ -1,6 +1,6 @@
 [project]
 name = "citadel"
-version = "1.0.7"
+version = "2.0.0"
 description = "Citadel: personal search engine"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -32,6 +32,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.51",
     "torch>=2.13.0",
     "transformers>=5.14.1",
+    "xmltodict>=1.0.4",
     "zstandard>=0.25.0",
 ]
 

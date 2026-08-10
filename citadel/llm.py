@@ -161,6 +161,38 @@ async def collect_structure_candidates(job_id: str) -> list[dict]:
     return _structure_tables(await collect_slm(job_id))
 
 
+_SINGLE_TABLE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "transposed": {"type": "boolean"},
+        "header_rows": {"type": "array", "items": {"type": "integer"}},
+        "row_end": {"type": "integer"},
+        "col_start": {"type": "integer"},
+        "col_end": {"type": "integer"},
+        "columns": {"type": "array", "items": {"type": "string"}},
+        "section_rows": {"type": "array", "items": {"type": "integer"}},
+        "title": {"type": "string"},
+        "notes": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "transposed",
+        "header_rows",
+        "row_end",
+        "col_start",
+        "col_end",
+        "columns",
+        "section_rows",
+        "title",
+        "notes",
+    ],
+}
+
+
+async def structure_table_candidate(payload: str, key: str) -> dict:
+    prompt = f"{load_prompt('table_structure_single')}\n{payload}"
+    return await call_slm(prompt, _SINGLE_TABLE_SCHEMA, interactive=False, key=key, max_tokens=STRUCTURE_MAX_TOKENS)
+
+
 PAGE_OCR_MAX_TOKENS = 3584
 
 
