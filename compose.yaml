@@ -23,7 +23,7 @@ services:
       - --max-num-seqs
       - "256"
       - --max-model-len
-      - "65536"
+      - "32768"
       - --mm-processor-cache-gb
       - "0"
       - --enable-auto-tool-choice

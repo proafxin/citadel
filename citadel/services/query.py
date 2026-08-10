@@ -22,6 +22,7 @@ from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
 from citadel.llm import (
     RESOLVE_BUDGET,
+    SLM_MODEL_LEN,
     STRUCT_MAX_TOKENS,
     SYNTH_MAX_TOKENS,
     collect_resolve,
@@ -59,8 +60,7 @@ def _capacity_key(label: str) -> str:
     return f"{get_settings().worker_id}:{label}:{next(_call_no)}"
 
 
-SYNTH_CTX = 65536
-SYNTH_BUDGET = SYNTH_CTX - SYNTH_MAX_TOKENS - 2048
+SYNTH_BUDGET = SLM_MODEL_LEN - SYNTH_MAX_TOKENS - 2048
 MERGE_INPUT_BUDGET = STRUCT_MAX_TOKENS // 2
 SCHEMA_SAMPLES = 3
 _PG = postgresql.dialect()

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
-from citadel.llm import collect_text, count_tokens, count_tokens_batch, emit_text
+from citadel.llm import SLM_MODEL_LEN, collect_text, count_tokens, count_tokens_batch, emit_text
 from citadel.models.batch import ContentBatch
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
@@ -22,11 +22,11 @@ STREAM_BATCH = "batch"
 
 logger = logging.getLogger(__name__)
 
-BATCH_TOKENS = 32768
 SAMPLE_ROWS = 3
 SUMMARY_RATIO = 0.1
 SUMMARY_TOKENS_MAX = 4096
 DOCUMENT_SUMMARY_TOKENS = 500
+BATCH_TOKENS = SLM_MODEL_LEN - (SUMMARY_TOKENS_MAX * 2 + 512) - 2048
 
 _BLOCK_ORDINALS = text("""
 UPDATE content SET block_ordinal = seq.rn
