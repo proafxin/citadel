@@ -21,6 +21,7 @@ from citadel.models.table import Table
 from citadel.services.batching import render_block
 from citadel.services.capacity import get_embed_capacity
 from citadel.services.readiness import record_library_flag
+from config import EMBED_MAX_TOKENS, get_embed_tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +100,16 @@ def _take_group(nodes: list[_PendingNode], start: int, budget: int) -> tuple[int
     return end, longest
 
 
+def _truncate_for_embed(text: str) -> str:
+    tokenizer = get_embed_tokenizer()
+    ids = tokenizer(text, add_special_tokens=True, truncation=True, max_length=EMBED_MAX_TOKENS)["input_ids"]
+    if len(ids) < EMBED_MAX_TOKENS:
+        return text
+    return str(tokenizer.decode(ids, skip_special_tokens=True))
+
+
 async def _encode_group(library_id: int, batch: list[_PendingNode], key: str) -> list[dict[str, object]]:
-    vectors = await _embed([node.search_text for node in batch], key)
+    vectors = await _embed([_truncate_for_embed(node.search_text) for node in batch], key)
     return [
         {"content_id": node.content_id, "library_id": library_id, "type": node.node_type, "embedding": vector}
         for node, vector in zip(batch, vectors, strict=True)
@@ -127,6 +136,23 @@ async def _mark_documents_embedded(library_id: int) -> None:
         )
 
 
+def _split_groups(nodes: list[_PendingNode], budget: int) -> list[list[_PendingNode]]:
+    groups: list[list[_PendingNode]] = []
+    index = 0
+    while index < len(nodes):
+        end, _ = _take_group(nodes, index, budget)
+        groups.append(nodes[index:end])
+        index = end
+    return groups
+
+
+async def _embed_group(library_id: int, group_no: int, batch: list[_PendingNode]) -> int:
+    label = f"lib{library_id}.g{group_no}"
+    records = await _encode_group(library_id, batch, label)
+    await _write_group(records, label)
+    return len(records)
+
+
 async def embed_library(library_id: int) -> int:
     redis = get_redis()
     await redis.hset(f"embed:{library_id}", "t_start", time.time())
@@ -135,37 +161,16 @@ async def embed_library(library_id: int) -> int:
     pending.sort(key=lambda node: node.token_len)
     total = len(pending)
     logger.info("embed library=%d nodes=%d", library_id, total)
-    embedded = 0
+    groups = _split_groups(pending, EMBED_BATCH_TOKENS)
     started = time.time()
-    index = 0
-    group_no = 0
-    writing: asyncio.Task[None] | None = None
-    while index < total:
-        end, longest = _take_group(pending, index, EMBED_BATCH_TOKENS)
-        group_no += 1
-        label = f"lib{library_id}.g{group_no}"
-        records = await _encode_group(library_id, pending[index:end], label)
-        if writing is not None:
-            await writing
-        writing = asyncio.create_task(_write_group(records, label))
-        group_rows = end - index
-        embedded += group_rows
-        index = end
+    embedded = 0
+    jobs = [_embed_group(library_id, group_no, group) for group_no, group in enumerate(groups, 1)]
+    for coro in asyncio.as_completed(jobs):
+        embedded += await coro
         elapsed = time.time() - started
         rate = embedded / elapsed if elapsed > 0 else 0.0
         await redis.hset(f"embed:{library_id}", mapping={"done": embedded, "total": total})
-        logger.info(
-            "embed %s rows=%d longest=%d %d/%d nodes %.1fs %.0f nodes/s",
-            label,
-            group_rows,
-            longest,
-            embedded,
-            total,
-            elapsed,
-            rate,
-        )
-    if writing is not None:
-        await writing
+        logger.info("embed library=%d %d/%d nodes %.1fs %.0f nodes/s", library_id, embedded, total, elapsed, rate)
     await _mark_documents_embedded(library_id)
     await redis.hset(f"embed:{library_id}", mapping={"t_done": time.time(), "nodes": embedded})
     return embedded

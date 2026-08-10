@@ -1,7 +1,7 @@
 
 services:
   qwen:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:v0.26.0
     container_name: citadel-qwen
     restart: always
     ipc: host
@@ -19,7 +19,7 @@ services:
       - --kv-cache-dtype
       - auto
       - --gpu-memory-utilization
-      - "0.85"
+      - "0.88"
       - --max-num-seqs
       - "160"
       - --max-model-len
@@ -53,7 +53,7 @@ services:
               capabilities: [gpu]
 
   bge:
-    image: vllm/vllm-openai:latest
+    image: vllm/vllm-openai:v0.26.0
     container_name: citadel-bge
     restart: always
     ipc: host
@@ -68,8 +68,12 @@ services:
       - "8101"
       - --hf-overrides
       - '{"architectures": ["BgeM3EmbeddingModel"]}'
+      - --pooler-config
+      - '{"task": "embed", "pooling_type": "CLS"}'
       - --gpu-memory-utilization
-      - "0.85"
+      - "0.12"
+      - --max-num-seqs
+      - "512"
       - --max-model-len
       - "8192"
       - --uvicorn-log-level
