@@ -126,26 +126,28 @@ mid-call is not leaked forever: the stale-TTL pruning in the same acquire script
 attempt by anyone.
 
 - **`get_vision_capacity()`** — page rasterization and embedded-image resolution share this one budget, sized
-  `OCR_CONCURRENCY + VISION_BUFFER` (32 + 16 = 48 today). A rasterized page's slot is acquired when the page
+  `OCR_CONCURRENCY + VISION_BUFFER` (64 + 32 = 96 today). A rasterized page's slot is acquired when the page
   is claimed off the rasterize stream and released only once that same page's OCR call resolves — one slot
   spans both phases, keyed by `doc_id:page_idx`, because the two phases are really one occupancy of the vision
   pipeline for that page, not two independent draws. This is what keeps host memory bounded regardless of how
   many documents or pages are in flight: a page cannot be rasterized far ahead of what the model can actually
   read.
 - **`get_text_capacity()`** — every text-only table-structuring call draws from this separate budget, sized
-  `TEXT_CONCURRENCY + TEXT_BUFFER` (64 + 32 = 96 today): a spreadsheet sheet's candidate-packed call
+  `TEXT_CONCURRENCY + TEXT_BUFFER` (256 + 128 = 384 today): a spreadsheet sheet's candidate-packed call
   (`structure_tables`) and a markup-sourced table's single-table call (`structure_single_table`) both acquire
-  a slot here, one per actual model call. Sized higher than the vision pool because a text-structure call is
+  a slot here, one per actual model call. Sized far higher than the vision pool because a text-structure call is
   materially cheaper and faster per request, not because more of them run in total.
-- **`get_text_large_capacity()`** — deliberately small (`TEXT_LARGE_CONCURRENCY + TEXT_LARGE_BUFFER`, 4 + 2 =
-  6 today), because these are the opposite profile from text-structure: batch summaries, the per-document
-  summary reduction, query resolution/filtering, and evidence-merge calls all carry large prompts and run for
-  a while. Sharing one pool with the high-volume text-structure calls would let a finalize burst of many batch
-  summaries occupy most of that pool's slots and starve a concurrently-ingesting library's table-structuring —
-  a small, dedicated, low-concurrency pool is what keeps a slow/bursty call class from crowding out a fast/
-  steady one, in either direction.
+- **`get_text_large_capacity()`** — the smallest of the four (`TEXT_LARGE_CONCURRENCY + TEXT_LARGE_BUFFER`,
+  32 + 16 = 48 today), because these are the opposite profile from text-structure: batch summaries, the
+  per-document summary reduction, query resolution/filtering, and evidence-merge calls all carry large prompts
+  and run for a while. Sharing one pool with the high-volume text-structure calls would let a finalize burst of
+  many batch summaries occupy most of that pool's slots and starve a concurrently-ingesting library's
+  table-structuring — a small, dedicated, low-concurrency pool is what keeps a slow/bursty call class from
+  crowding out a fast/steady one, in either direction.
 - **`get_embed_capacity()`** — embedding calls to the `bge` service, sized `EMBED_CONCURRENCY + EMBED_BUFFER`
-  (16 + 8 = 24 today).
+  (384 + 128 = 512 today) — deliberately matched to `bge`'s own `--max-num-seqs 512` ceiling, since embedding
+  calls are small enough per-request that the server, not the client pool, is the real limit worth sizing
+  against.
 
 A separate, process-local cap (`RENDER_CONCURRENCY`, derived from CPU count) bounds how many *documents* are
 concurrently having their pages walked into the render pipeline at all — this one is intentionally not global,
@@ -161,10 +163,17 @@ measurement on an individual request conflates real inference time with however 
 behind others for a slot; getting an honest split requires the server's own per-request queue and inference
 timing, not a client-side stopwatch.
 
-The current numbers (32/16 vision, 64/32 text-structure, 4/2 text-large, 16/8 embed) are a deliberate first
-split, not yet load-tested against a real corpus at scale; their effect on throughput and host memory is
-actively being re-measured against this shape of pipeline, and will be revised from what's stated here once
-that measurement exists.
+The current numbers (64/32 vision, 256/128 text-structure, 32/16 text-large, 384/128 embed) reflect a second
+round of tuning against real concurrency measurements — the embed pool specifically was sized from a direct
+load test against `bge` (hundreds of concurrent requests, no failures, though large-text throughput plateaus
+around ~15 req/s regardless of concurrency past a fairly low point, meaning the server's own capacity, not the
+client pool, is the real ceiling there). Vision and text-structure/text-large are still informed estimates, not
+yet load-tested the same way; the actual GPU-side ceiling for `qwen` — its KV-cache pool, currently 247,296
+tokens at `--gpu-memory-utilization 0.90` — is smaller than what the vision/text-structure pool sizes alone
+would need if every admitted request ran at its full token length simultaneously, so in practice most excess
+concurrency queues safely inside vLLM rather than actually running in parallel; this is expected, not a bug,
+and will be revised from what's stated here as more of the pipeline gets the same load-testing treatment embed
+did.
 
 ### Reading pages (ocr)
 

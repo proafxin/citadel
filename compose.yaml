@@ -71,7 +71,7 @@ services:
       - --pooler-config
       - '{"task": "embed", "pooling_type": "CLS"}'
       - --gpu-memory-utilization
-      - "0.10"
+      - "0.1"
       - --max-num-seqs
       - "512"
       - --max-model-len
