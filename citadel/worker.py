@@ -9,6 +9,7 @@ from citadel.bus import get_redis
 from citadel.db import get_engine
 from citadel.services.batching import STREAM_BATCH, mark_summary_failed, record_summary, summarize_document
 from citadel.services.capacity import OCR_CONCURRENCY, VISION_BUFFER, Capacity, get_vision_capacity
+from citadel.services.document import mark_library_ready
 from citadel.services.ingestion import (
     BULK_READ_COUNT,
     GROUP,
@@ -44,6 +45,8 @@ from citadel.services.ingestion import (
     shutdown,
 )
 from citadel.services.query import STREAM_RESOLVE_BATCH, record_resolve_batch, resolve_batch_job
+from citadel.services.readiness import STREAM_LIBRARY_READY
+from citadel.services.retrieval import STREAM_EMBED, handle_embed
 from citadel.services.slm import read_replies
 from config import CPU_EIGHTH, configure_logging, get_settings
 
@@ -373,6 +376,40 @@ async def _resolve_batch_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
         await _retry_or_fail(stream, msg_id, raw, lambda: record_resolve_batch(int(fields["library_id"])))
 
 
+async def _embed_giveup(library_id: str) -> None:
+    logger.error("embedding permanently failed library=%s — library stays blocked from ready", library_id)
+
+
+async def _embed_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
+    stream = STREAM_EMBED
+    fields = await _decode_or_settle(stream, msg_id, raw)
+    if fields is None:
+        return
+    work = await _run_cancelable(handle_embed(fields))
+    if work.exception() is None:
+        await _settle(stream, msg_id)
+        return
+    logger.error("embed failed library=%s\n%s", fields.get("library_id", "?"), _tb(work.exception()))
+    await _retry_or_fail(stream, msg_id, raw, lambda: _embed_giveup(fields.get("library_id", "?")))
+
+
+async def _library_ready_giveup(library_id: str) -> None:
+    logger.error("marking library ready permanently failed library=%s", library_id)
+
+
+async def _library_ready_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
+    stream = STREAM_LIBRARY_READY
+    fields = await _decode_or_settle(stream, msg_id, raw)
+    if fields is None:
+        return
+    work = await _run_cancelable(mark_library_ready(int(fields["library_id"])))
+    if work.exception() is None:
+        await _settle(stream, msg_id)
+        return
+    logger.error("mark library ready failed library=%s\n%s", fields.get("library_id", "?"), _tb(work.exception()))
+    await _retry_or_fail(stream, msg_id, raw, lambda: _library_ready_giveup(fields.get("library_id", "?")))
+
+
 async def normalize() -> None:
     cap = Capacity(NORMALIZE_CONCURRENCY)
     profiles = make_profile_pool(cap.limit)
@@ -470,13 +507,34 @@ async def resolve_batches() -> None:
     await _drive(STREAM_RESOLVE_BATCH, None, lambda mid, raw: _spawn(_resolve_batch_job(mid, raw)))
 
 
+async def embed() -> None:
+    await _drive(STREAM_EMBED, None, lambda mid, raw: _spawn(_embed_job(mid, raw)))
+
+
+async def library_ready() -> None:
+    await _drive(STREAM_LIBRARY_READY, None, lambda mid, raw: _spawn(_library_ready_job(mid, raw)))
+
+
 async def _main() -> None:
     await reap_orphan_blobs()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    stages = (normalize, paginate, render, rasterize, ocr, structure, table_structure, merge, batch, resolve_batches)
+    stages = (
+        normalize,
+        paginate,
+        render,
+        rasterize,
+        ocr,
+        structure,
+        table_structure,
+        merge,
+        batch,
+        resolve_batches,
+        embed,
+        library_ready,
+    )
     consumers = [asyncio.create_task(stage()) for stage in stages]
     consumers.append(asyncio.create_task(read_replies()))
     stop_task = asyncio.create_task(stop.wait())

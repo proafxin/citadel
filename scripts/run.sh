@@ -19,6 +19,11 @@ if ! curl -sf "http://localhost:${CITADEL_QWEN_PORT:-8100}/v1/models" >/dev/null
     exit 1
 fi
 
+if ! curl -sf "http://localhost:${CITADEL_BGE_PORT:-8101}/v1/models" >/dev/null 2>&1; then
+    echo "infra not up — run: bash scripts/infra.sh" >&2
+    exit 1
+fi
+
 until docker compose exec -T postgres pg_isready -U "${CITADEL_POSTGRES_USER:-postgres}" >/dev/null 2>&1; do
     sleep 1
 done

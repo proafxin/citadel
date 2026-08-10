@@ -20,9 +20,11 @@ from citadel.models.status import DocumentStatus
 from citadel.models.table import Table
 from citadel.services.batching import render_block
 from citadel.services.capacity import get_embed_capacity
+from citadel.services.readiness import record_library_flag
 
 logger = logging.getLogger(__name__)
 
+STREAM_EMBED = "embed_job"
 EMBED_TTL = 86_400
 
 EMBED_BATCH_TOKENS = 32768
@@ -167,6 +169,12 @@ async def embed_library(library_id: int) -> int:
     await _mark_documents_embedded(library_id)
     await redis.hset(f"embed:{library_id}", mapping={"t_done": time.time(), "nodes": embedded})
     return embedded
+
+
+async def handle_embed(fields: dict[str, str]) -> None:
+    library_id = int(fields["library_id"])
+    await embed_library(library_id)
+    await record_library_flag(library_id, "embedding")
 
 
 async def pending_libraries() -> list[int]:

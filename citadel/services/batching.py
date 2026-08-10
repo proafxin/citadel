@@ -16,6 +16,7 @@ from citadel.models.status import DocumentStatus
 from citadel.models.table import Table
 from citadel.prompts import load_prompt
 from citadel.services.capacity import get_text_large_capacity
+from citadel.services.readiness import record_library_flag
 
 STREAM_BATCH = "batch"
 
@@ -163,10 +164,6 @@ async def build_document_specs(session: AsyncSession, doc_id: int) -> list[Batch
 _SUMMARY_LOCK = 2
 
 
-def _summaries_done_stream(library_id: int) -> str:
-    return f"summaries:done:{library_id}"
-
-
 async def _pending_summaries(session: AsyncSession, library_id: int) -> int:
     pending = await session.scalar(
         select(func.count())
@@ -191,7 +188,6 @@ async def emit_library_batches(library_id: int) -> int:
             )
         )
     redis = get_redis()
-    await redis.delete(_summaries_done_stream(library_id))
     for doc_id in doc_ids:
         await redis.xadd(STREAM_BATCH, {"doc_id": str(doc_id), "library_id": str(library_id)})
     return len(doc_ids)
@@ -204,13 +200,7 @@ async def record_summary(library_id: int) -> None:
         )
         remaining = await _pending_summaries(session, library_id)
     if remaining == 0:
-        await get_redis().xadd(_summaries_done_stream(library_id), {"library_id": str(library_id)})
-
-
-async def wait_library_summaries(library_id: int, emitted: int) -> None:
-    if emitted == 0:
-        return
-    await get_redis().xread({_summaries_done_stream(library_id): "0"}, block=0)
+        await record_library_flag(library_id, "summaries")
 
 
 def _summary_prompt(spec: BatchSpec) -> tuple[str, int]:
@@ -258,8 +248,7 @@ def _batch_row(doc_id: int, spec: BatchSpec, summary: str) -> ContentBatch:
 
 
 async def mark_summary_failed(doc_id: int) -> None:
-    async with get_sessionmaker()() as session, session.begin():
-        await session.execute(update(Document).where(Document.id == doc_id).values(summarized_at=datetime.now(UTC)))
+    logger.error("batch summary permanently failed doc=%d — library stays blocked from ready", doc_id)
 
 
 async def _summarize_batch(doc_id: int, spec: BatchSpec) -> ContentBatch:

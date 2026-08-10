@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import signal
-import time
 import traceback
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -10,44 +9,29 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from citadel.bus import get_redis
 from citadel.db import get_engine
 from citadel.router import router
-from citadel.services.batching import emit_library_batches, wait_library_summaries
-from citadel.services.document import (
-    mark_described,
-    mark_embed_started,
-    mark_finalize_started,
-    mark_library_ready,
-)
+from citadel.services.batching import emit_library_batches
+from citadel.services.document import mark_described, mark_embed_started, mark_finalize_started
 from citadel.services.ingestion import shutdown as shutdown_resources
-from citadel.services.retrieval import embed_library, pending_libraries
+from citadel.services.readiness import flags_key
+from citadel.services.retrieval import STREAM_EMBED, pending_libraries
 from citadel.services.slm import read_replies
 from config import configure_logging, get_settings
 
 logger = logging.getLogger(__name__)
 
-_finalizing: set[int] = set()
-
 
 async def _finalize(library_id: int, tag: str) -> None:
-    if library_id in _finalizing:
-        return
-    _finalizing.add(library_id)
     logger.info("finalizing library=%d", library_id)
-    try:
-        await mark_finalize_started(library_id)
-        await mark_described(library_id)
-        emitted = await emit_library_batches(library_id)
-        logger.info("summarizing library=%d documents=%d", library_id, emitted)
-        await mark_embed_started(library_id)
-        t = time.time()
-        _, embedded = await asyncio.gather(wait_library_summaries(library_id, emitted), embed_library(library_id))
-        await mark_library_ready(library_id)
-        logger.info(
-            "%s library=%d documents=%d nodes=%d prep=%.1fs", tag, library_id, emitted, embedded, time.time() - t
-        )
-    finally:
-        _finalizing.discard(library_id)
+    await get_redis().delete(flags_key(library_id))
+    await mark_finalize_started(library_id)
+    await mark_described(library_id)
+    emitted = await emit_library_batches(library_id)
+    await mark_embed_started(library_id)
+    await get_redis().xadd(STREAM_EMBED, {"library_id": str(library_id)})
+    logger.info("%s library=%d documents=%d — awaiting summaries+embed", tag, library_id, emitted)
 
 
 async def finalize_libraries(queue: asyncio.Queue[int]) -> None:
