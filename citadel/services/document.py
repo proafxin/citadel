@@ -40,7 +40,6 @@ from citadel.services.tree import (
 )
 from citadel.storage import delete_object, get_object, put_object
 from citadel.tabular.materialize import MaterializedTable
-from config import EMBED_MAX_TOKENS, get_embed_tokenizer
 
 
 async def create_documents(library_id: int, filenames: list[str]) -> list[int]:
@@ -224,12 +223,6 @@ def collect_tables(results: dict[int, str | bytes]) -> tuple[dict[int, int], lis
     return counts, queue
 
 
-def _token_count(text: str | None) -> int:
-    if not text:
-        return 0
-    return min(EMBED_MAX_TOKENS, len(get_embed_tokenizer()(text, add_special_tokens=True)["input_ids"]))
-
-
 def _block_row(block: ContentBlock, doc_id: int, search: str | None) -> dict[str, object]:
     return {
         "document_id": doc_id,
@@ -240,7 +233,6 @@ def _block_row(block: ContentBlock, doc_id: int, search: str | None) -> dict[str
         "bbox": block.bbox,
         "raw": build_raw(block),
         "search_text": search,
-        "token_count": _token_count(search),
     }
 
 
@@ -401,7 +393,6 @@ def _add_sheet_text(
             heading=None,
             raw={"text": item.text},
             search_text=search,
-            token_count=_token_count(search),
         )
     )
 
@@ -437,7 +428,6 @@ async def save_sheet_tables(doc_id: int, sheet_no: int, sheet_name: str, items: 
                 type="table",
                 heading=None,
                 search_text=node_search,
-                token_count=_token_count(node_search),
             )
             session.add(node)
             await session.flush()

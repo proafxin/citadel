@@ -30,5 +30,4 @@ class ContentNode(Base):
     bbox: Mapped[list[float] | None] = mapped_column(JSONB, default=None)
     raw: Mapped[dict | None] = mapped_column(JSONB, default=None)
     search_text: Mapped[str | None] = mapped_column(Text, default=None)
-    token_count: Mapped[int | None] = mapped_column(default=None)
     qwen_token_count: Mapped[int | None] = mapped_column(default=None)

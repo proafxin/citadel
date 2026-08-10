@@ -28,20 +28,18 @@ logger = logging.getLogger(__name__)
 STREAM_EMBED = "embed_job"
 EMBED_TTL = 86_400
 
-EMBED_BATCH_TOKENS = 32768
 UPSERT_COLS = 4
 UPSERT_CHUNK = 32767 // UPSERT_COLS
 
 
-async def _embed(texts: list[str], key: str) -> list[list[float]]:
-    if not texts:
-        return []
+async def _embed(text: str, key: str) -> list[float]:
     cap = get_embed_capacity()
     await cap.acquire(key)
     try:
-        return await collect_embed(await emit_embed(texts, key))
+        vectors = await collect_embed(await emit_embed([text], key))
     finally:
         await cap.release(key)
+    return vectors[0]
 
 
 @dataclass
@@ -63,13 +61,12 @@ class _PendingNode:
     content_id: int
     search_text: str
     node_type: str
-    token_len: int = 0
 
 
 async def _pending_nodes(library_id: int) -> list[_PendingNode]:
     async with get_sessionmaker()() as session:
         rows = await session.execute(
-            select(ContentNode.id, ContentNode.search_text, ContentNode.type, ContentNode.token_count)
+            select(ContentNode.id, ContentNode.search_text, ContentNode.type)
             .join(Document, ContentNode.document_id == Document.id)
             .outerjoin(Embedding, Embedding.content_id == ContentNode.id)
             .where(
@@ -78,26 +75,12 @@ async def _pending_nodes(library_id: int) -> list[_PendingNode]:
                 Embedding.content_id.is_(None),
             )
         )
-    return [_PendingNode(row.id, row.search_text or "", row.type, row.token_count or 0) for row in rows]
+    return [_PendingNode(row.id, row.search_text or "", row.type) for row in rows]
 
 
 def _upsert_chunks(records: list[dict[str, object]], size: int) -> Iterator[list[dict[str, object]]]:
     for start in range(0, len(records), size):
         yield records[start : start + size]
-
-
-def _take_group(nodes: list[_PendingNode], start: int, budget: int) -> tuple[int, int]:
-    total = nodes[start].token_len
-    longest = nodes[start].token_len
-    end = start + 1
-    while end < len(nodes):
-        tokens = nodes[end].token_len
-        if total + tokens > budget:
-            break
-        total += tokens
-        longest = max(longest, tokens)
-        end += 1
-    return end, longest
 
 
 def _truncate_for_embed(text: str) -> str:
@@ -108,15 +91,13 @@ def _truncate_for_embed(text: str) -> str:
     return str(tokenizer.decode(ids, skip_special_tokens=True))
 
 
-async def _encode_group(library_id: int, batch: list[_PendingNode], key: str) -> list[dict[str, object]]:
-    vectors = await _embed([_truncate_for_embed(node.search_text) for node in batch], key)
-    return [
-        {"content_id": node.content_id, "library_id": library_id, "type": node.node_type, "embedding": vector}
-        for node, vector in zip(batch, vectors, strict=True)
-    ]
+async def _embed_node(library_id: int, node: _PendingNode) -> dict[str, object]:
+    key = f"embed:{library_id}:{node.content_id}"
+    vector = await _embed(_truncate_for_embed(node.search_text), key)
+    return {"content_id": node.content_id, "library_id": library_id, "type": node.node_type, "embedding": vector}
 
 
-async def _write_group(records: list[dict[str, object]], label: str) -> None:
+async def _write_records(records: list[dict[str, object]], library_id: int) -> None:
     write_t = time.time()
     async with get_sessionmaker()() as session, session.begin():
         for chunk in _upsert_chunks(records, UPSERT_CHUNK):
@@ -124,7 +105,7 @@ async def _write_group(records: list[dict[str, object]], label: str) -> None:
             await session.execute(
                 ins.on_conflict_do_update(index_elements=["content_id"], set_={"embedding": ins.excluded.embedding})
             )
-    logger.debug("embed_group %s write %.2fs", label, time.time() - write_t)
+    logger.debug("embed library=%d write rows=%d %.2fs", library_id, len(records), time.time() - write_t)
 
 
 async def _mark_documents_embedded(library_id: int) -> None:
@@ -136,41 +117,29 @@ async def _mark_documents_embedded(library_id: int) -> None:
         )
 
 
-def _split_groups(nodes: list[_PendingNode], budget: int) -> list[list[_PendingNode]]:
-    groups: list[list[_PendingNode]] = []
-    index = 0
-    while index < len(nodes):
-        end, _ = _take_group(nodes, index, budget)
-        groups.append(nodes[index:end])
-        index = end
-    return groups
-
-
-async def _embed_group(library_id: int, group_no: int, batch: list[_PendingNode]) -> int:
-    label = f"lib{library_id}.g{group_no}"
-    records = await _encode_group(library_id, batch, label)
-    await _write_group(records, label)
-    return len(records)
-
-
 async def embed_library(library_id: int) -> int:
     redis = get_redis()
     await redis.hset(f"embed:{library_id}", "t_start", time.time())
     await redis.expire(f"embed:{library_id}", EMBED_TTL)
     pending = await _pending_nodes(library_id)
-    pending.sort(key=lambda node: node.token_len)
     total = len(pending)
     logger.info("embed library=%d nodes=%d", library_id, total)
-    groups = _split_groups(pending, EMBED_BATCH_TOKENS)
     started = time.time()
     embedded = 0
-    jobs = [_embed_group(library_id, group_no, group) for group_no, group in enumerate(groups, 1)]
+    buffer: list[dict[str, object]] = []
+    jobs = [_embed_node(library_id, node) for node in pending]
     for coro in asyncio.as_completed(jobs):
-        embedded += await coro
-        elapsed = time.time() - started
-        rate = embedded / elapsed if elapsed > 0 else 0.0
+        buffer.append(await coro)
+        embedded += 1
+        if len(buffer) >= UPSERT_CHUNK:
+            await _write_records(buffer, library_id)
+            buffer = []
         await redis.hset(f"embed:{library_id}", mapping={"done": embedded, "total": total})
-        logger.info("embed library=%d %d/%d nodes %.1fs %.0f nodes/s", library_id, embedded, total, elapsed, rate)
+    if buffer:
+        await _write_records(buffer, library_id)
+    elapsed = time.time() - started
+    rate = embedded / elapsed if elapsed > 0 else 0.0
+    logger.info("embed library=%d done nodes=%d %.1fs %.0f nodes/s", library_id, embedded, elapsed, rate)
     await _mark_documents_embedded(library_id)
     await redis.hset(f"embed:{library_id}", mapping={"t_done": time.time(), "nodes": embedded})
     return embedded

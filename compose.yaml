@@ -19,9 +19,9 @@ services:
       - --kv-cache-dtype
       - auto
       - --gpu-memory-utilization
-      - "0.88"
+      - "0.90"
       - --max-num-seqs
-      - "160"
+      - "256"
       - --max-model-len
       - "65536"
       - --mm-processor-cache-gb
@@ -71,7 +71,7 @@ services:
       - --pooler-config
       - '{"task": "embed", "pooling_type": "CLS"}'
       - --gpu-memory-utilization
-      - "0.12"
+      - "0.10"
       - --max-num-seqs
       - "512"
       - --max-model-len
