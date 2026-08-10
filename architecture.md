@@ -107,33 +107,43 @@ text layer was found unable to reliably rule out tables, lists, or other non-pla
 vision model unconditionally. Splitting a page into per-region crops read separately was retired along with
 it.
 
-Concurrency is bounded in two layers that are deliberately separate:
+**Vision calls and text-only calls are two separate pools, not one**, because their cost profiles are not
+comparable: a page-image OCR request carries the full image-token cost of a rendered page, while a table's
+internal-structure call carries only the text tokens of a bounded grid — running both under one shared limit
+means the cheap, fast text calls queue behind the expensive, slow vision ones for no reason, and sizing a
+single pool for one profile starves the other. `citadel/services/capacity.py` holds both:
 
-- **Page rasterization and embedded-image resolution share one budget** — `get_vision_capacity()`, sized
-  `OCR_CONCURRENCY + VISION_BUFFER`. This caps how many rendered-but-not-yet-read images (from PDF pages or
-  from embedded images inside other formats) can exist at once, which is what keeps host memory bounded
-  regardless of how many documents or how many pages are in flight.
-- **Sending a page image to the model** has its own separate cap, `OCR_CONCURRENCY`, so the rasterize budget
-  can run slightly ahead of what's actually being read — the extra headroom (`VISION_BUFFER`) is buffer for
-  the rasterizer, not additional model throughput.
+- **`get_vision_capacity()`** — page rasterization and embedded-image resolution share this one budget, sized
+  `OCR_CONCURRENCY + VISION_BUFFER` (32 + 16 = 48 today). This caps how many rendered-but-not-yet-read images
+  (from PDF pages or from embedded images inside other formats) can exist at once, which is what keeps host
+  memory bounded regardless of how many documents or how many pages are in flight. Sending a page image to the
+  model draws from the narrower `OCR_CONCURRENCY` slice of it, so the rasterize budget can run slightly ahead
+  of what's actually being read — the extra headroom (`VISION_BUFFER`) is buffer for the rasterizer, not
+  additional model throughput.
+- **`get_text_capacity()`** — every text-only table-structuring call draws from this separate budget, sized
+  `TEXT_CONCURRENCY + TEXT_BUFFER` (64 + 32 = 96 today): a spreadsheet sheet's candidate-packed call
+  (`structure_tables`) and a markup-sourced table's single-table call (`structure_single_table`) both acquire
+  a slot here, one per actual model call, regardless of which document or which lane they came from. Sized
+  higher than the vision pool because a text call is materially cheaper per request, not because more of them
+  run in total — the two pools bound two different resources, not the same resource split two ways.
 
 A third, independent cap (`RENDER_CONCURRENCY`, derived from CPU count) bounds how many *documents* are
-concurrently having their pages walked into the render pipeline at all — unrelated to the vision-capacity
-budget, and not a signal that anything is stalled: a document queued behind it is exactly the intended
-backpressure, keeping rendered-but-unconsumed pages from piling up in memory ahead of what the model can
-actually process.
+concurrently having their pages walked into the render pipeline at all — unrelated to either capacity budget,
+and not a signal that anything is stalled: a document queued behind it is exactly the intended backpressure,
+keeping rendered-but-unconsumed pages from piling up in memory ahead of what the model can actually process.
 
-Beneath both of those sits a bound this system does not control: the inference server's own scheduler admits
+Beneath all of this sits a bound this system does not control: the inference server's own scheduler admits
 requests by available KV-cache/GPU-memory, not by request count, so the number of requests actually executing
 concurrently can be well below what's been admitted here — the rest queue inside the server. That queue is
 not starvation (the server is fully utilized while it's non-empty) but it does mean a client-side elapsed-time
 measurement on an individual request conflates real inference time with however long that request waited
 behind others for a slot; getting an honest split requires the server's own per-request queue and inference
-timing, not a client-side stopwatch.
+timing, not a client-side stopwatch. This applies to both pools identically, since both share the one inference
+server underneath — separating the client-side pools does not separate what happens inside it.
 
-Concurrency values and their effect on throughput and host memory are actively being re-measured against this
-shape of pipeline; the admission model above is current, the specific numbers are not yet re-verified and are
-therefore omitted here rather than carried over stale from the retired crop-based pipeline.
+The current numbers (32/16 vision, 64/32 text) are a deliberate first split, not yet load-tested against a
+real corpus at scale; their effect on throughput and host memory is actively being re-measured against this
+shape of pipeline, and will be revised from what's stated here once that measurement exists.
 
 ### Reading pages (ocr)
 

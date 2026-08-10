@@ -7,12 +7,12 @@ from typing import Any, cast
 
 from citadel.bus import get_redis
 from citadel.db import get_engine
-from citadel.services.batching import STREAM_BATCH, record_summary, summarize_document
+from citadel.services.batching import STREAM_BATCH, mark_summary_failed, record_summary, summarize_document
+from citadel.services.capacity import OCR_CONCURRENCY, Capacity, get_vision_capacity
 from citadel.services.ingestion import (
     BULK_READ_COUNT,
     GROUP,
     MAX_ATTEMPTS,
-    OCR_CONCURRENCY,
     PAGINATE_CONCURRENCY,
     RENDER_CONCURRENCY,
     RENDER_DOCS,
@@ -23,12 +23,10 @@ from citadel.services.ingestion import (
     STREAM_RASTERIZE,
     STREAM_STRUCTURE,
     STREAM_TABLE_STRUCTURE,
-    _Capacity,
     cleanup,
     ensure_group,
     fail_document,
     fail_page,
-    get_vision_capacity,
     handle_merge,
     handle_normalize,
     handle_ocr,
@@ -114,7 +112,7 @@ async def _retry_or_fail(
     return False
 
 
-async def _recover(stream: str, consumer: str, cap: _Capacity | None, spawn: Spawn) -> None:
+async def _recover(stream: str, consumer: str, cap: Capacity | None, spawn: Spawn) -> None:
     redis = get_redis()
     last = "0"
     while True:
@@ -136,7 +134,7 @@ async def _recover(stream: str, consumer: str, cap: _Capacity | None, spawn: Spa
 async def _pump(
     stream: str,
     consumer: str,
-    cap: _Capacity | None,
+    cap: Capacity | None,
     spawn: Spawn,
     downstream: Callable[[], Awaitable[int]] | None = None,
 ) -> None:
@@ -162,7 +160,7 @@ async def _pump(
 
 
 async def _drive(
-    stream: str, cap: _Capacity | None, spawn: Spawn, downstream: Callable[[], Awaitable[int]] | None = None
+    stream: str, cap: Capacity | None, spawn: Spawn, downstream: Callable[[], Awaitable[int]] | None = None
 ) -> None:
     await ensure_group(stream)
     consumer = f"{stream}-{get_settings().worker_id}"
@@ -171,7 +169,7 @@ async def _drive(
     await _pump(stream, consumer, cap, spawn, downstream)
 
 
-async def _normalize_job(cap: _Capacity, profiles: asyncio.Queue[str], msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _normalize_job(cap: Capacity, profiles: asyncio.Queue[str], msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_INGEST
     profile = await profiles.get()
     try:
@@ -189,7 +187,7 @@ async def _normalize_job(cap: _Capacity, profiles: asyncio.Queue[str], msg_id: s
         cap.release()
 
 
-async def _paginate_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _paginate_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_NORMALIZED
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
@@ -205,7 +203,7 @@ async def _paginate_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) ->
         cap.release()
 
 
-async def _render_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _render_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = render_stream(raw[b"doc_id"].decode())
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
@@ -221,7 +219,7 @@ async def _render_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> N
         cap.release()
 
 
-async def _rasterize_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _rasterize_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_RASTERIZE
     fields = await _decode_or_settle(stream, msg_id, raw)
     if fields is None:
@@ -236,7 +234,7 @@ async def _rasterize_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -
     await _retry_or_fail(stream, msg_id, raw, lambda: fail_page(fields["doc_id"], int(fields["page_idx"])))
 
 
-async def _ocr_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _ocr_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_PAGES
     terminal = True
     fields: dict[str, str] | None = None
@@ -282,7 +280,7 @@ async def _release_if_drained() -> None:
     logger.info("pipeline drained → released process pools")
 
 
-async def _merge_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _merge_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_MERGE
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
@@ -300,7 +298,7 @@ async def _merge_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> No
         cap.release()
 
 
-async def _structure_job(cap: _Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _structure_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_STRUCTURE
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
@@ -342,7 +340,7 @@ async def _batch_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
         await _settle(stream, msg_id)
     else:
         logger.error("batch failed doc=%s\n%s", fields.get("doc_id", "?"), _tb(error))
-        await _retry_or_fail(stream, msg_id, raw, lambda: fail_document(fields.get("doc_id", ""), "batch"))
+        await _retry_or_fail(stream, msg_id, raw, lambda: mark_summary_failed(int(fields.get("doc_id", "0"))))
     await record_summary(int(fields["library_id"]))
 
 
@@ -367,17 +365,17 @@ async def _resolve_batch_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
 
 
 async def normalize() -> None:
-    cap = _Capacity(NORMALIZE_CONCURRENCY)
+    cap = Capacity(NORMALIZE_CONCURRENCY)
     profiles = make_profile_pool(cap.limit)
     await _drive(STREAM_INGEST, cap, lambda mid, raw: _spawn(_normalize_job(cap, profiles, mid, raw)))
 
 
 async def paginate() -> None:
-    cap = _Capacity(PAGINATE_CONCURRENCY)
+    cap = Capacity(PAGINATE_CONCURRENCY)
     await _drive(STREAM_NORMALIZED, cap, lambda mid, raw: _spawn(_paginate_job(cap, mid, raw)))
 
 
-async def _claim_ready(consumer: str, cap: _Capacity, spawn: Spawn, room: int) -> int:
+async def _claim_ready(consumer: str, cap: Capacity, spawn: Spawn, room: int) -> int:
     redis = get_redis()
     docs = sorted(name.decode() for name in cast("set[bytes]", await redis.smembers(RENDER_DOCS)))
     if not docs:
@@ -405,7 +403,7 @@ async def _claim_ready(consumer: str, cap: _Capacity, spawn: Spawn, room: int) -
     return claimed
 
 
-async def _recover_render(consumer: str, cap: _Capacity, spawn: Spawn) -> None:
+async def _recover_render(consumer: str, cap: Capacity, spawn: Spawn) -> None:
     redis = get_redis()
     for name in cast("set[bytes]", await redis.smembers(RENDER_DOCS)):
         stream = render_stream(name.decode())
@@ -415,7 +413,7 @@ async def _recover_render(consumer: str, cap: _Capacity, spawn: Spawn) -> None:
 
 async def render() -> None:
     await ensure_group(STREAM_PAGES)
-    cap = _Capacity(RENDER_CONCURRENCY)
+    cap = Capacity(RENDER_CONCURRENCY)
     consumer = f"render-{get_settings().worker_id}"
 
     def spawn(mid, raw):
@@ -437,17 +435,17 @@ async def rasterize() -> None:
 
 
 async def ocr() -> None:
-    cap = _Capacity(OCR_CONCURRENCY)
+    cap = Capacity(OCR_CONCURRENCY)
     await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)))
 
 
 async def merge() -> None:
-    cap = _Capacity(MERGE_CONCURRENCY)
+    cap = Capacity(MERGE_CONCURRENCY)
     await _drive(STREAM_MERGE, cap, lambda mid, raw: _spawn(_merge_job(cap, mid, raw)))
 
 
 async def structure() -> None:
-    cap = _Capacity(STRUCTURE_CONCURRENCY)
+    cap = Capacity(STRUCTURE_CONCURRENCY)
     await _drive(STREAM_STRUCTURE, cap, lambda mid, raw: _spawn(_structure_job(cap, mid, raw)))
 
 

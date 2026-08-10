@@ -11,6 +11,7 @@ from citadel.llm import (
     structure_table_candidate,
 )
 from citadel.schemas.table import TableStructure
+from citadel.services.capacity import get_text_capacity
 from citadel.tabular.flag import column_kinds, payload_rows
 from citadel.tabular.materialize import MaterializedTable, materialize
 
@@ -113,9 +114,30 @@ def _drop_contained_specs(
 
 async def structure_single_table(grid: list[list[str]], *, key: str) -> MaterializedTable:
     text = _candidate_text(grid, 0)
-    spec = await structure_table_candidate(text, key)
+    cap = get_text_capacity()
+    await cap.acquire()
+    try:
+        spec = await structure_table_candidate(text, key)
+    finally:
+        cap.release()
     structure = _table_from_spec(spec, grid)
     return materialize(grid, structure)
+
+
+async def _collect_specs(
+    texts: list[str], packs: list[list[int]], prompt_name: str, sheet_no: int, label: str
+) -> list[dict]:
+    specs: list[dict] = []
+    cap = get_text_capacity()
+    for pack_no, pack in enumerate(packs):
+        payload = "\n\n".join(texts[index] for index in pack)
+        key = f"structure:{label or prompt_name}:{sheet_no}:{pack_no}"
+        await cap.acquire()
+        try:
+            specs.extend(await collect_structure_candidates(await emit_structure_candidates(payload, prompt_name, key)))
+        finally:
+            cap.release()
+    return specs
 
 
 async def structure_tables(
@@ -136,11 +158,7 @@ async def structure_tables(
     texts = [_candidate_text(grid, index, context[index], hints[index]) for index, grid in enumerate(candidates)]
     counts = await asyncio.to_thread(count_tokens_batch, texts)
     packs = pack_indices(counts, STRUCTURE_PAYLOAD_BUDGET)
-    specs: list[dict] = []
-    for pack_no, pack in enumerate(packs):
-        payload = "\n\n".join(texts[index] for index in pack)
-        key = f"structure:{label or prompt_name}:{sheet_no}:{pack_no}"
-        specs.extend(await collect_structure_candidates(await emit_structure_candidates(payload, prompt_name, key)))
+    specs = await _collect_specs(texts, packs, prompt_name, sheet_no, label)
     prepared: list[tuple[list[int], list[list[str]], TableStructure]] = []
     for spec in specs:
         blocks = [index for index in spec.get("blocks", []) if isinstance(index, int) and 0 <= index < len(candidates)]

@@ -10,7 +10,6 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
@@ -31,6 +30,7 @@ from citadel.models.document import Document
 from citadel.models.status import DocumentStatus
 from citadel.schemas.content import Block
 from citadel.schemas.document import DocProgress, DocumentRead, IngestResponse
+from citadel.services.capacity import get_vision_capacity
 from citadel.services.document import (
     begin_library_ingest,
     collect_tables,
@@ -96,41 +96,6 @@ PDFIUM_WORKERS = 4
 RENDER_TIMEOUT = 120
 PDF_POOL_MAX_TASKS = 100
 BULK_READ_COUNT = 256
-OCR_CONCURRENCY = 48
-VISION_BUFFER = 16
-
-
-@dataclass
-class _Capacity:
-    limit: int
-    inflight: int = 0
-    slot: asyncio.Event = field(default_factory=asyncio.Event)
-
-    def free(self) -> int:
-        return self.limit - self.inflight
-
-    def take(self) -> None:
-        self.inflight += 1
-
-    def release(self) -> None:
-        self.inflight -= 1
-        self.slot.set()
-
-    async def wait_free(self) -> None:
-        self.slot.clear()
-        if self.free() > 0:
-            return
-        await self.slot.wait()
-
-    async def acquire(self) -> None:
-        while self.free() <= 0:
-            await self.wait_free()
-        self.take()
-
-
-@lru_cache
-def get_vision_capacity() -> _Capacity:
-    return _Capacity(OCR_CONCURRENCY + VISION_BUFFER)
 
 
 T = TypeVar("T")

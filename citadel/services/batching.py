@@ -250,6 +250,11 @@ def _batch_row(doc_id: int, spec: BatchSpec, summary: str) -> ContentBatch:
     )
 
 
+async def mark_summary_failed(doc_id: int) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        await session.execute(update(Document).where(Document.id == doc_id).values(summarized_at=datetime.now(UTC)))
+
+
 async def summarize_document(fields: dict[str, str]) -> None:
     doc_id = int(fields["doc_id"])
     started = time.time()
