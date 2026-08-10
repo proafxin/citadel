@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
 from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
@@ -17,7 +18,6 @@ from typing import TypeVar
 
 from cachetools import LRUCache
 from fastapi import HTTPException, UploadFile
-from pebble import ProcessPool
 from PIL import Image, ImageStat
 from redis.commands.core import AsyncScript
 from redis.exceptions import ResponseError
@@ -93,20 +93,20 @@ RENDER_DPI = 300
 PAGINATE_CONCURRENCY = CPU_THIRD
 RENDER_CONCURRENCY = CPU_EIGHTH
 PDFIUM_WORKERS = 4
+RASTERIZE_PULL_CONCURRENCY = PDFIUM_WORKERS * 4
 RENDER_TIMEOUT = 120
-PDF_POOL_MAX_TASKS = 100
 BULK_READ_COUNT = 256
 
 
 T = TypeVar("T")
-_PROCESS_POOLS: list[ProcessPool] = []
+_PROCESS_POOLS: list[ProcessPoolExecutor] = []
 
 
 @lru_cache
-def get_pdfium_pool() -> ProcessPool:
+def get_pdfium_pool() -> ProcessPoolExecutor:
     ctx = multiprocessing.get_context("forkserver")
     ctx.set_forkserver_preload(["citadel.services.pdf"])
-    pool = ProcessPool(max_workers=PDFIUM_WORKERS, max_tasks=PDF_POOL_MAX_TASKS, context=ctx)
+    pool = ProcessPoolExecutor(max_workers=PDFIUM_WORKERS, mp_context=ctx)
     _PROCESS_POOLS.append(pool)
     return pool
 
@@ -116,12 +116,31 @@ def get_pdfium_gate() -> asyncio.Semaphore:
     return asyncio.Semaphore(PDFIUM_WORKERS)
 
 
+def _kill_pdfium_pool(pool: ProcessPoolExecutor) -> None:
+    for process in pool._processes.values():
+        process.kill()
+    pool.shutdown(wait=False, cancel_futures=True)
+
+
 async def _run_pdfium[T](func: Callable[..., T], *args: object, job_timeout: float) -> tuple[T, float, float]:
     mark = time.time()
     async with get_pdfium_gate():
         wait = time.time() - mark
         mark = time.time()
-        result = await asyncio.wrap_future(get_pdfium_pool().schedule(func, args=args, timeout=job_timeout))
+        pool = get_pdfium_pool()
+        logger.info("pdfium submit args=%r pool_processes=%d", args, len(pool._processes))
+        future = pool.submit(func, *args)
+        done, pending = await asyncio.wait({asyncio.wrap_future(future)}, timeout=job_timeout)
+        if pending:
+            logger.error("pdfium job exceeded %ds args=%r — killing pool", job_timeout, args)
+            get_pdfium_pool.cache_clear()
+            if _PROCESS_POOLS and _PROCESS_POOLS[-1] is pool:
+                _PROCESS_POOLS.pop()
+            _kill_pdfium_pool(pool)
+            msg = f"pdfium job exceeded {job_timeout}s args={args!r}"
+            raise TimeoutError(msg)
+        logger.info("pdfium done args=%r elapsed=%.1fs", args, time.time() - mark)
+        result = next(iter(done)).result()
         return result, wait, time.time() - mark
 
 
@@ -147,8 +166,7 @@ def _reap_profile_dirs() -> None:
 def release_idle() -> None:
     while _PROCESS_POOLS:
         pool = _PROCESS_POOLS.pop()
-        pool.stop()
-        pool.join()
+        pool.shutdown(wait=True, cancel_futures=True)
     get_pdfium_pool.cache_clear()
     gc.collect()
     ctypes.CDLL("libc.so.6").malloc_trim(0)
@@ -157,8 +175,7 @@ def release_idle() -> None:
 async def shutdown() -> None:
     while _PROCESS_POOLS:
         pool = _PROCESS_POOLS.pop()
-        pool.stop()
-        pool.join()
+        pool.shutdown(wait=True, cancel_futures=True)
     _reap_profile_dirs()
     if get_redis.cache_info().currsize:
         await get_redis().aclose()

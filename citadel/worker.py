@@ -8,13 +8,14 @@ from typing import Any, cast
 from citadel.bus import get_redis
 from citadel.db import get_engine
 from citadel.services.batching import STREAM_BATCH, mark_summary_failed, record_summary, summarize_document
-from citadel.services.capacity import OCR_CONCURRENCY, VISION_BUFFER, Capacity, get_vision_capacity
+from citadel.services.capacity import OCR_CONCURRENCY, Capacity, get_vision_capacity
 from citadel.services.document import mark_library_ready
 from citadel.services.ingestion import (
     BULK_READ_COUNT,
     GROUP,
     MAX_ATTEMPTS,
     PAGINATE_CONCURRENCY,
+    RASTERIZE_PULL_CONCURRENCY,
     RENDER_CONCURRENCY,
     RENDER_DOCS,
     STREAM_INGEST,
@@ -476,7 +477,7 @@ async def render() -> None:
 
 
 async def rasterize() -> None:
-    cap = Capacity(OCR_CONCURRENCY + VISION_BUFFER)
+    cap = Capacity(RASTERIZE_PULL_CONCURRENCY)
     await _drive(STREAM_RASTERIZE, cap, lambda mid, raw: _spawn(_rasterize_job(cap, mid, raw)))
 
 
