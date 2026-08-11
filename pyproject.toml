@@ -37,7 +37,7 @@ dependencies = [
 dev = [
     "coverage>=7.15.4",
     "mypy>=2.3.0",
-    "pre-commit>=4.6.1",
+    "pre-commit>=4.6.2",
     "pytest>=9.0.3",
     "scikit-learn>=1.9.0",
 ]

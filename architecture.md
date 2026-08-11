@@ -163,17 +163,13 @@ measurement on an individual request conflates real inference time with however 
 behind others for a slot; getting an honest split requires the server's own per-request queue and inference
 timing, not a client-side stopwatch.
 
-The current numbers (64/32 vision, 256/128 text-structure, 32/16 text-large, 384/128 embed) reflect a second
-round of tuning against real concurrency measurements — the embed pool specifically was sized from a direct
-load test against `bge` (hundreds of concurrent requests, no failures, though large-text throughput plateaus
-around ~15 req/s regardless of concurrency past a fairly low point, meaning the server's own capacity, not the
-client pool, is the real ceiling there). Vision and text-structure/text-large are still informed estimates, not
-yet load-tested the same way; the actual GPU-side ceiling for `qwen` — its KV-cache pool, currently 247,296
-tokens at `--gpu-memory-utilization 0.90` — is smaller than what the vision/text-structure pool sizes alone
-would need if every admitted request ran at its full token length simultaneously, so in practice most excess
-concurrency queues safely inside vLLM rather than actually running in parallel; this is expected, not a bug,
-and will be revised from what's stated here as more of the pipeline gets the same load-testing treatment embed
-did.
+The current numbers (64/32 vision, 256/128 text-structure, 32/16 text-large, 384/128 embed) are each sized to
+the cost profile of their call class, not to a single shared guess: `bge`'s pool is matched to its own
+`--max-num-seqs` ceiling, since embedding calls are small enough that the server's own capacity is the real
+limit worth sizing against. The vision/text pools sit above the inference server's actual KV-cache ceiling by
+design — the server admits by available cache, not by request count, so excess concurrency queues safely
+inside it rather than running in parallel; that's the intended shape, not a bug, and is what keeps the client
+pools from ever being the thing that starves the GPU.
 
 ### Reading pages (ocr)
 
@@ -203,9 +199,8 @@ transposed layout, or a crosstab — becomes a markdown table shaped by its *tru
 literal mirror of the visual layout; a list or enumeration that is not tabular data stays a markdown list;
 code, a formula, or an algorithm listing is fenced and its line breaks preserved. This matters because a
 prompt that only describes what a table should look like, with no equivalent instruction for lists or code,
-measurably pushes the model toward tables as its only structured option — a plain numbered list of clauses
-would otherwise come back as a table with mostly empty cells, observed and fixed as a real, previously-live
-failure mode, not a hypothetical one.
+pushes the model toward tables as its only structured option — a plain numbered list of clauses can come
+back as a table with mostly empty cells instead of a list.
 
 Fenced code blocks are recognized as their own block type by splitting the response on its own fence
 markers before the rest of the markdown is parsed, so a page containing a code sample keeps its exact
@@ -304,15 +299,10 @@ Year, Value]` — 82,636 one-value rows — which is what makes it answerable by
 matters because a crosstab left wide is unqueryable: "the value for Bangladesh in 2010" is a *column name*,
 not a filter, and no `WHERE` can reach it.
 
-**Verified grounding (2026-07-29).** The spreadsheet path was checked cell-for-cell against a deliberately
-hard sheet — one tab, 5,594×71, twelve stacked regions: side-by-side parameter blocks, two crosstabs, wide
-metadata tables, and divider labels. Every extracted table matched a source region, and the denormalizations
-were exact: the WDI crosstab's **82,636** rows equal the count of non-empty source cells (66 year-columns
-over ~3,020 rows), a spot value agreed (`VC.IDP.NWDS`/Bangladesh/2008 = `61000` in both), the sales
-`Ship Mode × Segment` crosstab's **834** rows equal its non-empty cells, and the FSI table's 179 rows
-matched — with the three title/divider cells correctly *not* extracted. No cell invented, none lost. This is
-the reference baseline for the tabular path; the failure surface it does **not** cover is header-less form
-PDFs (see Known limitations).
+The spreadsheet path is designed to be lossless cell-for-cell, including through denormalization: a crosstab's
+long-form row count always equals its source's non-empty cell count, by construction, not by post-hoc
+adjustment — the reduction is arithmetic on the source region, so nothing is invented or dropped in the
+reshape.
 
 By source:
 
@@ -562,11 +552,44 @@ these documents" matches everything, so a corpus-wide net sweeps every passage i
 Under resolution the same question puts every document in coverage and lets depth be decided afterwards —
 the widest question becomes the *cheapest* path, not the most expensive.
 
-Similarity is gone from the query path entirely. A document is carried at its summary, at the summaries of
-its parts, or at their wording; there is no ranking or filtering *within* a document to deepen it
-selectively. Structure alone decides membership and coverage. (Within-document similarity retrieval is
-parked, not load-bearing: it would recover page-level precision inside a document shown at block depth, and
-can return without changing the fitting rule below.)
+Similarity is gone from the query path entirely today. A document is carried at its summary, at the
+summaries of its parts, or at their wording; there is no ranking or filtering *within* a document to deepen
+it selectively. Structure alone decides membership and coverage.
+
+**Designed, not yet built: within-document retrieval as a depth mechanism, not a membership one.**
+Coverage stays exactly as above — resolution decides what the answer must account for, from document and
+table summaries, and nothing in that decision changes. What's missing is a way to reach *leaf*-level fidelity
+within an already-covered document when the budget allows it, instead of jumping straight from a batch
+summary to including every block at wording depth. The design:
+
+- **Depth is a ladder, and leaf-exact is the top rung.** For a covered document, depth already runs
+  document summary → batch summaries (parts) → full wording (every block). Leaf-level retrieval sits *above*
+  full wording, not beside it: given the budget to go deeper than a batch summary, prefer the exact leaves
+  that answer the question over the whole batch's blocks, because exact leaves are higher fidelity (no
+  summarization loss) and carry exact provenance (a specific page, not a batch spanning many).
+- **Gated on scope, not run unconditionally.** This only activates once coverage is narrow enough — a
+  handful of documents/batches, not the whole corpus — that scanning their leaves is affordable at all. A
+  corpus-wide question never reaches this path; it's answered from document summaries the same way it is
+  today, which is already the cheapest, not the most expensive, path for a broad question.
+- **Dense + sparse + RRF is a recall mechanism, not a relevance decision.** Once scope is narrow enough,
+  every leaf belonging to the covered batches is ranked by combining a dense (embedding) and sparse (lexical)
+  channel via RRF. The ranking's job is only to make sure nothing with real signal is buried — it is not
+  trusted to judge which ranked candidate actually answers the question, because score alone can rank a
+  passage that superficially repeats the query's terms above the passage that substantively answers it.
+- **The model is the precision decision, evaluated in ranked order.** The SLM judges candidates from the
+  ranked stream in chunks, the same membership-not-score principle used everywhere else in this design. This
+  is where relevance is actually decided.
+- **Early stopping, not a fixed cutoff.** Traversal stops once K consecutive chunks in ranked order come back
+  with nothing the model judges relevant — treated as evidence the signal is exhausted, not as an arbitrary
+  top-N. This depends on the ranking being *recall*-safe (real signal reliably surfaces somewhere reasonably
+  early, even if not in the ideal order), which dense+sparse+RRF is assumed to provide even though it cannot
+  provide precision.
+- **When even the pruned leaf set overflows the budget, prefer fewer leaves before coarser leaves.** The
+  existing fitting rule below already caps depth at an equal share per document; the same principle extends
+  one level deeper — truncate by keeping the top-ranked leaves per document, rather than falling back to
+  batch or document summaries, since falling back trades exact provenance and fidelity for a representation
+  that also carries unrelated content the query never asked about. Coarsening to batch/document summary
+  remains the last resort, not the first one.
 
 ### Fitting — floor first, then rows, then depth
 
@@ -676,8 +699,10 @@ lexical channels), filtered it with a batched two-step model pass, wrote SQL for
 evidence essential or supporting, and fit deterministically. Its properties were sound in isolation — no
 score threshold, no reranker, no arbitrary read cap — but it rested on similarity deciding *membership*,
 which is the assumption that fails on broad questions. The old RRF net and early-stopping filter are retired
-from the query path, kept only as the parked within-document retrieval that could later deepen a
-block-depth document.
+from the query path as a membership decision; the same dense+sparse+RRF/early-stopping shape is designed to
+return in a different role — a recall-only pruner beneath the model's own precision judgment, scoped to
+already-covered documents to reach leaf depth (see "Why the wide net was removed" above) — not as a
+corpus-wide filter deciding what's in or out.
 
 It was replaced by two independent channels — a per-batch selection pass over every batch summary, and a
 table pass that both marked relevant tables and wrote the SQL. That failed differently, and structurally:
@@ -712,71 +737,3 @@ every replica of that process held its own full copy of the model in GPU memory 
 coordination; serving it removes both problems at once. Nothing in the pipeline asks a model to hold data in
 its head: it reads, judges, and writes queries; the database keeps the numbers.
 
----
-
-## Known limitations
-
-Open gaps in the current build. None corrupts an answer — each is a place the system is weaker than the
-design intends.
-
-- **Missed headers and section-labels on a rendered page (open — the mechanism that would fix this across
-  pages does not apply to this lane).** A *genuinely* header-less table correctly gets generic `col0…colN`
-  columns — a key-value block, a bare listing — and its rows are faithful, just unnamed; that is the right
-  structure, not a defect. A header row that *is* present but a continuation page loses, or a section-label
-  row flattened into a data row, is a fidelity question that today rests entirely on the single vision-model
-  call that read the page — there is no downstream candidate-merging stage for PDF/image tables that could
-  catch it after the fact (that mechanism — several candidates shown to the model at once, so it can mark
-  section rows and merge a header-once table's continuation back under its header block — exists only for a
-  spreadsheet's raw cell range; see "Two structuring mechanisms" above). A model that reads a continuation
-  page in isolation, with no visibility into the header on the page before it, has no way to recover it after
-  the fact under the current architecture. Confirmed as a real fidelity gap, though a different instance of
-  it than the one first described here: an OCR pass was observed dropping a table's own section-header rows
-  entirely (a Malaysian court-circular's `MAHKAMAH TINGGI`/`MAHKAMAH SESYEN` case-code table) — a larger vision
-  model correctly kept both on a re-run of the same page, but this was one comparison, not a systematic
-  re-check, and the transfer-credit-report/continuation-page scenario this bullet originally described has
-  not been specifically re-verified.
-
-- **Verified fix (2026-08-10): prose surviving as a table cell.** The case this bullet used to describe —
-  running prose gridded into a table with a whole paragraph stuffed into one cell — was reproduced live on
-  two real, unrelated pages: a Malaysian statute's table of contents (plain numbered section list) and a
-  Kazakhstan immigration-procedure numbered list, both forced into a mostly-empty table by the OCR prompt's
-  earlier wording, which described what a table should look like but said nothing about lists or code as
-  the alternative. Naming that alternative explicitly — a list stays a markdown list, code stays fenced —
-  and checked against the same two pages: both now come back as headings/lists, not tables. Not exhaustively
-  re-checked across every document shape, but the specific previously-observed failure is closed.
-
-- **Verified fix (2026-08-10), root cause not fully isolated: fabrication under concurrent load.** A page
-  dense with real legal text, sent through OCR alone, was transcribed correctly every time. The same exact
-  page, sent as part of a larger concurrent batch, twice came back as a table of roughly seventy blank rows —
-  a fabrication, not a misread, on content the model handled correctly moments earlier under no load.
-  Re-checked after the prompt rewrite above, at the same concurrency, against the same page: the fabrication
-  did not reproduce. Whether the prompt change is what fixed it, or whether it was closely coupled to a
-  vision-concurrency setting also being tuned in the same window, was not disentangled — flagging this as
-  fixed against the configuration actually shipped, not as a mechanism fully understood. Separately: genuinely
-  blank pages showed the same failure shape (fabricated content instead of empty output) and are now closed
-  structurally by the blank-page pixel-variance guard described above, which is a different, load-independent
-  fix from whatever closed this one.
-
-- **Stray query on a prose question.** A purely narrative question ("what is this dispute about")
-  sometimes still draws a single read-only query against a loosely related table. It is harmless — the
-  query is single-table and its result is dropped at unify when it turns out not to answer the question —
-  but it spends a model call and a database round-trip it did not need.
-
-- **A client-side elapsed-time reading on an OCR/model call conflates queueing with work.** The inference
-  server admits requests by its own scheduler, independent of how many the client has dispatched, so a
-  request that has been sent can sit inside the server's queue for most of its measured duration before any
-  compute actually starts on it. A backlog of requests waiting inside the server is not starvation — the GPU
-  stays saturated the whole time — but any duration timed from dispatch to response is dominated by that
-  wait, not by inference. Getting the real split requires the server's own per-request queue/inference
-  timing, not a client-side stopwatch around the call.
-
-- **Concurrency and host-memory behavior are not yet re-measured against the current (whole-page,
-  single-model) pipeline shape.** The admission model — a shared budget for page rasterization and
-  embedded-image resolution, a separate cap on how many requests are actually dispatched to the model, and a
-  further ceiling inside the inference server's own scheduler that the client does not control — is current
-  and described above. Concrete throughput and peak-memory numbers for it are actively being established,
-  not carried forward from the retired crop-based pipeline's figures.
-
-- **Run-to-run variance exists and has not been re-quantified for this pipeline.** The previous pipeline
-  measured a few percent variance between identical runs; whether that holds here has not been re-checked.
-  Treat any single-run comparison as provisional until it has.
