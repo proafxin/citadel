@@ -13,7 +13,7 @@ CPU_EIGHTH = max((os.cpu_count() or 8) // 8, 1)
 
 QWEN_MODEL = "qwen"
 QWEN_HF_REPO = "Qwen/Qwen3-VL-8B-Instruct-FP8"
-QWEN_CACHE_DIR = Path.home() / ".cache" / "citadel-qwen" / "hub"
+QWEN_CACHE_DIR = Path.home() / ".cache" / "citadel-tokenizer"
 EMBED_MODEL = "BAAI/bge-m3"
 EMBED_SERVED_NAME = "bge"
 EMBED_MAX_TOKENS = 8192
