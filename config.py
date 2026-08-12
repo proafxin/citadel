@@ -12,7 +12,7 @@ CPU_THIRD = max((os.cpu_count() or 3) // 3, 1)
 CPU_EIGHTH = max((os.cpu_count() or 8) // 8, 1)
 
 QWEN_MODEL = "qwen"
-QWEN_HF_REPO = "Qwen/Qwen3.5-9B"
+QWEN_HF_REPO = "Qwen/Qwen3-VL-8B-Instruct-FP8"
 QWEN_CACHE_DIR = Path.home() / ".cache" / "citadel-qwen" / "hub"
 EMBED_MODEL = "BAAI/bge-m3"
 EMBED_SERVED_NAME = "bge"

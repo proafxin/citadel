@@ -1,37 +1,97 @@
 # Table Structure
 
-We pulled several regions out of one document that we think might be tables — we are not sure. Some may turn out to be a heading, a caption, or plain running text that only looks tabular. Each region is called a **block**, numbered `0`, `1`, and so on in the order it appears. Each block is shown as its size, its column value-kinds, and selected rows as `row N: cell | cell | ...` where N is the row number **within that block** — you see the headers and unusual rows in full plus a sample of ordinary rows. You never return data values beyond what identifies the structure.
+We pulled several regions out of one document that we think might be tables — we are not sure. Some may turn
+out to be a heading, a caption, or plain running text that only looks tabular. Each region is called a
+**block**, numbered `0`, `1`, and so on in the order it appears. Each block is shown as its size, its column
+value-kinds, and selected rows as `row N: cell | cell | ...` where N is the row number **within that block**
+— you see the headers and unusual rows in full plus a sample of ordinary rows. For each real table you find
+among these blocks, give back the table itself, correctly structured, as a markdown table.
 
-For each block, decide whether it is a real table. For every block that is: say so, and report whether it is rotated (`transposed`), its schema (the columns that name what each row holds), and its metadata (`title`, `notes`) — the fields below spell out exactly what to give for each.
+Every row belongs to exactly one table — never two. Which table a row belongs to is decided by its columns:
+rows with the same columns are the same table; rows with different columns are different tables. The same
+rows are never reported twice, not even to show a title separately from the rest — a title is metadata on
+the one table, not a table of its own.
 
-Every row belongs to exactly one table — never two. Which table a row belongs to is decided by its columns: rows with the same columns are the same table; rows with different columns are different tables. The same rows are never correctly reported twice, not even to show a title separately from the rest — a title is one field on the same table entry, not a table of its own. If two entries you are about to report would cover the same rows, that is not two tables: decide which single entry those rows belong to, and report only that one.
+1. **Decide which blocks are real tables.** A real table records data: rows of values under columns that
+   name what each value is. A block that is a page banner, a heading, a caption, or a line of running text
+   dressed as columns is NOT a table — leave it out of your response entirely.
+2. **Group blocks that are one table split apart.** Splitting the document sometimes cuts one table into
+   several blocks: it continues onto the next page or region, or a blank row breaks it. Signs: the blocks
+   have the SAME columns in the same order, and read on naturally. A continuation often has NO header of its
+   own (its columns look generic), but the same shape as the block above it — that continuation is the same
+   table; write it as one combined markdown table covering both blocks' rows. Blocks with DIFFERENT columns
+   are DIFFERENT tables.
+3. **Split a block that holds more than one table.** One block can also stack two or more tables by ROW in
+   the same region — a metadata strip sitting directly above an unrelated item table, or a summary table
+   tacked onto the end of a data table. If a row partway through the block names DIFFERENT columns than the
+   rows above it, or opens a fresh label-value section, that row starts a new table, not more rows of the one
+   above it. Report each as its own markdown table.
 
-1. **Decide which blocks are real tables.** A real table records data: rows of values under columns that name what each value is. A block that is a page banner, a heading, a caption, or a line of running text dressed as columns is NOT a table — leave it out entirely.
-2. **Group blocks that are one table split apart.** Splitting the document sometimes cuts one table into several blocks: it continues onto the next page or region, or a blank row breaks it. Signs: the blocks have the SAME columns in the same order, and read on naturally. A continuation often has NO header of its own (its columns look generic), but the same shape as the block above it — that continuation is the same table. Blocks with DIFFERENT columns are DIFFERENT tables.
-3. **Split a block that holds more than one table.** One block can also stack two or more tables by ROW in the same region — a metadata strip sitting directly above an unrelated item table, or a summary table tacked onto the end of a data table. If a row partway through the block names DIFFERENT columns than the rows above it, or opens a fresh label-value section, that row starts a new table, not more rows of the one above it. Report each as its own entry with the SAME block number, its own header_rows, and row_end bounding it to just before the next one starts. When you report several entries for the same block, their row ranges must never overlap: the earlier entry's row_end must land on the row directly before the later entry's own header row (or its first data row, if it has none) — never claim the same row in two entries.
-
-   **Do not confuse this with a lone-label title.** If every row beneath a lone-label row keeps the SAME shape it sits atop — same column count, no header row of its own — that label is a title for all of those rows together, ONE table entry (see the title rule below). Reporting it as a second, one-row entry alongside the real table is always wrong, even if you also report the real table correctly: it is never two tables, and the two entries would overlap on that row. If you are unsure whether a lone label starts a new table or titles the one below it, check whether the rows below it change shape — no shape change means it is a title, full stop, not a table of its own.
-4. **Report each real table's structure**, using the row/column numbers of its **first** block.
-
-For every table you report, give:
-
-- **blocks** — the block number(s) that make up this table, in order. One number if it stands alone; several if it is one table split across blocks.
-- The structure fields below. Row/column indices are within the FIRST block listed.
+   **Do not confuse this with a lone-label title.** If every row beneath a lone-label row keeps the SAME
+   shape it sits atop — same column count, no header row of its own — that label is a title for all of those
+   rows together, ONE table (see the title rule below), not a second one-row table. If you are unsure whether
+   a lone label starts a new table or titles the one below it, check whether the rows below it change shape
+   — no shape change means it is a title, full stop.
 
 ## orientation
 
-Most tables list one record per row with field names along the top. A few are turned on their side: field names run DOWN the first column, one record per following column. If so, set **transposed** true and stop giving header/columns for it. Otherwise **transposed** false.
+Most tables list one record per row with field names along the top — write it that way. A few are turned on
+their side: field names run down the first column, one record per following column — if so, transpose it so
+your markdown table has one row per record instead of mirroring the block literally.
 
 ## structure
 
-Each column is one field, each row one record.
+Each column is one field, each row one record. Every cell you write is copied verbatim from the source —
+never invent, infer, or alter a value.
 
-- **col_start**, **col_end** — first/last column index (0-based, inclusive).
-- **header_rows** — the row number(s) whose cells NAME the columns. A header labels columns; it is not data. A row of values (even a total or top line) is data. A row holding one label with the rest empty (a title/banner) is NOT a header — put a title in `title`, other such text in `notes`. A block of label-and-value pairs — ONE left column of field names beside EXACTLY ONE right column of their values — has NO header: return `header_rows` empty, leave `columns` empty, never promote a label-beside-value row. This carve-out is for that strict 2-column shape ONLY: a table with a left column of field-like names ("Main read pattern", "Dataset size", ...) followed by TWO OR MORE value columns (e.g. one per system being compared) is a real comparison table, not a label-value block — its first row still names every column, even though column 0 reads like a list of labels, so give it a header row like any other table. When a header spans more than one row — a top band grouping columns, a row of narrower sub-labels beneath it, sometimes a further row of symbols or units — include EVERY one of those rows in `header_rows`, not only the first: a row is still a header as long as its cells keep NAMING columns, even if the row above it already named the broader group they belong to. A row of numbers stepping in a steady progression across the columns (ages, years, bins, ranks, ...) is very likely naming a dimension rather than recording one, even though every cell in it is a plain number that would otherwise read as data — weigh it against the rest of the block's shape and treat it as a header when it fits that pattern; a genuine data row can occasionally step evenly too, so still confirm from context before excluding it.
-- **row_end** — the last row (within this block) that belongs to this table; its data runs from just after the last header row through row_end, inclusive. Normally the block's last row — but stop earlier if a second table starts later in the same block (see point 3 above), so the row where that one begins is excluded here. Also stop earlier if trailing rows stop being genuine data of this table's own kind — an abrupt label, or a row whose cells are all the same value where real data would vary across columns — even without opening a fresh table of their own; bound `row_end` before them rather than folding them in as more rows.
-- **columns** — the resolved name of every column from col_start to col_end. When the header spans several rows, or a heading covers several columns and sits only in the first, combine them into one clear name per column. A top-level label spanning several columns is not one column's name — it is shared by all of them, so combine it with EACH of its own sub-labels to name every one of those columns individually (a "Ship Mode: First Class" heading over "Consumer / Corporate / Home Office" sub-columns needs three different names — "First Class Consumer", "First Class Corporate", "First Class Home Office" — not one name repeated or left blank for the rest). This still applies when a header spans MORE than two rows and one of those rows is blank for some columns (e.g. a further row naming only the key columns, empty everywhere else): a column's name still comes from combining whichever of its own header rows actually hold text, never a generic placeholder invented because one of the rows happened to be blank there. The same combining applies when a group label covers a paired name-and-value shape rather than named sub-columns — one column holding field names, the very next holding their values, with nothing of its own to name that value column: combine the group label into it too ("Call Parameters" next to its value column becomes "Call Parameters Value"), so two such pairs under different group labels never both end up bearing only the bare word "Value". Never two columns with the same name, and never leave a column unnamed because it shares a top-level label with another. A combined name is always plain, single-line text — join any line break carried in a cell's own text with a space rather than including it literally.
-- **section_rows** — row numbers of SECTION-LABEL rows inside this table: a row carrying one label (the rest empty or that label spanned across the row) that introduces the group of rows beneath it and shares this table's columns. List them; they are neither header nor data. A label introducing DIFFERENT columns is a separate table; a single label naming the whole table is a `title`.
+- Write ONE header row naming every column, then the data rows. A header labels columns; it is not data. A
+  row of values (even a total or top line) is data, never a header. A block of label-and-value pairs — one
+  left column of field names beside exactly one right column of their values — has no real header of its
+  own: write it with a plain first row anyway, but do not invent column names. This carve-out is for that
+  strict 2-column shape ONLY: a left column of field-like names ("Main read pattern", "Dataset size", ...)
+  followed by TWO OR MORE value columns (e.g. one per system being compared) is a real comparison table, not
+  a label-value block — it has a genuine header row like any other table. When a source header spans more
+  than one row — a top band grouping columns, a row of narrower sub-labels beneath it, sometimes a further
+  row of symbols or units — combine ALL of those rows into your one written header row, not just the first: a
+  row is still part of the header as long as its cells keep NAMING columns, even if the row above it already
+  named the broader group they belong to. A row of numbers stepping in a steady progression across the
+  columns (ages, years, bins, ranks, ...) is very likely naming a dimension rather than recording one, even
+  though every cell in it is a plain number that would otherwise read as data — weigh it against the rest of
+  the block's shape and treat it as header when it fits that pattern; a genuine data row can occasionally
+  step evenly too, so confirm from context before excluding it.
+- Column names: when the header spans several rows, or a heading covers several columns and sits only in the
+  first, combine them into one clear name per column. A top-level label spanning several columns is shared
+  by all of them, so combine it with EACH of its own sub-labels to name every one of those columns
+  individually (a "Ship Mode: First Class" heading over "Consumer / Corporate / Home Office" sub-columns
+  needs three different names — "First Class Consumer", "First Class Corporate", "First Class Home Office" —
+  not one name repeated or left blank for the rest). This still applies when a header spans MORE than two
+  rows and one of those rows is blank for some columns: a column's name still comes from combining whichever
+  of its own header rows actually hold text, never a generic placeholder invented because one row was blank
+  there. The same combining applies when a group label covers a paired name-and-value shape rather than
+  named sub-columns — one column holding field names, the very next holding their values, with nothing of
+  its own to name that value column: combine the group label into it too ("Call Parameters" next to its
+  value column becomes "Call Parameters Value"). Never two columns with the same name. A combined name is
+  always plain, single-line text — join any line break carried in a cell's own text with a space.
+- Stop before any trailing rows that are not genuine data of this table's own kind — an abrupt label, or a
+  row whose cells are all the same value where real data would vary across columns.
+- A SECTION-LABEL row inside the table — one label, the rest of the row empty, introducing the group of rows
+  beneath it, sharing this table's columns — stays in the table as its own row, written with only its first
+  cell filled and the rest empty. It is neither header nor data; do not fold it into a neighboring row or
+  drop it. A label introducing DIFFERENT columns is a separate table (see point 3), not a section row.
 
-Report the tables top to bottom. `transposed` is `false` and `section_rows`/`columns` are `[]` when they do not apply. Respond ONLY with a JSON object like:
-{"tables": [{"blocks": [0], "transposed": false, "header_rows": [0], "row_end": 6, "col_start": 0, "col_end": 3, "columns": ["Region", "Q1", "Q2", "Q3"], "section_rows": [], "title": "", "notes": []}, {"blocks": [1], "transposed": false, "header_rows": [], "row_end": 0, "col_start": 0, "col_end": 4, "columns": [], "section_rows": [], "title": "", "notes": []}, {"blocks": [1], "transposed": false, "header_rows": [1], "row_end": 4, "col_start": 0, "col_end": 4, "columns": ["No", "Item", "Qty", "Price", "Amount"], "section_rows": [], "title": "", "notes": []}, {"blocks": [2, 3], "transposed": false, "header_rows": [0], "row_end": 9, "col_start": 0, "col_end": 4, "columns": ["Course", "Title", "Units", "Grade", "Requirement"], "section_rows": [], "title": "", "notes": []}, {"blocks": [4], "transposed": false, "header_rows": [], "row_end": 4, "col_start": 0, "col_end": 1, "columns": [], "section_rows": [], "title": "Calculated Values", "notes": []}]}
-The two `"blocks": [1]` entries show a split: block 1's row 0 is its own label-value table, and its item table starts fresh at row 1. Block 4's row 0 is a lone label ("Calculated Values", the rest of the row empty) naming the whole block: it goes in `title`, not `header_rows`, and `row_end` starts counting from row 1 — the label itself is never a row of the table.
+## response format
+
+For each real table, write:
+
+```
+### blocks: 0
+### title: optional title, omit the line if none
+### notes: optional footnotes, semicolon-separated; omit the line if none
+| Region | Q1 | Q2 | Q3 |
+|---|---|---|---|
+| ... | ... | ... | ... |
+```
+
+`blocks` lists every block number that makes up this table, in the order they appear, comma-separated (e.g.
+`### blocks: 2, 3` for one table split across two blocks). Report tables top to bottom, one after another,
+nothing else in your response.

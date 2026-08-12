@@ -1,17 +1,12 @@
 import asyncio
 import logging
+import re
 import time
 from collections import Counter
 
-from citadel.llm import (
-    collect_structure_candidates,
-    count_tokens_batch,
-    emit_structure_candidates,
-    pack_indices,
-    structure_table_candidate,
-)
-from citadel.schemas.table import TableStructure
+from citadel.llm import collect_text, count_tokens_batch, emit_structure_candidates, emit_structure_single, pack_indices
 from citadel.services.capacity import get_text_capacity
+from citadel.services.tabular import grid_from_markdown, single_table_structure
 from citadel.tabular.flag import column_kinds, payload_rows
 from citadel.tabular.materialize import MaterializedTable, materialize
 
@@ -19,6 +14,10 @@ logger = logging.getLogger(__name__)
 
 _MAX_CELL = 40
 STRUCTURE_PAYLOAD_BUDGET = 3800
+
+_BLOCKS_TAG = re.compile(r"^###\s*blocks:\s*([\d,\s]+)", re.IGNORECASE)
+_TITLE_TAG = re.compile(r"^###\s*title:\s*(.+)$", re.IGNORECASE)
+_NOTES_TAG = re.compile(r"^###\s*notes:\s*(.+)$", re.IGNORECASE)
 
 
 def _row_line(index: int, row: list[str], width: int) -> str:
@@ -28,11 +27,6 @@ def _row_line(index: int, row: list[str], width: int) -> str:
 
 def _payload_text(grid: list[list[str]], indices: list[int], width: int) -> str:
     return "\n".join(_row_line(index, grid[index], width) for index in indices)
-
-
-def stack_candidates(grids: list[list[list[str]]]) -> list[list[str]]:
-    width = max((len(row) for grid in grids for row in grid), default=0)
-    return [[row[index] if index < len(row) else "" for index in range(width)] for grid in grids for row in grid]
 
 
 def _candidate_text(grid: list[list[str]], index: int, adjacent: str = "", header_hint: list[int] | None = None) -> str:
@@ -48,68 +42,61 @@ def _candidate_text(grid: list[list[str]], index: int, adjacent: str = "", heade
     return f"{index}: {len(grid)} rows, {width} cols; column kinds: {hint}{context}{header_line}\n{body}"
 
 
-def _table_from_spec(spec: dict, grid: list[list[str]]) -> TableStructure:
-    height = len(grid)
-    width = max((len(row) for row in grid), default=0)
-    col_start = max(0, min(int(spec.get("col_start", 0)), max(width - 1, 0)))
-    col_end = max(col_start, min(int(spec.get("col_end", width - 1)), max(width - 1, 0)))
-    if bool(spec.get("transposed")):
-        data_end = max(0, min(int(spec.get("row_end", height - 1)), max(height - 1, 0)))
-        return TableStructure(
-            transposed=True,
-            col_start=col_start,
-            col_end=col_end,
-            header_rows=[],
-            data_start=0,
-            data_end=data_end,
-            title=spec.get("title") or None,
-            notes=spec.get("notes") or [],
-        )
-    header_rows = sorted(h for h in spec.get("header_rows", []) if 0 <= h < height)
-    title = spec.get("title") or None
-    data_start = (max(header_rows) + 1) if header_rows else 0
-    if title and data_start == 0 and 0 not in header_rows:
-        data_start = 1
-    data_end = max(data_start, min(int(spec.get("row_end", height - 1)), max(height - 1, 0)))
-    columns = ([str(name) for name in spec.get("columns", [])] or None) if header_rows else None
-    section_rows = sorted(
-        row for row in spec.get("section_rows", []) if isinstance(row, int) and data_start <= row <= data_end
-    )
-    return TableStructure(
-        col_start=col_start,
-        col_end=col_end,
-        header_rows=header_rows,
-        data_start=data_start,
-        data_end=data_end,
-        columns=columns,
-        section_rows=section_rows or None,
-        title=title,
-        notes=spec.get("notes") or [],
-    )
+def _parse_sections(text: str) -> list[tuple[list[int], str | None, list[str], str]]:
+    sections: list[tuple[list[int], str | None, list[str], str]] = []
+    blocks: list[int] = []
+    title: str | None = None
+    notes: list[str] = []
+    body: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        blocks_match = _BLOCKS_TAG.match(stripped)
+        if blocks_match:
+            if blocks and body:
+                sections.append((blocks, title, notes, "\n".join(body)))
+            blocks = [int(part) for part in blocks_match.group(1).split(",") if part.strip().isdigit()]
+            title = None
+            notes = []
+            body = []
+            continue
+        title_match = _TITLE_TAG.match(stripped)
+        if title_match:
+            title = title_match.group(1).strip()
+            continue
+        notes_match = _NOTES_TAG.match(stripped)
+        if notes_match:
+            notes = [note.strip() for note in notes_match.group(1).split(";") if note.strip()]
+            continue
+        body.append(line)
+    if blocks and body:
+        sections.append((blocks, title, notes, "\n".join(body)))
+    return sections
 
 
-def _contained(inner: TableStructure, outer: TableStructure) -> bool:
-    return (
-        outer.data_start <= inner.data_start
-        and inner.data_end <= outer.data_end
-        and (inner.data_start, inner.data_end) != (outer.data_start, outer.data_end)
-    )
+def _grid_structure(grid: list[list[str]], title: str | None, notes: list[str]):
+    has_header = any(cell.strip() for cell in grid[0])
+    structure = single_table_structure(grid, header_rows=1 if has_header else 0)
+    if title or notes:
+        structure = structure.model_copy(update={"title": title, "notes": notes or None})
+    return structure
 
 
-def _index_comparable(blocks_i: list[int], blocks_j: list[int]) -> bool:
-    shorter, longer = (blocks_i, blocks_j) if len(blocks_i) <= len(blocks_j) else (blocks_j, blocks_i)
-    return longer[: len(shorter)] == shorter
-
-
-def _drop_contained_specs(
-    prepared: list[tuple[list[int], list[list[str]], TableStructure]],
-) -> list[tuple[list[int], list[list[str]], TableStructure]]:
-    dropped: set[int] = set()
-    for i, (blocks_i, _, structure_i) in enumerate(prepared):
-        for j, (blocks_j, _, structure_j) in enumerate(prepared):
-            if i != j and _index_comparable(blocks_i, blocks_j) and _contained(structure_i, structure_j):
-                dropped.add(i)
-    return [item for index, item in enumerate(prepared) if index not in dropped]
+def _parse_single(text: str) -> tuple[str | None, list[str], str]:
+    title: str | None = None
+    notes: list[str] = []
+    body: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        title_match = _TITLE_TAG.match(stripped)
+        if title_match and not body:
+            title = title_match.group(1).strip()
+            continue
+        notes_match = _NOTES_TAG.match(stripped)
+        if notes_match and not body:
+            notes = [note.strip() for note in notes_match.group(1).split(";") if note.strip()]
+            continue
+        body.append(line)
+    return title, notes, "\n".join(body)
 
 
 async def structure_single_table(grid: list[list[str]], *, key: str) -> MaterializedTable:
@@ -117,27 +104,30 @@ async def structure_single_table(grid: list[list[str]], *, key: str) -> Material
     cap = get_text_capacity()
     await cap.acquire(key)
     try:
-        spec = await structure_table_candidate(text, key)
+        raw = await collect_text(await emit_structure_single(text, key))
     finally:
         await cap.release(key)
-    structure = _table_from_spec(spec, grid)
-    return materialize(grid, structure)
+    title, notes, body = _parse_single(raw)
+    parsed = grid_from_markdown(body) or grid
+    structure = _grid_structure(parsed, title, notes)
+    return materialize(parsed, structure)
 
 
-async def _collect_specs(
+async def _collect_sections(
     texts: list[str], packs: list[list[int]], prompt_name: str, sheet_no: int, label: str
-) -> list[dict]:
-    specs: list[dict] = []
+) -> list[tuple[list[int], str | None, list[str], str]]:
+    sections: list[tuple[list[int], str | None, list[str], str]] = []
     cap = get_text_capacity()
     for pack_no, pack in enumerate(packs):
         payload = "\n\n".join(texts[index] for index in pack)
         key = f"structure:{label or prompt_name}:{sheet_no}:{pack_no}"
         await cap.acquire(key)
         try:
-            specs.extend(await collect_structure_candidates(await emit_structure_candidates(payload, prompt_name, key)))
+            raw = await collect_text(await emit_structure_candidates(payload, prompt_name, key))
         finally:
             await cap.release(key)
-    return specs
+        sections.extend(_parse_sections(raw))
+    return sections
 
 
 async def structure_tables(
@@ -158,35 +148,27 @@ async def structure_tables(
     texts = [_candidate_text(grid, index, context[index], hints[index]) for index, grid in enumerate(candidates)]
     counts = await asyncio.to_thread(count_tokens_batch, texts)
     packs = pack_indices(counts, STRUCTURE_PAYLOAD_BUDGET)
-    specs = await _collect_specs(texts, packs, prompt_name, sheet_no, label)
-    prepared: list[tuple[list[int], list[list[str]], TableStructure]] = []
-    for spec in specs:
-        blocks = [index for index in spec.get("blocks", []) if isinstance(index, int) and 0 <= index < len(candidates)]
-        if not blocks:
-            logger.info("table_structure dropped spec blocks=%r — no valid block index", spec.get("blocks"))
-            continue
-        grid = candidates[blocks[0]] if len(blocks) == 1 else stack_candidates([candidates[i] for i in blocks])
-        structure = _table_from_spec(spec, grid)
-        logger.info(
-            "table_structure spec blocks=%s data=%d-%d header_rows=%s title=%r",
-            blocks,
-            structure.data_start,
-            structure.data_end,
-            structure.header_rows,
-            structure.title,
-        )
-        prepared.append((blocks, grid, structure))
+    sections = await _collect_sections(texts, packs, prompt_name, sheet_no, label)
     out: list[tuple[MaterializedTable, list[int]]] = []
     merged = 0
     block_uses: Counter[int] = Counter()
-    for blocks, grid, structure in _drop_contained_specs(prepared):
+    for blocks, title, notes, body in sections:
+        valid_blocks = [index for index in blocks if 0 <= index < len(candidates)]
+        if not valid_blocks:
+            logger.info("table_structure dropped blocks=%r — no valid block index", blocks)
+            continue
+        grid = grid_from_markdown(body)
+        if not grid:
+            logger.info("table_structure dropped blocks=%s — empty markdown table", valid_blocks)
+            continue
+        structure = _grid_structure(grid, title, notes)
         table = materialize(grid, structure, sheet_no=sheet_no, anchors=anchors)
         if table.n_rows:
-            out.append((table, blocks))
-            merged += len(blocks) > 1
-            block_uses.update(blocks)
+            out.append((table, valid_blocks))
+            merged += len(valid_blocks) > 1
+            block_uses.update(valid_blocks)
         else:
-            logger.info("table_structure dropped blocks=%s — materialized 0 rows", blocks)
+            logger.info("table_structure dropped blocks=%s — materialized 0 rows", valid_blocks)
     split = sum(1 for count in block_uses.values() if count > 1)
     logger.info(
         "table_structure%s candidates=%d packs=%d tables=%d merged=%d split=%d secs=%.1f",

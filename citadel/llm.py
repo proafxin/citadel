@@ -22,7 +22,7 @@ def _local_key(label: str) -> str:
 
 
 STRUCT_MAX_TOKENS = 4096
-STRUCTURE_MAX_TOKENS = 1536
+STRUCTURE_MAX_TOKENS = 8192
 SYNTH_MAX_TOKENS = 8192
 SLM_MODEL_LEN = 32768
 RESOLVE_BUDGET = SLM_MODEL_LEN - STRUCT_MAX_TOKENS - 2048
@@ -120,88 +120,14 @@ async def collect_embed(job_id: str) -> list[list[float]]:
     return json.loads(await collect_reply(job_id))
 
 
-_STRUCTURE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "tables": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "blocks": {"type": "array", "items": {"type": "integer"}},
-                    "transposed": {"type": "boolean"},
-                    "header_rows": {"type": "array", "items": {"type": "integer"}},
-                    "row_end": {"type": "integer"},
-                    "col_start": {"type": "integer"},
-                    "col_end": {"type": "integer"},
-                    "columns": {"type": "array", "items": {"type": "string"}},
-                    "section_rows": {"type": "array", "items": {"type": "integer"}},
-                    "title": {"type": "string"},
-                    "notes": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": [
-                    "blocks",
-                    "transposed",
-                    "header_rows",
-                    "row_end",
-                    "col_start",
-                    "col_end",
-                    "columns",
-                    "section_rows",
-                    "title",
-                    "notes",
-                ],
-            },
-        }
-    },
-    "required": ["tables"],
-}
-
-
-def _structure_tables(data: dict) -> list[dict]:
-    tables = data.get("tables", [])
-    return tables if isinstance(tables, list) else []
-
-
 async def emit_structure_candidates(payload: str, prompt_name: str, key: str) -> str:
     prompt = f"{load_prompt(prompt_name)}\n{payload}"
-    return await emit_slm(prompt, _STRUCTURE_SCHEMA, interactive=False, key=key, max_tokens=STRUCTURE_MAX_TOKENS)
+    return await emit_text(prompt, STRUCTURE_MAX_TOKENS, interactive=False, key=key)
 
 
-async def collect_structure_candidates(job_id: str) -> list[dict]:
-    return _structure_tables(await collect_slm(job_id))
-
-
-_SINGLE_TABLE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "transposed": {"type": "boolean"},
-        "header_rows": {"type": "array", "items": {"type": "integer"}},
-        "row_end": {"type": "integer"},
-        "col_start": {"type": "integer"},
-        "col_end": {"type": "integer"},
-        "columns": {"type": "array", "items": {"type": "string"}},
-        "section_rows": {"type": "array", "items": {"type": "integer"}},
-        "title": {"type": "string"},
-        "notes": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": [
-        "transposed",
-        "header_rows",
-        "row_end",
-        "col_start",
-        "col_end",
-        "columns",
-        "section_rows",
-        "title",
-        "notes",
-    ],
-}
-
-
-async def structure_table_candidate(payload: str, key: str) -> dict:
+async def emit_structure_single(payload: str, key: str) -> str:
     prompt = f"{load_prompt('table_structure_single')}\n{payload}"
-    return await call_slm(prompt, _SINGLE_TABLE_SCHEMA, interactive=False, key=key, max_tokens=STRUCTURE_MAX_TOKENS)
+    return await emit_text(prompt, STRUCTURE_MAX_TOKENS, interactive=False, key=key)
 
 
 PAGE_OCR_MAX_TOKENS = 3584
