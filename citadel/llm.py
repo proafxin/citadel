@@ -5,7 +5,8 @@ import logging
 import time
 from collections.abc import AsyncIterator
 
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from huggingface_hub import hf_hub_download
+from tokenizers import Tokenizer
 
 from citadel.prompts import load_prompt
 from citadel.schemas.query import QueryPlan
@@ -29,18 +30,19 @@ RESOLVE_BUDGET = SLM_MODEL_LEN - STRUCT_MAX_TOKENS - 2048
 
 
 @functools.lru_cache
-def get_tokenizer() -> PreTrainedTokenizerBase:
-    return AutoTokenizer.from_pretrained(QWEN_HF_REPO, cache_dir=str(QWEN_CACHE_DIR))
+def get_tokenizer() -> Tokenizer:
+    path = hf_hub_download(QWEN_HF_REPO, "tokenizer.json", cache_dir=str(QWEN_CACHE_DIR))
+    return Tokenizer.from_file(path)
 
 
 def count_tokens(text: str) -> int:
-    return len(get_tokenizer().encode(text, add_special_tokens=False))
+    return len(get_tokenizer().encode(text, add_special_tokens=False).ids)
 
 
 def count_tokens_batch(texts: list[str]) -> list[int]:
     if not texts:
         return []
-    return [len(ids) for ids in get_tokenizer()(texts, add_special_tokens=False)["input_ids"]]
+    return [len(encoding.ids) for encoding in get_tokenizer().encode_batch(texts, add_special_tokens=False)]
 
 
 def _extract_json(text: str) -> str:

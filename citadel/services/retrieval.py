@@ -85,10 +85,10 @@ def _upsert_chunks(records: list[dict[str, object]], size: int) -> Iterator[list
 
 def _truncate_for_embed(text: str) -> str:
     tokenizer = get_embed_tokenizer()
-    ids = tokenizer(text, add_special_tokens=True, truncation=True, max_length=EMBED_MAX_TOKENS)["input_ids"]
+    ids = tokenizer.encode(text, add_special_tokens=True).ids
     if len(ids) < EMBED_MAX_TOKENS:
         return text
-    return str(tokenizer.decode(ids, skip_special_tokens=True))
+    return tokenizer.decode(ids, skip_special_tokens=True)
 
 
 async def _embed_node(library_id: int, node: _PendingNode) -> dict[str, object]:

@@ -3,8 +3,9 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+from huggingface_hub import hf_hub_download
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from tokenizers import Tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -75,5 +76,7 @@ def get_settings() -> Settings:
 
 
 @lru_cache
-def get_embed_tokenizer() -> PreTrainedTokenizerBase:
-    return AutoTokenizer.from_pretrained(EMBED_MODEL)
+def get_embed_tokenizer() -> Tokenizer:
+    tokenizer = Tokenizer.from_file(hf_hub_download(EMBED_MODEL, "tokenizer.json"))
+    tokenizer.enable_truncation(max_length=EMBED_MAX_TOKENS)
+    return tokenizer

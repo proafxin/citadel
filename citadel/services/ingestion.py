@@ -621,14 +621,72 @@ def _blocks_from_plain_markdown(markdown: str) -> list[Block]:
     return blocks
 
 
+_TAG_MARKER = re.compile(r"^==([A-Z]+)==\s*$")
+_TAGGED_TYPES = frozenset({"TEXT", "LIST", "TABLE", "FORM", "EQUATION", "CODE", "VISUAL", "PARATEXT", "EXTRA"})
+
+
+def _split_by_tag(markdown: str) -> list[tuple[str, str]]:
+    segments: list[tuple[str, str]] = []
+    tag = "TEXT"
+    lines: list[str] = []
+    for line in markdown.splitlines():
+        match = _TAG_MARKER.match(line.strip())
+        if match and match.group(1) in _TAGGED_TYPES:
+            if lines:
+                segments.append((tag, "\n".join(lines)))
+            tag = match.group(1)
+            lines = []
+        else:
+            lines.append(line)
+    if lines:
+        segments.append((tag, "\n".join(lines)))
+    return segments
+
+
+def _paragraph_blocks(text: str, block_type: str) -> list[Block]:
+    parts = re.split(r"\n\s*\n", text)
+    return [Block(page_idx=0, type=block_type, text=part.strip()) for part in parts if part.strip()]
+
+
+def _list_item_blocks(text: str) -> list[Block]:
+    return [Block(page_idx=0, type="list_item", text=line.strip()) for line in text.splitlines() if line.strip()]
+
+
+def _table_or_paragraph_blocks(text: str) -> list[Block]:
+    grid = grid_from_markdown(text)
+    if grid:
+        return [Block(page_idx=0, type="table", grid=grid)]
+    return _paragraph_blocks(text, "text")
+
+
+_TAG_HANDLERS: dict[str, Callable[[str], list[Block]]] = {
+    "TEXT": _blocks_from_plain_markdown,
+    "EXTRA": _blocks_from_plain_markdown,
+    "LIST": _list_item_blocks,
+    "TABLE": _table_or_paragraph_blocks,
+    "FORM": _table_or_paragraph_blocks,
+    "CODE": lambda text: [Block(page_idx=0, type="code", text=text)],
+    "EQUATION": lambda text: _paragraph_blocks(text, "equation"),
+    "VISUAL": lambda text: _paragraph_blocks(text, "image"),
+    "PARATEXT": lambda text: _paragraph_blocks(text, "header"),
+}
+
+
+def _blocks_from_tagged_segment(tag: str, text: str) -> list[Block]:
+    if not text.strip():
+        return []
+    return _TAG_HANDLERS[tag](text)
+
+
 def blocks_from_page_markdown(markdown: str) -> list[Block]:
     blocks: list[Block] = []
     for in_code, chunk in _split_code_fences(markdown):
         if in_code:
             if chunk.strip():
                 blocks.append(Block(page_idx=0, type="code", text=chunk))
-        else:
-            blocks.extend(_blocks_from_plain_markdown(chunk))
+            continue
+        for tag, segment in _split_by_tag(chunk):
+            blocks.extend(_blocks_from_tagged_segment(tag, segment))
     return blocks
 
 

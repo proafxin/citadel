@@ -16,14 +16,14 @@ services:
       - "8100"
       - --kv-cache-dtype
       - fp8
-      - --gpu-memory-utilization
-      - "0.85"
+      - --kv-cache-memory
+      - "10083264533"
       - --max-model-len
       - "32768"
       - --mm-processor-cache-gb
       - "0"
       - --max-num-seqs
-      - "64"
+      - "32"
       - --uvicorn-log-level
       - info
     environment:
@@ -64,7 +64,7 @@ services:
       - --pooler-config
       - '{"task": "embed", "pooling_type": "CLS"}'
       - --gpu-memory-utilization
-      - "0.1"
+      - "0.08"
       - --max-num-seqs
       - "512"
       - --max-model-len

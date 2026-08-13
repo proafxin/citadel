@@ -28,7 +28,7 @@ dependencies = [
     "redis>=8.1.0",
     "sentencepiece>=0.2.2",
     "sqlalchemy[asyncio]>=2.0.51",
-    "transformers>=5.15.0",
+    "tokenizers>=0.22.2",
     "xmltodict>=1.0.4",
     "zstandard>=0.25.0",
 ]
