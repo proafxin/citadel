@@ -15,15 +15,15 @@ services:
       - --port
       - "8100"
       - --kv-cache-dtype
-      - auto
+      - fp8
       - --gpu-memory-utilization
-      - "0.86"
+      - "0.85"
       - --max-model-len
       - "32768"
       - --mm-processor-cache-gb
       - "0"
       - --max-num-seqs
-      - "160"
+      - "64"
       - --uvicorn-log-level
       - info
     environment:
@@ -64,7 +64,7 @@ services:
       - --pooler-config
       - '{"task": "embed", "pooling_type": "CLS"}'
       - --gpu-memory-utilization
-      - "0.10"
+      - "0.1"
       - --max-num-seqs
       - "512"
       - --max-model-len

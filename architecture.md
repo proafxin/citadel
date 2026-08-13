@@ -737,3 +737,40 @@ every replica of that process held its own full copy of the model in GPU memory 
 coordination; serving it removes both problems at once. Nothing in the pipeline asks a model to hold data in
 its head: it reads, judges, and writes queries; the database keeps the numbers.
 
+### OCR model comparison
+
+`Qwen/Qwen3-VL-8B-Instruct-FP8` is the production OCR model, reached after comparing it against several
+alternatives on real corpus pages using the same tag-scheme prompt (`prompts/page_ocr.md`) and the same
+100-page sample drawn from the real document mix:
+
+- `Qwen/Qwen3.5-9B` (prior production model) — the baseline the tag scheme and collapse-mitigation prompt
+  rules were originally tuned against. Superseded by Qwen3-VL-8B, which won on 5 of 6 known issue categories
+  in a direct head-to-head on real pages.
+- `Qwen/Qwen3-VL-8B-Instruct-FP8` (current production model) — best quality observed of any model tested.
+  `finish_reason == "length"` (the near-universal signal for repetition-collapse across every model tried)
+  reduced to roughly 1-2% at 100/255-page scale after the three prompt fixes (tag-once, no-meta-commentary,
+  equation-chain-termination). Real GPU-executed concurrency measured at 11-14 under production load, well
+  below the app's `OCR_CONCURRENCY = 64` dispatch cap — the gap is absorbed safely by vLLM's own request
+  queue, with no throughput benefit from the higher cap.
+- `Qwen/Qwen3-VL-4B-Instruct-FP8` — 14% collapse rate at scale, disqualifying.
+- `lovedheart/Qwen3.5-4B-FP8` (community FP8 quant; no official Qwen3.5-4B-Instruct-FP8 exists) — tested to
+  see whether a smaller, higher-concurrency model was "good enough" to free the 8B model for non-OCR SLM
+  traffic only. At 100-page scale: 8/100 pages (8%) ended with `finish_reason == "length"`, confirmed on
+  inspection to be genuine repetition-collapse (not just long legitimate content) — the same block of text
+  repeated verbatim several times before truncation. 7 of the 8 failures concentrated in one dense,
+  equation-heavy document, matching the known equation-chain collapse risk. This exceeds the acceptable
+  collapse rate; **Qwen3.5-4B-FP8 was rejected for OCR** and Qwen3-VL-8B remains the sole OCR model.
+- `PaddlePaddle/PaddleOCR-VL-1.6` — not a general instruction-following model; only recognizes 4 fixed
+  trigger prompts (`"OCR:"`, `"Table Recognition:"`, `"Formula Recognition:"`, `"Chart Recognition:"`), so the
+  tag-scheme prompt fails outright. Retested with the native `"OCR:"` prompt: 88/100 clean at 100-page scale,
+  notably worse than Qwen3-VL-8B and without the tag-scheme output it depends on. Not adopted.
+- `tencent/HunyuanOCR` — hits a real, unfixed, unreported upstream vLLM bug (`IndexError` in
+  `hunyuan_vision.py`'s `get_xdrope_input_positions`, triggered by a mismatch between detected image
+  placeholder tokens and `image_grid_thw` entries) that kills the whole vLLM engine process, reproducing even
+  on a single non-batched request against a real page. No known fix or workaround exists. Not adopted;
+  dropped rather than pursued further.
+
+None of the smaller/alternative models cleared the bar to safely replace or supplement Qwen3-VL-8B for OCR,
+so the architecture described above — one general vision-language model performing every step — stands
+unchanged.
+
