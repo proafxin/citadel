@@ -19,7 +19,6 @@ from citadel.models.library import Library
 from citadel.models.status import DocumentStatus
 from citadel.models.table import Table
 from citadel.services.batching import render_block
-from citadel.services.capacity import get_embed_capacity
 from citadel.services.readiness import record_library_flag
 from config import EMBED_MAX_TOKENS, get_embed_tokenizer
 
@@ -33,12 +32,7 @@ UPSERT_CHUNK = 32767 // UPSERT_COLS
 
 
 async def _embed(text: str, key: str) -> list[float]:
-    cap = get_embed_capacity()
-    await cap.acquire(key)
-    try:
-        vectors = await call_embed([text], key)
-    finally:
-        await cap.release(key)
+    vectors = await call_embed([text], key)
     return vectors[0]
 
 

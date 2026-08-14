@@ -773,4 +773,3 @@ alternatives on real corpus pages using the same tag-scheme prompt (`prompts/pag
 None of the smaller/alternative models cleared the bar to safely replace or supplement Qwen3-VL-8B for OCR,
 so the architecture described above — one general vision-language model performing every step — stands
 unchanged.
-

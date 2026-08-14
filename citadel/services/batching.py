@@ -15,7 +15,6 @@ from citadel.models.document import Document
 from citadel.models.status import DocumentStatus
 from citadel.models.table import Table
 from citadel.prompts import load_prompt
-from citadel.services.capacity import get_text_large_capacity
 from citadel.services.readiness import record_library_flag
 
 STREAM_BATCH = "batch"
@@ -224,13 +223,7 @@ async def _document_summary(doc_id: int, summaries: list[str]) -> str | None:
     async with get_sessionmaker()() as session:
         filename = await session.scalar(select(Document.filename).where(Document.id == doc_id)) or ""
     prompt, max_tokens = _document_summary_prompt(filename, summaries)
-    key = f"doc={doc_id}:summary"
-    cap = get_text_large_capacity()
-    await cap.acquire(key)
-    try:
-        return await call_text(prompt, max_tokens, key=key)
-    finally:
-        await cap.release(key)
+    return await call_text(prompt, max_tokens, key=f"doc={doc_id}:summary")
 
 
 def _batch_row(doc_id: int, spec: BatchSpec, summary: str) -> ContentBatch:
@@ -252,13 +245,7 @@ async def mark_summary_failed(doc_id: int) -> None:
 
 
 async def _summarize_batch(doc_id: int, spec: BatchSpec) -> ContentBatch:
-    key = f"doc={doc_id}:batch={spec.batch_no}"
-    cap = get_text_large_capacity()
-    await cap.acquire(key)
-    try:
-        summary = await call_text(*_summary_prompt(spec), key=key)
-    finally:
-        await cap.release(key)
+    summary = await call_text(*_summary_prompt(spec), key=f"doc={doc_id}:batch={spec.batch_no}")
     return _batch_row(doc_id, spec, summary)
 
 

@@ -127,6 +127,7 @@ def get_interactive_capacity() -> GlobalCapacity:
 
 
 @lru_cache
+def get_text_large_capacity() -> GlobalCapacity:
     return GlobalCapacity("text-large", TEXT_LARGE_CONCURRENCY + TEXT_LARGE_BUFFER, TEXT_LARGE_STALE_S)
 
 

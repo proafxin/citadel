@@ -18,7 +18,6 @@ from citadel.services.capacity import (
     get_interactive_capacity,
     get_text_capacity,
     get_text_large_capacity,
-    get_vision_capacity,
 )
 from config import EMBED_SERVED_NAME, QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL, get_settings
 
@@ -122,7 +121,7 @@ async def _stream_qwen(payload: dict) -> AsyncIterator[str]:
         async for line in response.aiter_lines():
             if not line.startswith("data: "):
                 continue
-            data = line[len("data: "):]
+            data = line[len("data: ") :]
             if data == "[DONE]":
                 break
             delta = json.loads(data)["choices"][0]["delta"].get("content")
@@ -132,16 +131,6 @@ async def _stream_qwen(payload: dict) -> AsyncIterator[str]:
 
 async def call_slm(prompt: str, schema: dict, key: str, max_tokens: int = STRUCT_MAX_TOKENS) -> dict:
     cap = get_interactive_capacity()
-    await cap.acquire(key)
-    try:
-        raw = await _post_qwen(_struct_payload(prompt, _inline_refs(schema), max_tokens))
-    finally:
-        await cap.release(key)
-    return json.loads(_extract_json(raw))
-
-
-async def call_slm_text_table(prompt: str, schema: dict, key: str, max_tokens: int = STRUCT_MAX_TOKENS) -> dict:
-    cap = get_text_capacity()
     await cap.acquire(key)
     try:
         raw = await _post_qwen(_struct_payload(prompt, _inline_refs(schema), max_tokens))
@@ -199,12 +188,7 @@ async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    cap = get_vision_capacity()
-    await cap.acquire(image_key)
-    try:
-        return (await _post_qwen(payload)).strip()
-    finally:
-        await cap.release(image_key)
+    return (await _post_qwen(payload)).strip()
 
 
 async def call_structure_single(payload: str, key: str) -> str:
@@ -221,12 +205,12 @@ async def merge_evidence(query: str, items: list[str]) -> str:
     listing = "\n\n".join(f"[{index}] {item}" for index, item in enumerate(items))
     prompt = f"{load_prompt('evidence_merge')}\nquestion: {query}\npassages:\n{listing}"
     key = _local_key("merge")
-    _MERGE_SCHEMA = {
+    MERGE_SCHEMA = {
         "type": "object",
         "properties": {"summary": {"type": "string"}},
         "required": ["summary"],
     }
-    data = await call_slm(prompt, _MERGE_SCHEMA, key)
+    data = await call_slm(prompt, MERGE_SCHEMA, key)
     return str(data.get("summary", ""))
 
 
@@ -285,7 +269,9 @@ def resolve_prompt_tokens(query: str, items: list[str], library: str = "") -> in
     return count_tokens(_resolve_prompt(query, items, library))
 
 
-async def call_resolve(query: str, items: list[str], key: str, library: str = "") -> tuple[dict[int, str], dict[int, str]]:
+async def call_resolve(
+    query: str, items: list[str], key: str, library: str = ""
+) -> tuple[dict[int, str], dict[int, str]]:
     prompt = _resolve_prompt(query, items, library)
     tokens = count_tokens(prompt)
     if tokens > RESOLVE_BUDGET:

@@ -1,5 +1,4 @@
 import asyncio
-import itertools
 import json
 import logging
 import re
@@ -46,16 +45,10 @@ from citadel.services.retrieval import (
     load_library_name,
     scope_block_ids,
 )
-from config import get_settings
 
 logger = logging.getLogger(__name__)
 
 STATEMENT_TIMEOUT_MS = 3000
-_call_no = itertools.count()
-
-
-def _capacity_key(label: str) -> str:
-    return f"{get_settings().worker_id}:{label}:{next(_call_no)}"
 
 
 SYNTH_BUDGET = SLM_MODEL_LEN - SYNTH_MAX_TOKENS - 2048
@@ -251,13 +244,7 @@ async def _execute(tables: list[TableCand], sql: str, labels: dict[int, str]) ->
 
 
 async def _plan_queries(question: str, blocks: list[str], library: str) -> QueryPlan:
-    key = _capacity_key("queries")
-    cap = get_text_large_capacity()
-    await cap.acquire(key)
-    try:
-        return await write_queries(question, blocks, library)
-    finally:
-        await cap.release(key)
+    return await write_queries(question, blocks, library)
 
 
 async def _aggregate(
@@ -358,13 +345,7 @@ def _chunk_by_tokens(items: list[_Evidence], budget: int) -> list[list[_Evidence
 
 
 async def _merge_chunk(question: str, chunk: list[_Evidence]) -> _Evidence:
-    key = _capacity_key("merge")
-    cap = get_text_large_capacity()
-    await cap.acquire(key)
-    try:
-        summary = await merge_evidence(question, [evidence.text for evidence in chunk])
-    finally:
-        await cap.release(key)
+    summary = await merge_evidence(question, [evidence.text for evidence in chunk])
     sources = [source for evidence in chunk for source in evidence.sources]
     if summary:
         tokens = count_tokens(summary)
