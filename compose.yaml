@@ -16,8 +16,8 @@ services:
       - "8100"
       - --kv-cache-dtype
       - fp8
-      - --kv-cache-memory
-      - "10083264533"
+      - --gpu-memory-utilization
+      - "0.85"
       - --max-model-len
       - "32768"
       - --mm-processor-cache-gb
