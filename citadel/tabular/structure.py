@@ -4,7 +4,7 @@ import re
 import time
 from collections import Counter
 
-from citadel.llm import collect_text, count_tokens_batch, emit_structure_candidates, emit_structure_single, pack_indices
+from citadel.llm import call_structure_candidates, call_structure_single, count_tokens_batch, pack_indices
 from citadel.services.capacity import get_text_capacity
 from citadel.services.tabular import grid_from_markdown, single_table_structure
 from citadel.tabular.flag import column_kinds, payload_rows
@@ -104,7 +104,7 @@ async def structure_single_table(grid: list[list[str]], *, key: str) -> Material
     cap = get_text_capacity()
     await cap.acquire(key)
     try:
-        raw = await collect_text(await emit_structure_single(text, key))
+        raw = await call_structure_single(text, key)
     finally:
         await cap.release(key)
     title, notes, body = _parse_single(raw)
@@ -123,7 +123,7 @@ async def _collect_sections(
         key = f"structure:{label or prompt_name}:{sheet_no}:{pack_no}"
         await cap.acquire(key)
         try:
-            raw = await collect_text(await emit_structure_candidates(payload, prompt_name, key))
+            raw = await call_structure_candidates(payload, prompt_name, key)
         finally:
             await cap.release(key)
         sections.extend(_parse_sections(raw))

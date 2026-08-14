@@ -25,10 +25,9 @@ from citadel.llm import (
     SLM_MODEL_LEN,
     STRUCT_MAX_TOKENS,
     SYNTH_MAX_TOKENS,
-    collect_resolve,
+    call_resolve,
     count_tokens,
     count_tokens_batch,
-    emit_resolve,
     merge_evidence,
     resolve_prompt_tokens,
     synthesize,
@@ -36,7 +35,6 @@ from citadel.llm import (
 )
 from citadel.models.table import TableRow
 from citadel.schemas.query import QueryPlan
-from citadel.services.capacity import get_text_large_capacity
 from citadel.services.retrieval import (
     BatchRef,
     DocRef,
@@ -530,13 +528,7 @@ async def resolve_batch_job(fields: dict[str, str]) -> None:
     items = json.loads(fields["items"])
     index_map = [(kind, index) for kind, index in json.loads(fields["index_map"])]
     key = f"resolve:{library_id}:{fields['batch_no']}"
-    cap = get_text_large_capacity()
-    await cap.acquire(key)
-    try:
-        job_id = await emit_resolve(fields["question"], items, key, fields["library"])
-        doc_coverage, table_coverage = await collect_resolve(job_id, len(items))
-    finally:
-        await cap.release(key)
+    doc_coverage, table_coverage = await call_resolve(fields["question"], items, key, fields["library"])
     coverage = _split_coverage(doc_coverage, table_coverage, index_map)
     payload = json.dumps({"documents": coverage.documents, "tables": coverage.tables})
     await get_redis().hset(_resolve_results_key(library_id), fields["batch_no"], payload)

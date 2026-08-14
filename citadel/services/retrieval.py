@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
-from citadel.llm import collect_embed, emit_embed
+from citadel.llm import call_embed
 from citadel.models.batch import ContentBatch
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
@@ -36,7 +36,7 @@ async def _embed(text: str, key: str) -> list[float]:
     cap = get_embed_capacity()
     await cap.acquire(key)
     try:
-        vectors = await collect_embed(await emit_embed([text], key))
+        vectors = await call_embed([text], key)
     finally:
         await cap.release(key)
     return vectors[0]

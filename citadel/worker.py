@@ -48,7 +48,6 @@ from citadel.services.ingestion import (
 from citadel.services.query import STREAM_RESOLVE_BATCH, record_resolve_batch, resolve_batch_job
 from citadel.services.readiness import STREAM_LIBRARY_READY
 from citadel.services.retrieval import STREAM_EMBED, handle_embed
-from citadel.services.slm import read_replies
 from config import CPU_EIGHTH, configure_logging, get_settings
 
 logger = logging.getLogger(__name__)
@@ -537,7 +536,6 @@ async def _main() -> None:
         library_ready,
     )
     consumers = [asyncio.create_task(stage()) for stage in stages]
-    consumers.append(asyncio.create_task(read_replies()))
     stop_task = asyncio.create_task(stop.wait())
     try:
         await asyncio.wait([stop_task, *consumers], return_when=asyncio.FIRST_COMPLETED)

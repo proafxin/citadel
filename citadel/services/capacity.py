@@ -8,7 +8,7 @@ from redis.commands.core import AsyncScript
 from citadel.bus import get_redis
 
 OCR_CONCURRENCY = 32
-VISION_BUFFER = 8
+VISION_BUFFER = 16
 VISION_STALE_S = 120
 
 TEXT_CONCURRENCY = 128
@@ -18,6 +18,10 @@ TEXT_STALE_S = 60
 TEXT_LARGE_CONCURRENCY = 16
 TEXT_LARGE_BUFFER = 8
 TEXT_LARGE_STALE_S = 600
+
+INTERACTIVE_CONCURRENCY = 32
+INTERACTIVE_BUFFER = 16
+INTERACTIVE_STALE_S = 600
 
 EMBED_CONCURRENCY = 384
 EMBED_BUFFER = 128
@@ -118,7 +122,11 @@ def get_text_capacity() -> GlobalCapacity:
 
 
 @lru_cache
-def get_text_large_capacity() -> GlobalCapacity:
+def get_interactive_capacity() -> GlobalCapacity:
+    return GlobalCapacity("interactive", INTERACTIVE_CONCURRENCY + INTERACTIVE_BUFFER, INTERACTIVE_STALE_S)
+
+
+@lru_cache
     return GlobalCapacity("text-large", TEXT_LARGE_CONCURRENCY + TEXT_LARGE_BUFFER, TEXT_LARGE_STALE_S)
 
 

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
-from citadel.llm import SLM_MODEL_LEN, collect_text, count_tokens, count_tokens_batch, emit_text
+from citadel.llm import SLM_MODEL_LEN, call_text, count_tokens, count_tokens_batch
 from citadel.models.batch import ContentBatch
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
@@ -228,7 +228,7 @@ async def _document_summary(doc_id: int, summaries: list[str]) -> str | None:
     cap = get_text_large_capacity()
     await cap.acquire(key)
     try:
-        return await collect_text(await emit_text(prompt, max_tokens, key=key))
+        return await call_text(prompt, max_tokens, key=key)
     finally:
         await cap.release(key)
 
@@ -256,7 +256,7 @@ async def _summarize_batch(doc_id: int, spec: BatchSpec) -> ContentBatch:
     cap = get_text_large_capacity()
     await cap.acquire(key)
     try:
-        summary = await collect_text(await emit_text(*_summary_prompt(spec), key=key))
+        summary = await call_text(*_summary_prompt(spec), key=key)
     finally:
         await cap.release(key)
     return _batch_row(doc_id, spec, summary)

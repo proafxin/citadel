@@ -3,41 +3,51 @@ import itertools
 import json
 import logging
 import time
+from base64 import b64encode
 from collections.abc import AsyncIterator
 
+import httpx
 from huggingface_hub import hf_hub_download
 from tokenizers import Tokenizer
 
+from citadel.bus import get_redis
 from citadel.prompts import load_prompt
 from citadel.schemas.query import QueryPlan
-from citadel.services.slm import (
-    STREAM_SLM_EMBED,
-    STREAM_SLM_INTERACTIVE,
-    STREAM_SLM_LARGE,
-    STREAM_SLM_OCR,
-    STREAM_SLM_TEXT_TABLE,
-    collect,
-    collect_reply,
-    emit,
-    reply_stream,
-    submit,
+from citadel.services.capacity import (
+    get_embed_capacity,
+    get_interactive_capacity,
+    get_text_capacity,
+    get_text_large_capacity,
+    get_vision_capacity,
 )
-from config import EMBED_SERVED_NAME, QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL
+from config import EMBED_SERVED_NAME, QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL, get_settings
 
 logger = logging.getLogger(__name__)
 
 _call_no = itertools.count()
 
-
-def _local_key(label: str) -> str:
-    return f"{reply_stream()}:{label}:{next(_call_no)}"
-
+NO_TIMEOUT = httpx.Timeout(None)
 
 STRUCT_MAX_TOKENS = 4096
 STRUCTURE_MAX_TOKENS = 8192
 SYNTH_MAX_TOKENS = 8192
 SLM_MODEL_LEN = 32768
+PAGE_OCR_MAX_TOKENS = 3584
 RESOLVE_BUDGET = SLM_MODEL_LEN - STRUCT_MAX_TOKENS - 2048
+
+
+@functools.lru_cache
+def _qwen_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(base_url=get_settings().qwen_base_url, timeout=NO_TIMEOUT)
+
+
+@functools.lru_cache
+def _bge_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(base_url=get_settings().bge_base_url, timeout=NO_TIMEOUT)
+
+
+def _local_key(label: str) -> str:
+    return f"llm:{label}:{next(_call_no)}"
 
 
 @functools.lru_cache
@@ -61,17 +71,6 @@ def _extract_json(text: str) -> str:
     return text[start : end + 1] if start != -1 and end != -1 else text
 
 
-def _struct_payload(prompt: str, schema: dict, max_tokens: int = STRUCT_MAX_TOKENS) -> dict:
-    return {
-        "model": QWEN_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "max_tokens": max_tokens,
-        "response_format": {"type": "json_schema", "json_schema": {"name": "output", "schema": schema}},
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
-
-
 def _resolve_ref(node: object, defs: dict) -> object:
     if isinstance(node, dict):
         if "$ref" in node:
@@ -90,17 +89,15 @@ def _inline_refs(schema: dict) -> dict:
     return resolved if isinstance(resolved, dict) else schema
 
 
-async def call_slm(prompt: str, schema: dict, stream: str, key: str, max_tokens: int = STRUCT_MAX_TOKENS) -> dict:
-    raw = await collect(_struct_payload(prompt, _inline_refs(schema), max_tokens), stream, key)
-    return json.loads(_extract_json(raw))
-
-
-async def emit_slm(prompt: str, schema: dict, stream: str, key: str, max_tokens: int = STRUCT_MAX_TOKENS) -> str:
-    return await emit(_struct_payload(prompt, _inline_refs(schema), max_tokens), stream, key)
-
-
-async def collect_slm(job_id: str) -> dict:
-    return json.loads(_extract_json(await collect_reply(job_id)))
+def _struct_payload(prompt: str, schema: dict, max_tokens: int = STRUCT_MAX_TOKENS) -> dict:
+    return {
+        "model": QWEN_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_schema", "json_schema": {"name": "output", "schema": schema}},
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
 
 
 def _text_payload(prompt: str, max_tokens: int) -> dict:
@@ -113,82 +110,123 @@ def _text_payload(prompt: str, max_tokens: int) -> dict:
     }
 
 
-async def emit_text(prompt: str, max_tokens: int, key: str) -> str:
-    return await emit(_text_payload(prompt, max_tokens), STREAM_SLM_LARGE, key)
+async def _post_qwen(payload: dict) -> str:
+    response = await _qwen_client().post("/chat/completions", json=payload)
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"]
 
 
-async def collect_text(job_id: str) -> str:
-    return (await collect_reply(job_id)).strip()
+async def _stream_qwen(payload: dict) -> AsyncIterator[str]:
+    async with _qwen_client().stream("POST", "/chat/completions", json=payload) as response:
+        response.raise_for_status()
+        async for line in response.aiter_lines():
+            if not line.startswith("data: "):
+                continue
+            data = line[len("data: "):]
+            if data == "[DONE]":
+                break
+            delta = json.loads(data)["choices"][0]["delta"].get("content")
+            if delta:
+                yield delta
 
 
-def _embed_payload(texts: list[str]) -> dict:
-    return {"model": EMBED_SERVED_NAME, "input": texts, "endpoint": "embeddings"}
+async def call_slm(prompt: str, schema: dict, key: str, max_tokens: int = STRUCT_MAX_TOKENS) -> dict:
+    cap = get_interactive_capacity()
+    await cap.acquire(key)
+    try:
+        raw = await _post_qwen(_struct_payload(prompt, _inline_refs(schema), max_tokens))
+    finally:
+        await cap.release(key)
+    return json.loads(_extract_json(raw))
 
 
-async def emit_embed(texts: list[str], key: str) -> str:
-    return await emit(_embed_payload(texts), STREAM_SLM_EMBED, key)
+async def call_slm_text_table(prompt: str, schema: dict, key: str, max_tokens: int = STRUCT_MAX_TOKENS) -> dict:
+    cap = get_text_capacity()
+    await cap.acquire(key)
+    try:
+        raw = await _post_qwen(_struct_payload(prompt, _inline_refs(schema), max_tokens))
+    finally:
+        await cap.release(key)
+    return json.loads(_extract_json(raw))
 
 
-async def collect_embed(job_id: str) -> list[list[float]]:
-    return json.loads(await collect_reply(job_id))
+async def call_text(prompt: str, max_tokens: int, key: str) -> str:
+    cap = get_text_large_capacity()
+    await cap.acquire(key)
+    try:
+        return (await _post_qwen(_text_payload(prompt, max_tokens))).strip()
+    finally:
+        await cap.release(key)
 
 
-async def emit_structure_candidates(payload: str, prompt_name: str, key: str) -> str:
-    prompt = f"{load_prompt(prompt_name)}\n{payload}"
-    return await emit(_text_payload(prompt, STRUCTURE_MAX_TOKENS), STREAM_SLM_TEXT_TABLE, key)
+async def call_text_table(prompt: str, max_tokens: int, key: str) -> str:
+    cap = get_text_capacity()
+    await cap.acquire(key)
+    try:
+        return (await _post_qwen(_text_payload(prompt, max_tokens))).strip()
+    finally:
+        await cap.release(key)
 
 
-async def emit_structure_single(payload: str, key: str) -> str:
-    prompt = f"{load_prompt('table_structure_single')}\n{payload}"
-    return await emit(_text_payload(prompt, STRUCTURE_MAX_TOKENS), STREAM_SLM_TEXT_TABLE, key)
+async def call_embed(texts: list[str], key: str) -> list[list[float]]:
+    cap = get_embed_capacity()
+    await cap.acquire(key)
+    try:
+        response = await _bge_client().post("/embeddings", json={"model": EMBED_SERVED_NAME, "input": texts})
+        response.raise_for_status()
+        return [item["embedding"] for item in response.json()["data"]]
+    finally:
+        await cap.release(key)
 
 
-PAGE_OCR_MAX_TOKENS = 3584
-
-
-def _page_ocr_payload(image_key: str, max_tokens: int) -> dict:
-    return {
+async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -> str:
+    data = await get_redis().get(image_key)
+    if isinstance(data, str):
+        data = data.encode()
+    image_url = "data:image/png;base64," + b64encode(data).decode()
+    payload = {
         "model": QWEN_MODEL,
-        "image_key": image_key,
-        "prompt": load_prompt("page_ocr"),
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": load_prompt("page_ocr")},
+                ],
+            }
+        ],
         "temperature": 0,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
     }
+    cap = get_vision_capacity()
+    await cap.acquire(image_key)
+    try:
+        return (await _post_qwen(payload)).strip()
+    finally:
+        await cap.release(image_key)
 
 
-async def emit_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -> str:
-    return await emit(_page_ocr_payload(image_key, max_tokens), STREAM_SLM_OCR, image_key)
+async def call_structure_single(payload: str, key: str) -> str:
+    prompt = f"{load_prompt('table_structure_single')}\n{payload}"
+    return await call_text_table(prompt, STRUCTURE_MAX_TOKENS, key)
 
 
-async def collect_page_ocr(job_id: str) -> str:
-    return (await collect_reply(job_id)).strip()
-
-
-async def _chat_stream(prompt: str) -> AsyncIterator[str]:
-    payload = {
-        "model": QWEN_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
-        "max_tokens": SYNTH_MAX_TOKENS,
-        "chat_template_kwargs": {"enable_thinking": False},
-        "stream": True,
-    }
-    async for delta in submit(payload, STREAM_SLM_INTERACTIVE, key=_local_key("synthesize")):
-        yield delta
-
-
-_MERGE_SCHEMA = {
-    "type": "object",
-    "properties": {"summary": {"type": "string"}},
-    "required": ["summary"],
-}
+async def call_structure_candidates(payload: str, prompt_name: str, key: str) -> str:
+    prompt = f"{load_prompt(prompt_name)}\n{payload}"
+    return await call_text_table(prompt, STRUCTURE_MAX_TOKENS, key)
 
 
 async def merge_evidence(query: str, items: list[str]) -> str:
     listing = "\n\n".join(f"[{index}] {item}" for index, item in enumerate(items))
     prompt = f"{load_prompt('evidence_merge')}\nquestion: {query}\npassages:\n{listing}"
-    data = await call_slm(prompt, _MERGE_SCHEMA, STREAM_SLM_INTERACTIVE, key=_local_key("merge"))
+    key = _local_key("merge")
+    _MERGE_SCHEMA = {
+        "type": "object",
+        "properties": {"summary": {"type": "string"}},
+        "required": ["summary"],
+    }
+    data = await call_slm(prompt, _MERGE_SCHEMA, key)
     return str(data.get("summary", ""))
 
 
@@ -197,7 +235,6 @@ _QUERIES_SCHEMA = {
     "properties": {"queries": {"type": "array", "items": {"type": "string"}}},
     "required": ["queries"],
 }
-
 
 _RESOLVE_SCHEMA = {
     "type": "object",
@@ -248,16 +285,13 @@ def resolve_prompt_tokens(query: str, items: list[str], library: str = "") -> in
     return count_tokens(_resolve_prompt(query, items, library))
 
 
-async def emit_resolve(query: str, items: list[str], key: str, library: str = "") -> str:
+async def call_resolve(query: str, items: list[str], key: str, library: str = "") -> tuple[dict[int, str], dict[int, str]]:
     prompt = _resolve_prompt(query, items, library)
     tokens = count_tokens(prompt)
     if tokens > RESOLVE_BUDGET:
         logger.warning("resolve inventory does not fit one call tokens=%d budget=%d", tokens, RESOLVE_BUDGET)
-    return await emit_slm(prompt, _RESOLVE_SCHEMA, STREAM_SLM_INTERACTIVE, key=key)
-
-
-async def collect_resolve(job_id: str, count: int) -> tuple[dict[int, str], dict[int, str]]:
-    data = await collect_slm(job_id)
+    data = await call_slm(prompt, _RESOLVE_SCHEMA, key)
+    count = len(items)
     doc_coverage = _kind_coverage(data.get("documents", {}), _DOC_DEPTHS, count)
     table_coverage = _kind_coverage(data.get("tables", {}), _TABLE_DEPTHS, count)
     logger.info(
@@ -293,7 +327,8 @@ async def write_queries(query: str, tables: list[str], library: str = "") -> Que
     listing = "\n\n".join(tables)
     prompt = f"{load_prompt('text_to_sql')}\nlibrary: {library}\nquestion: {query}\ntables:\n{listing}"
     started = time.time()
-    data = await call_slm(prompt, _QUERIES_SCHEMA, STREAM_SLM_INTERACTIVE, key=_local_key("queries"))
+    key = _local_key("queries")
+    data = await call_slm(prompt, _QUERIES_SCHEMA, key)
     queries = [str(sql) for sql in data.get("queries", []) if str(sql).strip()]
     plan = QueryPlan(queries=queries)
     logger.info(
@@ -313,5 +348,19 @@ async def write_queries(query: str, tables: list[str], library: str = "") -> Que
 async def synthesize(query: str, passages: list[str], results: list[str]) -> AsyncIterator[str]:
     evidence = "passages:\n" + "\n".join(passages) + "\n\ntable results:\n" + "\n".join(results)
     prompt = f"{load_prompt('synthesize')}\nquestion: {query}\n{evidence}"
-    async for token in _chat_stream(prompt):
-        yield token
+    payload = {
+        "model": QWEN_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "max_tokens": SYNTH_MAX_TOKENS,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "stream": True,
+    }
+    key = _local_key("synthesize")
+    cap = get_interactive_capacity()
+    await cap.acquire(key)
+    try:
+        async for token in _stream_qwen(payload):
+            yield token
+    finally:
+        await cap.release(key)

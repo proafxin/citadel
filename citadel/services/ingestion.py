@@ -25,7 +25,7 @@ from sqlalchemy import select
 
 from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
-from citadel.llm import collect_page_ocr, emit_page_ocr
+from citadel.llm import call_page_ocr
 from citadel.models.document import Document
 from citadel.models.status import DocumentStatus
 from citadel.schemas.content import Block
@@ -730,8 +730,7 @@ async def _ocr_blocks(image_key: str) -> list[Block]:
         image_bytes = image_bytes.encode()
     if image_bytes is not None and await asyncio.to_thread(_is_blank_image, image_bytes):
         return []
-    job_id = await emit_page_ocr(image_key)
-    markdown = await collect_page_ocr(job_id)
+    markdown = await call_page_ocr(image_key)
     markdown = _strip_wrapping_fence(markdown)
     markdown = _strip_meta_commentary(markdown)
     return blocks_from_page_markdown(markdown)
