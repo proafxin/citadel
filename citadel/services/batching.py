@@ -228,7 +228,7 @@ async def _document_summary(doc_id: int, summaries: list[str]) -> str | None:
     cap = get_text_large_capacity()
     await cap.acquire(key)
     try:
-        return await collect_text(await emit_text(prompt, max_tokens, interactive=False, key=key))
+        return await collect_text(await emit_text(prompt, max_tokens, key=key))
     finally:
         await cap.release(key)
 
@@ -256,7 +256,7 @@ async def _summarize_batch(doc_id: int, spec: BatchSpec) -> ContentBatch:
     cap = get_text_large_capacity()
     await cap.acquire(key)
     try:
-        summary = await collect_text(await emit_text(*_summary_prompt(spec), interactive=False, key=key))
+        summary = await collect_text(await emit_text(*_summary_prompt(spec), key=key))
     finally:
         await cap.release(key)
     return _batch_row(doc_id, spec, summary)

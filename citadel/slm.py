@@ -20,8 +20,11 @@ from citadel.services.slm import (
     FAILED,
     REPLY_MAXLEN,
     SLM_GROUP,
-    STREAM_SLM_BULK,
+    STREAM_SLM_EMBED,
     STREAM_SLM_INTERACTIVE,
+    STREAM_SLM_LARGE,
+    STREAM_SLM_OCR,
+    STREAM_SLM_TEXT_TABLE,
 )
 from config import configure_logging, get_settings
 
@@ -208,12 +211,18 @@ async def _pump() -> None:
     while True:
         if await _drain(STREAM_SLM_INTERACTIVE):
             continue
-        await _drain(STREAM_SLM_BULK)
+        if await _drain(STREAM_SLM_OCR):
+            continue
+        if await _drain(STREAM_SLM_LARGE):
+            continue
+        if await _drain(STREAM_SLM_TEXT_TABLE):
+            continue
+        await _drain(STREAM_SLM_EMBED)
 
 
 async def _main() -> None:
     configure_logging()
-    for stream in (STREAM_SLM_INTERACTIVE, STREAM_SLM_BULK):
+    for stream in (STREAM_SLM_INTERACTIVE, STREAM_SLM_OCR, STREAM_SLM_LARGE, STREAM_SLM_TEXT_TABLE, STREAM_SLM_EMBED):
         await _ensure_group(stream)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

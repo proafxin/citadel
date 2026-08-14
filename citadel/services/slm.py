@@ -12,7 +12,10 @@ from config import get_settings
 logger = logging.getLogger(__name__)
 
 STREAM_SLM_INTERACTIVE = "slm_interactive"
-STREAM_SLM_BULK = "slm_bulk"
+STREAM_SLM_OCR = "slm_ocr"
+STREAM_SLM_TEXT_TABLE = "slm_text_table"
+STREAM_SLM_LARGE = "slm_large"
+STREAM_SLM_EMBED = "slm_embed"
 SLM_GROUP = "citadel"
 
 CHUNK = "chunk"
@@ -32,9 +35,8 @@ def _pending() -> dict[str, asyncio.Queue[tuple[str, str]]]:
     return {}
 
 
-async def emit(payload: dict, interactive: bool, key: str) -> str:
+async def emit(payload: dict, stream: str, key: str) -> str:
     _pending()[key] = asyncio.Queue()
-    stream = STREAM_SLM_INTERACTIVE if interactive else STREAM_SLM_BULK
     await get_redis().xadd(
         stream,
         {
@@ -66,14 +68,14 @@ async def collect_reply(job_id: str) -> str:
     return "".join([chunk async for chunk in stream_reply(job_id)])
 
 
-async def submit(payload: dict, interactive: bool, key: str) -> AsyncIterator[str]:
-    job_id = await emit(payload, interactive, key)
+async def submit(payload: dict, stream: str, key: str) -> AsyncIterator[str]:
+    job_id = await emit(payload, stream, key)
     async for chunk in stream_reply(job_id):
         yield chunk
 
 
-async def collect(payload: dict, interactive: bool, key: str) -> str:
-    return "".join([chunk async for chunk in submit(payload, interactive, key)])
+async def collect(payload: dict, stream: str, key: str) -> str:
+    return "".join([chunk async for chunk in submit(payload, stream, key)])
 
 
 async def read_replies() -> None:
