@@ -843,17 +843,10 @@ async def _read_doc_blocks(doc_id: str) -> list[Block]:
     return blocks
 
 
-_TEXTUAL_TABLE_KINDS = {"html", "html_pandoc", "pptx"}
-
-
-async def _structured_table(
-    doc_id: str, kind: str, index: int, grid: list[list[str]] | None
-) -> MaterializedTable | None:
+async def _structured_table(doc_id: str, index: int, grid: list[list[str]] | None) -> MaterializedTable | None:
     if not grid:
         return None
-    if kind in _TEXTUAL_TABLE_KINDS:
-        return await structure_single_table(grid, key=f"structure_single:{doc_id}:{index}")
-    return materialize(grid, single_table_structure(grid, header_rows=1))
+    return await structure_single_table(grid, key=f"structure_single:{doc_id}:{index}")
 
 
 async def handle_structure(fields: dict[str, str]) -> None:

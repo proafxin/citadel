@@ -1,4 +1,3 @@
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
@@ -8,14 +7,11 @@ from openpyxl.cell.cell import Cell as OpenpyxlCell
 from openpyxl.utils.cell import range_boundaries
 from openpyxl.worksheet.worksheet import Worksheet
 
-from citadel.schemas.table import TableStructure
 from citadel.services.grid import classify_grid, grid_text
 from citadel.tabular.materialize import MaterializedTable
 from citadel.tabular.structure import structure_tables
 
 type RawCellValue = str | int | float | bool | datetime | None
-
-_A1_REF = re.compile(r"(\$?[A-Za-z]{1,3})\$?\d+")
 
 
 @dataclass
@@ -253,38 +249,6 @@ def find_regions(sheet: SheetExtraction) -> list[Region]:
 def region_comments(region: Region) -> list[str]:
     ordered = sorted(region.cells, key=lambda cell: (cell.row, cell.col))
     return [cell.comment for cell in ordered if cell.comment]
-
-
-def _formula_shape(formula: str) -> str:
-    return _A1_REF.sub(r"\1#", formula)
-
-
-def region_formulas(region: Region) -> list[str]:
-    ordered = sorted(region.cells, key=lambda cell: (cell.row, cell.col))
-    by_shape: dict[str, str] = {}
-    for cell in ordered:
-        if cell.formula:
-            by_shape.setdefault(_formula_shape(cell.formula), cell.formula)
-    return list(by_shape.values())
-
-
-def _anchor_range(region: Region, structure: TableStructure) -> dict:
-    top = region.min_row + (min(structure.header_rows) if structure.header_rows else structure.data_start)
-    return {
-        "min_row": top,
-        "min_col": region.min_col + structure.col_start,
-        "max_row": region.min_row + structure.data_end,
-        "max_col": region.min_col + structure.col_end,
-    }
-
-
-def _region_bounds(region: Region) -> dict:
-    return {
-        "min_row": region.min_row,
-        "min_col": region.min_col,
-        "max_row": region.max_row,
-        "max_col": region.max_col,
-    }
 
 
 def _render_cell(value: RawCellValue) -> str:
