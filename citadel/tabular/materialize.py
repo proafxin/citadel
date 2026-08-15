@@ -137,12 +137,14 @@ def _materialize_relational(
         grid, structure.data_start, structure.data_end, structure.col_start, count, structure.section_rows or []
     )
     dtypes = [dtype_of([raw[index] for raw in collected]) for index in range(count)]
-    if structure.columns and header_rows:
+    if header_rows:
         headers: list[str | None] = [
-            structure.columns[index] if index < len(structure.columns) else None for index in range(count)
+            _grid_header(grid, header_rows, structure.col_start + index) for index in range(count)
         ]
+    elif structure.columns:
+        headers = [structure.columns[index] if index < len(structure.columns) else None for index in range(count)]
     else:
-        headers = [_grid_header(grid, header_rows, structure.col_start + index) for index in range(count)]
+        headers = [None] * count
     columns = [
         Column(header=_clean_name(headers[index]) or f"col{index}", dtype=dtypes[index]) for index in range(count)
     ]
