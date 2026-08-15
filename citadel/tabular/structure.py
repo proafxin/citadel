@@ -100,6 +100,27 @@ def _candidate_text(grid: list[list[str]], *, full: bool, budget: int | None) ->
     return f"{header}\n{body}"
 
 
+def _bounds(entry: dict) -> tuple[int, int] | None:
+    try:
+        return int(entry["data_start"]), int(entry["data_end"])
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _non_overlapping(entries: list[dict]) -> list[dict]:
+    valid = [(entry, bounds) for entry in entries if (bounds := _bounds(entry)) is not None]
+    ordered = sorted(valid, key=lambda pair: pair[1][0])
+    claimed_until = -1
+    result: list[dict] = []
+    for entry, (data_start, data_end) in ordered:
+        start = max(data_start, claimed_until + 1)
+        if start > data_end:
+            continue
+        result.append({**entry, "data_start": start, "data_end": data_end})
+        claimed_until = data_end
+    return result
+
+
 def _structure(entry: dict, width: int) -> TableStructure:
     return TableStructure(
         col_start=0,
@@ -130,7 +151,7 @@ async def structure_candidate(
     finally:
         await cap.release(key)
     tables: list[MaterializedTable] = []
-    for entry in data.get("tables") or []:
+    for entry in _non_overlapping(data.get("tables") or []):
         try:
             structure = _structure(entry, width)
         except (KeyError, ValueError, TypeError):
