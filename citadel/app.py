@@ -56,7 +56,7 @@ async def _finalize(library_id: int) -> None:
     emitted = await emit_library_batches(library_id)
     await mark_embed_started(library_id)
     await get_redis().xadd(STREAM_EMBED, {"library_id": str(library_id)})
-    logger.info("finalized library=%d documents=%d — awaiting summaries+embed", library_id, emitted)
+    logger.info("finalize dispatched library=%d documents=%d — awaiting summaries+embed", library_id, emitted)
 
 
 async def _settle_finalize(msg_id: bytes) -> None:

@@ -73,7 +73,7 @@ upload → normalize → paginate ┤                                   ├→ s
 | paginate | for the visual lane: count PDF pages and emit one render job each. For the markup lane: read HTML/PPTX/plain-text structure directly (no render/ocr — a format-specific parser produces blocks synchronously). For the tabular lane: emit one `table_structure` job per unit (one per spreadsheet sheet, one for a whole CSV/TSV/JSON file) |
 | render | rasterize one PDF page |
 | ocr | read the whole rendered page image with the vision model → blocks, including any table on that page in the same pass (see "Reading pages" below) |
-| structure | a document's blocks (from either the visual or the markup lane, once every page/unit is in) → paratext split, reclassify, stitch tables; resolve each candidate table's structure — mechanically for a table the vision model already read (see below), or with one model call per bounded table for a markup-sourced table whose header/orientation the markup alone did not state — then merge |
+| structure | a document's blocks (from either the visual or the markup lane, once every page/unit is in) → paratext split, reclassify, stitch tables; resolve each candidate table's structure with one model call per bounded table, full-grid for a vision-read table and budget-sampled for a markup-sourced one (see below) — then merge |
 | table_structure | tabular lane only (xlsx/csv/tsv/json) — one job per unit; for a spreadsheet sheet, the model sees every candidate at once and structures each real table, drops the spurious ones, and merges those that are one table split apart, because a raw cell range is boundary-ambiguous in a way nothing else in the pipeline is; CSV/TSV/JSON take no model call at all |
 | merge | assemble the content tree from the prepared blocks and the finished tables → persist |
 
@@ -83,10 +83,9 @@ genuinely undecidable, so it alone goes through the `table_structure` job: sever
 call, the model deciding membership as well as shape. Every other table — from a rendered page or from
 markup — is already exactly one bounded table by construction (the vision model already segmented it when it
 read the page; a `<table>` tag or a PPTX table/chart object already has hard edges), so structuring it is a
-`structure`-phase concern, resolved inline, with no candidate list to build or job to queue: mechanically, by
-reading whatever header signal the source already gave, for a table the model already saw once visually;
-with one small model call per table, for a markup-sourced table whose *internal* shape (header rows,
-orientation, section labels) the markup itself left open.
+`structure`-phase concern, resolved inline with no candidate list to build or job to queue: one small model
+call per table (`structure_single_table`), the same call for a vision-read table and a markup-sourced one —
+what differs is only how much of the grid that call is shown (below), not whether it is asked at all.
 
 A document with no tables needing a model call merges as soon as its pages/units are read, so it is
 structured and stored *during* the run rather than waiting behind work it does not have. (Becoming
@@ -126,22 +125,24 @@ mid-call is not leaked forever: the stale-TTL pruning in the same acquire script
 attempt by anyone.
 
 - **`get_vision_capacity()`** — page rasterization and embedded-image resolution share this one budget, sized
-  `OCR_CONCURRENCY + VISION_BUFFER` (64 + 32 = 96 today). A rasterized page's slot is acquired when the page
+  `OCR_CONCURRENCY + VISION_BUFFER` (32 + 16 = 48 today). A rasterized page's slot is acquired when the page
   is claimed off the rasterize stream and released only once that same page's OCR call resolves — one slot
   spans both phases, keyed by `doc_id:page_idx`, because the two phases are really one occupancy of the vision
   pipeline for that page, not two independent draws. This is what keeps host memory bounded regardless of how
   many documents or pages are in flight: a page cannot be rasterized far ahead of what the model can actually
   read.
-- **`get_text_capacity()`** — every text-only table-structuring call draws from this separate budget, sized
-  `TEXT_CONCURRENCY + TEXT_BUFFER` (256 + 128 = 384 today): a spreadsheet sheet's candidate-packed call
-  (`structure_tables`) and a markup-sourced table's single-table call (`structure_single_table`) both acquire
-  a slot here, one per actual model call. Sized far higher than the vision pool because a text-structure call is
-  materially cheaper and faster per request, not because more of them run in total.
+- **`get_text_capacity()`** — sized `TEXT_CONCURRENCY + TEXT_BUFFER` (128 + 64 = 192 today). Every
+  vision-read and markup-sourced table's single-table structuring call (`structure_single_table`) acquires a
+  slot here, one per actual model call — the spreadsheet path does not: see below. Sized higher than the
+  vision pool because a text-structure call is materially cheaper and faster per request, not because more of
+  them run in total.
 - **`get_text_large_capacity()`** — the smallest of the four (`TEXT_LARGE_CONCURRENCY + TEXT_LARGE_BUFFER`,
-  32 + 16 = 48 today), because these are the opposite profile from text-structure: batch summaries, the
-  per-document summary reduction, query resolution/filtering, and evidence-merge calls all carry large prompts
-  and run for a while. Sharing one pool with the high-volume text-structure calls would let a finalize burst of
-  many batch summaries occupy most of that pool's slots and starve a concurrently-ingesting library's
+  16 + 8 = 24 today), because these are the opposite profile from text-structure: batch summaries, the
+  per-document summary reduction, query resolution/filtering, evidence-merge calls, and — because a
+  spreadsheet sheet's candidate-packed call (`structure_tables`) shares its slow/bursty profile, not
+  single-table structuring's fast/steady one — spreadsheet table-candidate structuring all draw from this
+  pool. Sharing one pool with the high-volume single-table-structure calls would let a finalize burst of many
+  batch summaries occupy most of that pool's slots and starve a concurrently-ingesting library's
   table-structuring — a small, dedicated, low-concurrency pool is what keeps a slow/bursty call class from
   crowding out a fast/steady one, in either direction.
 - **`get_embed_capacity()`** — embedding calls to the `bge` service, sized `EMBED_CONCURRENCY + EMBED_BUFFER`
@@ -158,12 +159,16 @@ memory ahead of what the model can actually process.
 Beneath all of this sits a bound this system does not control: each inference server's own scheduler admits
 requests by available KV-cache/GPU-memory, not by request count, so the number of requests actually executing
 concurrently can be well below what's been admitted here — the rest queue inside the server. That queue is
-not starvation (the server is fully utilized while it's non-empty) but it does mean a client-side elapsed-time
-measurement on an individual request conflates real inference time with however long that request waited
-behind others for a slot; getting an honest split requires the server's own per-request queue and inference
-timing, not a client-side stopwatch.
+not starvation (the server is fully utilized while it's non-empty) but it does mean a naive client-side
+elapsed-time measurement on an individual request conflates real inference time with however long that
+request waited behind others for a slot. The page-OCR call gets an honest split without server-side
+instrumentation by streaming the response and timing to first token: everything before the first generated
+token is queue/scheduling wait (`ocr_wait`), everything from first token to completion is generation
+(`ocr_gpu`) — logged per document as `ocr_wait=…ms/pg ocr_gpu=…ms/pg`. This isn't a perfectly isolated GPU-only
+measurement (generation time still includes the server's own time-slicing across concurrently batched
+requests), but it separates queue wait from compute in a way a single blocking call cannot.
 
-The current numbers (64/32 vision, 256/128 text-structure, 32/16 text-large, 384/128 embed) are each sized to
+The current numbers (32/16 vision, 128/64 text-structure, 16/8 text-large, 384/128 embed) are each sized to
 the cost profile of their call class, not to a single shared guess: `bge`'s pool is matched to its own
 `--max-num-seqs` ceiling, since embedding calls are small enough that the server's own capacity is the real
 limit worth sizing against. The vision/text pools sit above the inference server's actual KV-cache ceiling by
@@ -275,10 +280,17 @@ merge/drop logic, because there is nothing to merge or drop. This is a materiall
 spreadsheet path: no token-budget packing, no multi-table splitting prompt, because a single already-bounded
 table never needs either.
 
-A page read by the vision model is a third case again: the model already saw the table's pixels once, in
-the same call that read the rest of the page, so its structure is asked for **in that same pass** — never
-re-derived from the page's own OCR output afterward. Sending an already-read table back through a second
-model call would be pure reprocessing of content the model had full visual access to the first time.
+A page read by the vision model converges on the same call as a markup-sourced table, not a third mechanism:
+the vision pass produces the page's markdown, a table-tagged region of it becomes a grid the same way a
+`<table>` becomes one, and that grid goes through the identical `structure_single_table` call. What's
+different is only how much of the grid the call is shown. A vision-read table is bounded by construction — a
+single page's whole OCR output is itself token-capped, so any table on it is provably small enough to show in
+full, uncapped, no sampling — while a markup-sourced table has no such bound (a docx/html/epub table can be
+arbitrarily large), so it is shown as much of itself as fits a dedicated per-call token budget, falling back
+to an evenly-spread sample only when it doesn't. Earlier, only markup tables got a structuring call at all and
+a vision-read table's shape was guessed mechanically (row 0 is the header) from the OCR grid alone — that
+mechanical guess is what produced the still-open two-level-nested-header failure mode; routing every bounded
+table through the same model call, vision-sourced or not, is the fix in progress for it.
 
 The routing is therefore by **ambiguity, not by source** — the distinction matters, because a source-shaped
 rule invites a private path per format, and the whole point is that there is exactly one. Every table from
@@ -316,8 +328,10 @@ By source:
   dotted key, lists of objects into child tables keyed back to their parent. An entity's keys are its
   schema, so there is nothing to infer. No model.
 - **Tables on a rendered page (PDF, images)** — the grid is built deterministically from the vision model's
-  own OCR output for that page, and its structure came from the same call: the model already read the
-  table's shape once, visually, so nothing asks it again from the grid afterward. Tables continuing across
+  own OCR output for that page (markdown table syntax parsed into cells), and its *structure* — which row is
+  the header, orientation, section labels — is asked of the model exactly like a markup table, in the
+  `structure` phase, shown the whole grid uncapped rather than a sample, because a single page's OCR output is
+  itself token-bounded so the table on it is provably small enough to show in full. Tables continuing across
   consecutive pages are stitched into one first — fragments with a matching column count across a page
   boundary merged, repeated headers dropped, page furniture skipped — so a forty-page table is one table.
 - **Embedded HTML/PPTX tables and charts** — the grid is built deterministically with spans expanded (a
@@ -326,15 +340,21 @@ By source:
   is asked of the model exactly as described above: one bounded table, one call, no candidate list. The
   header is not assumed from markup alone, because `<thead>`/`<th>` marks *that* a row is a header far more
   reliably than it marks that a form-shaped or transposed table needs restructuring rather than a literal
-  read.
+  read. Unlike a vision-read table, a markup-sourced table's source size has no natural cap — a docx/html/epub
+  table can genuinely be arbitrarily large — so it cannot always be shown in full: it is shown as much of
+  itself as fits a dedicated per-call token budget (top rows, bottom rows, and an even spread of the middle
+  when it doesn't all fit), never a flat row count.
 
-Where a model *is* asked, it is shown a bounded view and never the table: at most **20 rows** — the top few,
-the bottom few, and every Mth in between, with M widened as the sheet grows so the sample spans its whole
-height — against **every column**, because the columns are the schema and a header dropped is a schema lost.
-A payload is therefore a function of a table's width, never of its length: a five-row sheet and a
-five-million-row sheet cost the same call. Sizing that view by a *token budget* instead is a mistake made
-and measured — it let a prompt grow to fill whatever window was available, producing 20k-token requests to
-decide which rows were headers.
+**The spreadsheet-candidate call (`table_structure`) is a different, deliberately narrower view, and stays
+that way.** It is shown a bounded sample and never the table: at most **20 rows** — the top few, the bottom
+few, and every Mth in between — against **every column**, because the columns are the schema and a header
+dropped is a schema lost. This payload is a function of a table's width, never of its length: a five-row
+sheet and a five-million-row sheet cost the same call. Sizing *this* view by a token budget was tried and
+rejected — because several candidates share one packed call here, letting any one candidate's view grow with
+its size let a prompt balloon to fill whatever window was available, producing 20k-token requests to decide
+which rows were headers. A single bounded table's own structuring call doesn't share that risk (nothing else
+is packed alongside it, and its budget is a fixed ceiling tied to the model's context window, not "whatever
+fits") — which is why that call was moved to a token budget while this one was not.
 
 Structure detection over-produces — a block of prose gridded into cells, a figure or a caption read as a
 one-row table, a region that is not tabular at all — so membership is not a separate step but part of the
@@ -373,9 +393,20 @@ Search text is indexed two ways: dense multilingual vectors for meaning, and exa
 
 ## Reliability
 
-- Delivery is at-least-once; a crashed run's pending work is reclaimed and reprocessed on restart.
+- Delivery is at-least-once; a crashed run's pending work is reclaimed and reprocessed — including when the
+  worker that crashed never comes back under the same identity. Redis Streams consumer names are the running
+  container/pod's own hostname, not a manually assigned id: nothing has to be configured per replica, and
+  nothing breaks if an autoscaler kills a worker and replaces it with a differently-named one. A periodic
+  `XAUTOCLAIM` sweep on every stream reaps entries left in a dead consumer's pending-entries list once they've
+  sat unacknowledged past an idle threshold, regardless of which now-gone consumer held them — so a killed
+  worker's in-flight page is picked up by whichever worker is alive, not lost.
 - Recording a page is idempotent, so a redelivered page is a no-op.
 - A single merge fires exactly once — when the last page or sheet of a document completes.
+- Finalize is claimed, not broadcast: the trigger runs over a Redis Streams consumer group (multiple
+  `app.py` replicas compete for the same finalize entries instead of every replica independently re-running
+  finalize off the same signal), and the finalize action itself is guarded by an advisory lock plus a
+  "not already started" check inside one transaction, so a duplicate or redelivered trigger for a library
+  already mid-finalize is a no-op rather than a second concurrent run.
 - Work that fails is retried a bounded number of times, then given up cleanly.
 - Failures are scoped: a page that can't be read leaves a marker and the document still completes as
   *partial*; a whole-document failure is marked *failed*.
@@ -407,8 +438,15 @@ Summaries used to stream per document *during* ingestion, overlapping OCR; that 
 tax and, worse, let a query in the window resolve over a partial inventory. Running them in this phase, gated
 on the library's last document draining, closes both.
 
-**Readiness itself is a durable, crash-recoverable stream job, not an in-process wait.** `citadel/app.py`'s
-finalize step no longer blocks on anything — it starts batch-summary jobs, enqueues one embedding job onto
+**Readiness itself is a durable, crash-recoverable stream job, not an in-process wait.** The trigger into
+finalize is itself a Redis Streams consumer-group entry (`STREAM_FINALIZE`), not a Postgres `LISTEN/NOTIFY`
+broadcast — a broadcast delivers to every listener, so with more than one `app.py` replica each one would
+independently re-run finalize off the same signal; a consumer group instead lets replicas compete for the
+same entry, so exactly one of them claims it. Finalize itself is additionally guarded by an advisory lock
+plus a "not already started" check inside one transaction, so a redelivered or duplicate trigger for a
+library already mid-finalize is a no-op rather than a second concurrent run — the group gives at-least-once
+delivery, and this is what turns that into effectively-once execution. Once claimed, `citadel/app.py`'s
+finalize step doesn't block on anything itself — it starts batch-summary jobs, enqueues one embedding job onto
 `STREAM_EMBED`, and returns immediately. Two independent consumers in `citadel/worker.py` each record a flag
 (`citadel/services/readiness.py`) once their half is genuinely done: the last batch summary to complete
 records the `summaries` flag, and the embed job records `embedding` once `embed_library` finishes. Recording a
@@ -418,13 +456,12 @@ Every piece here is either a Redis Streams consumer-group read or an idempotent 
 every other phase in this pipeline already uses — if `app.py` or a worker restarts mid-flight, nothing about
 the wait is lost, because nothing was held in a process's memory to begin with.
 
-**A library is blocked from ever reaching ready while any document's batch summary has permanently failed,**
-not merely tracked separately from a successful one. This falls out of the completion check itself rather
-than needing a distinct failure state: a document only stops counting as "pending" once `summarized_at` is
-actually set, and a summary job that exhausts its retries deliberately never sets it — it just logs and gives
-up. The library's pending count for that document then never reaches zero, the `summaries` flag for that
-library is never recorded, and `STREAM_LIBRARY_READY` never fires — the library stays at `ingested` until the
-failure is resolved by hand and batch summarization is re-driven for that document.
+**A document whose batch summary or a library whose embedding permanently fails moves the library to
+`LibraryStatus.FAILED`, not an indefinite silent hold.** A summary or embed job that exhausts its retries
+marks the library failed and logs why, rather than only logging and leaving the library's pending count stuck
+above zero forever with no visible state change. `FAILED` is a real, queryable status distinct from
+`ingested`/`ready` — a stuck library is now something the system reports, not something an operator has to
+notice is simply never finishing.
 
 **The embedding index is disposable; the tree and tables are not.** Nothing about the content tree or the
 canonical tables is specific to any embedding model — they are typed, structured, model-agnostic state,
@@ -749,9 +786,12 @@ alternatives on real corpus pages using the same tag-scheme prompt (`prompts/pag
 - `Qwen/Qwen3-VL-8B-Instruct-FP8` (current production model) — best quality observed of any model tested.
   `finish_reason == "length"` (the near-universal signal for repetition-collapse across every model tried)
   reduced to roughly 1-2% at 100/255-page scale after the three prompt fixes (tag-once, no-meta-commentary,
-  equation-chain-termination). Real GPU-executed concurrency measured at 11-14 under production load, well
-  below the app's `OCR_CONCURRENCY = 64` dispatch cap — the gap is absorbed safely by vLLM's own request
-  queue, with no throughput benefit from the higher cap.
+  equation-chain-termination). Real GPU-executed concurrency is well below the app's dispatch cap
+  (`OCR_CONCURRENCY = 32`, `+ VISION_BUFFER` admitted client-side) — the gap is absorbed safely by vLLM's own
+  request queue, with no throughput benefit from the higher cap. The exact concurrency the server sustains is
+  a point-in-time operational figure, not a fixed architectural constant — it has been observed anywhere from
+  ~11 to the low-20s concurrent `Running` requests depending on config/corpus at the time; check
+  `docker logs citadel-qwen` for the current figure rather than citing a specific number here.
 - `Qwen/Qwen3-VL-4B-Instruct-FP8` — 14% collapse rate at scale, disqualifying.
 - `lovedheart/Qwen3.5-4B-FP8` (community FP8 quant; no official Qwen3.5-4B-Instruct-FP8 exists) — tested to
   see whether a smaller, higher-concurrency model was "good enough" to free the 8B model for non-OCR SLM

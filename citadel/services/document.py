@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import logging
 import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -41,6 +42,8 @@ from citadel.services.tree import (
 )
 from citadel.storage import delete_object, get_object, put_object
 from citadel.tabular.materialize import MaterializedTable
+
+logger = logging.getLogger(__name__)
 
 
 async def create_documents(library_id: int, filenames: list[str]) -> list[int]:
@@ -141,6 +144,7 @@ async def mark_library_ready(library_id: int) -> None:
             return
         library.status = LibraryStatus.READY
         library.ready_at = datetime.now(UTC)
+    logger.info("library ready library=%d", library_id)
 
 
 async def mark_library_failed(library_id: int) -> None:
