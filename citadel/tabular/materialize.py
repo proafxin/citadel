@@ -72,7 +72,7 @@ def _clean_name(name: str | None) -> str | None:
     return None if name is not None and _lossless_decimal(name.strip()) else name
 
 
-def _sample(rows: list[list[CellValue]]) -> list[list[CellValue]]:
+def sample_rows(rows: list[list[CellValue]]) -> list[list[CellValue]]:
     if len(rows) <= SAMPLE_TABLE_ROWS:
         return list(rows)
     step = len(rows) / SAMPLE_TABLE_ROWS
@@ -164,7 +164,7 @@ def _materialize_relational(
         sheet_no=sheet_no,
         columns=[*section_columns, *columns],
         rows=[*header_cells, *data_rows],
-        sample_rows=_sample(data_rows),
+        sample_rows=sample_rows(data_rows),
         n_rows=len(data_rows),
         title=structure.title,
         caption=structure.caption,

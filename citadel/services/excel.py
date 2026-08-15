@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
@@ -9,7 +10,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from citadel.services.grid import classify_grid, grid_text
 from citadel.tabular.materialize import MaterializedTable
-from citadel.tabular.structure import structure_tables
+from citadel.tabular.structure import Position, merge_candidates, structure_candidate
 
 type RawCellValue = str | int | float | bool | datetime | None
 
@@ -288,10 +289,13 @@ def _pivot_covers(region: Region, pivots: list[SheetPivot]) -> bool:
     )
 
 
+def _region_anchors(region: Region) -> dict:
+    return {"min_row": region.min_row, "min_col": region.min_col, "max_row": region.max_row, "max_col": region.max_col}
+
+
 async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tuple[int, SheetItem]]:
     text: list[SheetItem] = []
-    grids: list[list[list[str]]] = []
-    cells: list[Cell] = []
+    candidates: list[tuple[Region, list[list[str]]]] = []
     for region in find_regions(sheet):
         grid = region_grid(sheet, region)
         kind = classify_grid(grid)
@@ -301,22 +305,24 @@ async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tup
             body = " ".join([grid_text(grid), *region_comments(region)]).strip()
             text.append(SheetText(sheet_no=sheet.sheet_no, text=body))
             continue
-        grids.append(grid)
-        cells.extend(region.cells)
+        candidates.append((region, grid))
     items: list[SheetItem] = list(text)
-    if grids:
-        anchors = {
-            "min_row": min(cell.row for cell in cells),
-            "min_col": min(cell.col for cell in cells),
-            "max_row": max(cell.row for cell in cells),
-            "max_col": max(cell.col for cell in cells),
-        }
-        structured = await structure_tables(
-            grids,
-            prompt_name="table_structure_excel",
-            sheet_no=sheet.sheet_no,
-            anchors=anchors,
-            label=f"{doc_id}:sheet{sheet.sheet_no}",
+    if candidates:
+        resolved = await asyncio.gather(
+            *(
+                structure_candidate(
+                    grid,
+                    key=f"structure:{doc_id}:sheet{sheet.sheet_no}:{index}",
+                    sheet_no=sheet.sheet_no,
+                    anchors=_region_anchors(region),
+                )
+                for index, (region, grid) in enumerate(candidates)
+            )
         )
-        items.extend(table for table, _blocks in structured)
+        regions: list[Position] = []
+        members: list[MaterializedTable] = []
+        for (region, _grid), tables in zip(candidates, resolved, strict=True):
+            regions.extend([region] * len(tables))
+            members.extend(tables)
+        items.extend(await merge_candidates(doc_id, sheet.sheet_no, regions, members))
     return list(enumerate(items, start=1))

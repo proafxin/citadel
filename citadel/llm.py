@@ -27,7 +27,7 @@ _call_no = itertools.count()
 NO_TIMEOUT = httpx.Timeout(None)
 
 STRUCT_MAX_TOKENS = 4096
-STRUCTURE_MAX_TOKENS = 8192
+STRUCTURE_MAX_TOKENS = 2048
 SYNTH_MAX_TOKENS = 8192
 SLM_MODEL_LEN = 32768
 PAGE_OCR_MAX_TOKENS = 3584
@@ -147,10 +147,6 @@ async def call_text(prompt: str, max_tokens: int, key: str) -> str:
         await cap.release(key)
 
 
-async def call_text_table(prompt: str, max_tokens: int) -> str:
-    return (await _post_qwen(_text_payload(prompt, max_tokens))).strip()
-
-
 async def call_embed(texts: list[str], key: str) -> list[list[float]]:
     cap = get_embed_capacity()
     await cap.acquire(key)
@@ -196,14 +192,9 @@ async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -
     return "".join(parts).strip(), wait_s, gpu_s
 
 
-async def call_structure_single(payload: str) -> str:
-    prompt = f"{load_prompt('table_structure_single')}\n{payload}"
-    return await call_text_table(prompt, STRUCTURE_MAX_TOKENS)
-
-
-async def call_structure_candidates(payload: str, prompt_name: str) -> str:
-    prompt = f"{load_prompt(prompt_name)}\n{payload}"
-    return await call_text_table(prompt, STRUCTURE_MAX_TOKENS)
+async def call_structured(prompt: str, schema: dict, max_tokens: int = STRUCTURE_MAX_TOKENS) -> dict:
+    raw = await _post_qwen(_struct_payload(prompt, _inline_refs(schema), max_tokens))
+    return json.loads(_extract_json(raw))
 
 
 async def merge_evidence(query: str, items: list[str]) -> str:
@@ -295,21 +286,6 @@ async def call_resolve(
     if not doc_coverage and not table_coverage:
         logger.warning("resolve covered nothing raw=%s", data)
     return doc_coverage, table_coverage
-
-
-def pack_indices(counts: list[int], budget: int) -> list[list[int]]:
-    groups: list[list[int]] = []
-    current: list[int] = []
-    used = 0
-    for index, cost in enumerate(counts):
-        if current and used + cost > budget:
-            groups.append(current)
-            current, used = [], 0
-        current.append(index)
-        used += cost
-    if current:
-        groups.append(current)
-    return groups
 
 
 async def write_queries(query: str, tables: list[str], library: str = "") -> QueryPlan:

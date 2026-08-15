@@ -66,7 +66,7 @@ from citadel.services.tabular import (
     structure_csv_tables,
 )
 from citadel.tabular.materialize import MaterializedTable, materialize
-from citadel.tabular.structure import structure_single_table
+from citadel.tabular.structure import structure_candidate
 from citadel.utils import normalize_file
 from config import CPU_EIGHTH, CPU_THIRD
 
@@ -850,11 +850,11 @@ _TEXT_SOURCE_KINDS = {"html", "html_pandoc", "pptx"}
 
 async def _structured_table(
     doc_id: str, kind: str, index: int, grid: list[list[str]] | None
-) -> MaterializedTable | None:
+) -> list[MaterializedTable]:
     if not grid:
-        return None
+        return []
     full = kind not in _TEXT_SOURCE_KINDS
-    return await structure_single_table(grid, key=f"structure_single:{doc_id}:{index}", full=full)
+    return await structure_candidate(grid, key=f"structure:{doc_id}:{index}", full=full)
 
 
 async def handle_structure(fields: dict[str, str]) -> None:
@@ -869,9 +869,7 @@ async def handle_structure(fields: dict[str, str]) -> None:
         results = await asyncio.gather(
             *(_structured_table(doc_id, kind, index, prepared.stitched[index].grid) for index in indices)
         )
-        tables = {
-            str(index): dump_tables([table] if table else []) for index, table in zip(indices, results, strict=True)
-        }
+        tables = {str(index): dump_tables(table_list) for index, table_list in zip(indices, results, strict=True)}
         await redis.hset(f"tables:{doc_id}", mapping=tables)
     await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
 
