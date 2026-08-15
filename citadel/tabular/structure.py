@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from itertools import starmap
 from typing import Protocol
@@ -234,8 +235,13 @@ async def merge_candidates(
     groups = _adjacency_groups(regions)
     grouped_indices: set[int] = {index for group in groups for index in group}
     out: list[MaterializedTable] = [table for index, table in enumerate(members) if index not in grouped_indices]
-    for group_no, group in enumerate(groups):
-        group_members = [members[index] for index in group]
-        chains = await _resolve_group(doc_id, sheet_no, group_no, group_members)
+    group_members_list = [[members[index] for index in group] for group in groups]
+    resolved = await asyncio.gather(
+        *(
+            _resolve_group(doc_id, sheet_no, group_no, group_members)
+            for group_no, group_members in enumerate(group_members_list)
+        )
+    )
+    for group_members, chains in zip(group_members_list, resolved, strict=True):
         out.extend(group_members[chain[0]] if len(chain) == 1 else _combine(group_members, chain) for chain in chains)
     return out
