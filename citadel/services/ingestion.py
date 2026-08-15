@@ -724,19 +724,19 @@ def _strip_meta_commentary(markdown: str) -> str:
     return "\n".join(kept)
 
 
-async def _ocr_blocks(image_key: str) -> list[Block]:
+async def _ocr_blocks(image_key: str) -> tuple[list[Block], float, float]:
     image_bytes = await get_redis().get(image_key)
     if isinstance(image_bytes, str):
         image_bytes = image_bytes.encode()
     if image_bytes is not None and await asyncio.to_thread(_is_blank_image, image_bytes):
-        return []
-    markdown = await call_page_ocr(image_key)
+        return [], 0.0, 0.0
+    markdown, wait_s, gpu_s = await call_page_ocr(image_key)
     markdown = _strip_wrapping_fence(markdown)
     markdown = _strip_meta_commentary(markdown)
-    return blocks_from_page_markdown(markdown)
+    return blocks_from_page_markdown(markdown), wait_s, gpu_s
 
 
-async def extract_page(doc_id: str, page_idx: int) -> list[Block]:
+async def extract_page(doc_id: str, page_idx: int) -> tuple[list[Block], float, float]:
     return await _ocr_blocks(page_image_key(doc_id, page_idx))
 
 
@@ -762,7 +762,8 @@ async def _resolve_unique_images(doc_id: str, unit: str, images: dict[int, bytes
         key = keys[digest]
         await cap.acquire(key)
         try:
-            return digest, await _ocr_blocks(key)
+            blocks, _, _ = await _ocr_blocks(key)
+            return digest, blocks
         finally:
             await cap.release(key)
             await redis.delete(key)
@@ -801,11 +802,11 @@ async def handle_ocr(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     page_idx = int(fields["page_idx"])
     await get_redis().hincrby(f"doc:{doc_id}", "started_count", 1)
-    ocr_t = time.time()
-    blocks = await extract_page(doc_id, page_idx)
+    blocks, wait_s, gpu_s = await extract_page(doc_id, page_idx)
     for block in blocks:
         block.page_idx = page_idx
-    await _add_stage_seconds(doc_id, "ocr_s", time.time() - ocr_t)
+    await _add_stage_seconds(doc_id, "ocr_wait_s", wait_s)
+    await _add_stage_seconds(doc_id, "ocr_gpu_s", gpu_s)
     await _emit_page(doc_id, page_idx, blocks)
 
 
@@ -816,7 +817,8 @@ async def _emit_page(doc_id: str, page_idx: int, blocks: list[Block]) -> None:
 STAGE_SECONDS = (
     ("render_wait", "render_wait_s"),
     ("render_cpu", "render_s"),
-    ("ocr_wall", "ocr_s"),
+    ("ocr_wait", "ocr_wait_s"),
+    ("ocr_gpu", "ocr_gpu_s"),
 )
 
 
@@ -843,22 +845,29 @@ async def _read_doc_blocks(doc_id: str) -> list[Block]:
     return blocks
 
 
-async def _structured_table(doc_id: str, index: int, grid: list[list[str]] | None) -> MaterializedTable | None:
+_TEXT_SOURCE_KINDS = {"html", "html_pandoc", "pptx"}
+
+
+async def _structured_table(
+    doc_id: str, kind: str, index: int, grid: list[list[str]] | None
+) -> MaterializedTable | None:
     if not grid:
         return None
-    return await structure_single_table(grid, key=f"structure_single:{doc_id}:{index}")
+    full = kind not in _TEXT_SOURCE_KINDS
+    return await structure_single_table(grid, key=f"structure_single:{doc_id}:{index}", full=full)
 
 
 async def handle_structure(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
+    kind = (await redis.hget(f"doc:{doc_id}", "kind") or b"").decode()
     blocks = await _read_doc_blocks(doc_id)
     prepared = prepare_document(blocks)
     await redis.set(f"structures:{doc_id}", dump_structures(prepared), ex=DOC_TTL)
     indices = table_block_indices(prepared.stitched)
     if indices:
         results = await asyncio.gather(
-            *(_structured_table(doc_id, index, prepared.stitched[index].grid) for index in indices)
+            *(_structured_table(doc_id, kind, index, prepared.stitched[index].grid) for index in indices)
         )
         tables = {
             str(index): dump_tables([table] if table else []) for index, table in zip(indices, results, strict=True)

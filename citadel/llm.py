@@ -162,7 +162,7 @@ async def call_embed(texts: list[str], key: str) -> list[list[float]]:
         await cap.release(key)
 
 
-async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -> str:
+async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -> tuple[str, float, float]:
     data = await get_redis().get(image_key)
     if isinstance(data, str):
         data = data.encode()
@@ -181,8 +181,19 @@ async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -
         "temperature": 0,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
+        "stream": True,
     }
-    return (await _post_qwen(payload)).strip()
+    started = time.time()
+    first_token: float | None = None
+    parts: list[str] = []
+    async for token in _stream_qwen(payload):
+        if first_token is None:
+            first_token = time.time()
+        parts.append(token)
+    done = time.time()
+    wait_s = (first_token or done) - started
+    gpu_s = done - (first_token or done)
+    return "".join(parts).strip(), wait_s, gpu_s
 
 
 async def call_structure_single(payload: str) -> str:

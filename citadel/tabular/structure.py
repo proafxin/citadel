@@ -4,41 +4,89 @@ import re
 import time
 from collections import Counter
 
-from citadel.llm import call_structure_candidates, call_structure_single, count_tokens_batch, pack_indices
+from citadel.llm import (
+    SLM_MODEL_LEN,
+    STRUCTURE_MAX_TOKENS,
+    call_structure_candidates,
+    call_structure_single,
+    count_tokens_batch,
+    pack_indices,
+)
 from citadel.services.capacity import get_text_capacity, get_text_large_capacity
 from citadel.services.tabular import grid_from_markdown, single_table_structure
-from citadel.tabular.flag import column_kinds, payload_rows
+from citadel.tabular.flag import SAMPLE_BOTTOM, SAMPLE_TOP, column_kinds, payload_rows
 from citadel.tabular.materialize import MaterializedTable, materialize
 
 logger = logging.getLogger(__name__)
 
 _MAX_CELL = 40
 STRUCTURE_PAYLOAD_BUDGET = 3800
+SINGLE_TABLE_BUDGET = SLM_MODEL_LEN - STRUCTURE_MAX_TOKENS - 2048
 
 _BLOCKS_TAG = re.compile(r"^###\s*blocks:\s*([\d,\s]+)", re.IGNORECASE)
 _TITLE_TAG = re.compile(r"^###\s*title:\s*(.+)$", re.IGNORECASE)
 _NOTES_TAG = re.compile(r"^###\s*notes:\s*(.+)$", re.IGNORECASE)
 
 
-def _row_line(index: int, row: list[str], width: int) -> str:
-    cells = [(row[col] if col < len(row) else "").strip()[:_MAX_CELL] for col in range(width)]
+def _row_line(index: int, row: list[str], width: int, max_cell: int | None) -> str:
+    cells = [(row[col] if col < len(row) else "").strip() for col in range(width)]
+    if max_cell is not None:
+        cells = [cell[:max_cell] for cell in cells]
     return f"row {index}: " + " | ".join(cells)
 
 
-def _payload_text(grid: list[list[str]], indices: list[int], width: int) -> str:
-    return "\n".join(_row_line(index, grid[index], width) for index in indices)
+def _payload_text(grid: list[list[str]], indices: list[int], width: int, max_cell: int | None) -> str:
+    return "\n".join(_row_line(index, grid[index], width, max_cell) for index in indices)
 
 
-def _candidate_text(grid: list[list[str]], index: int, adjacent: str = "", header_hint: list[int] | None = None) -> str:
+def _spread(rows: list[int], room: int) -> list[int]:
+    if room <= 0 or not rows:
+        return []
+    if room >= len(rows):
+        return rows
+    step = len(rows) / room
+    return sorted({rows[int(index * step)] for index in range(room)})
+
+
+def _budgeted_sample(grid: list[list[str]], width: int, budget: int) -> list[int]:
+    rows = list(range(len(grid)))
+    if not rows:
+        return []
+    lines = [_row_line(index, grid[index], width, _MAX_CELL) for index in rows]
+    counts = count_tokens_batch(lines)
+    if sum(counts) <= budget:
+        return rows
+    avg = sum(counts) / len(counts)
+    room = max(int(budget / avg), SAMPLE_TOP + SAMPLE_BOTTOM)
+    edges = set(rows[:SAMPLE_TOP]) | set(rows[len(rows) - SAMPLE_BOTTOM :])
+    middle = [index for index in rows[SAMPLE_TOP : len(rows) - SAMPLE_BOTTOM] if index not in edges]
+    return sorted(edges | set(_spread(middle, max(room - len(edges), 0))))
+
+
+def _candidate_text(
+    grid: list[list[str]],
+    index: int,
+    adjacent: str = "",
+    header_hint: list[int] | None = None,
+    *,
+    full: bool = False,
+    budget: int | None = None,
+) -> str:
     width = max((len(row) for row in grid), default=0)
     kinds = column_kinds(grid)
     hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))
-    body = _payload_text(grid, payload_rows(grid), width)
+    if full:
+        rows = list(range(len(grid)))
+    elif budget is not None:
+        rows = _budgeted_sample(grid, width, budget)
+    else:
+        rows = payload_rows(grid)
+    body = _payload_text(grid, rows, width, None if full else _MAX_CELL)
     context = f"\n{adjacent}" if adjacent else ""
     header_line = ""
     if header_hint:
-        rows = ", ".join(str(row) for row in header_hint)
-        header_line = f"\nsource marks row(s) {rows} as header"
+        rows_desc = ", ".join(str(row) for row in header_hint)
+        header_line = f"\nsource marks row(s) {rows_desc} as header"
     return f"{index}: {len(grid)} rows, {width} cols; column kinds: {hint}{context}{header_line}\n{body}"
 
 
@@ -99,8 +147,8 @@ def _parse_single(text: str) -> tuple[str | None, list[str], str]:
     return title, notes, "\n".join(body)
 
 
-async def structure_single_table(grid: list[list[str]], *, key: str) -> MaterializedTable:
-    text = _candidate_text(grid, 0)
+async def structure_single_table(grid: list[list[str]], *, key: str, full: bool = False) -> MaterializedTable:
+    text = _candidate_text(grid, 0, full=full, budget=None if full else SINGLE_TABLE_BUDGET)
     cap = get_text_capacity()
     await cap.acquire(key)
     try:
