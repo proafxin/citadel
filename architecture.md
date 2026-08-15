@@ -2,7 +2,7 @@
 
 How Citadel turns an uploaded file of *any* format into a **queryable relational knowledge layer** — a
 lossless content tree plus canonical tables in a relational database — and then answers a question over it
-by having the model **write SQL the database executes**, so figures are computed, never guessed. Both
+by having the model **write a query the database executes**, so figures are computed, never guessed. Both
 halves — ingestion and query — are built.
 
 The single idea the whole system is organized around: a document should become **data, not searchable
@@ -10,6 +10,11 @@ text**. Once it is data, the model is only ever asked to do things a language mo
 layout, judge relevance, write a query — and never the things it is bad at: parsing a messy grid,
 aggregating thousands of rows, or inventing a number. Every design decision below follows from holding
 that line.
+
+One general-purpose vision-language model performs every one of those steps, across both halves — reading
+pages and embedded images, structuring tables, summarizing, resolving a question, writing queries, and
+composing the answer. There is no separate layout/detection model and no separate text-only model: the same
+model that reads a page's pixels also structures its tables and writes the query over them.
 
 ---
 
@@ -19,7 +24,8 @@ that line.
 
 Ingest **every** format into a **lossless**, persisted, *queryable* representation — no chunking, no
 flattening tables into prose, and no model ever inventing or computing a data value. The end state is
-data, not searchable text: a content tree plus canonical tables in a relational database, ready for SQL.
+data, not searchable text: a content tree plus canonical tables in a relational database, ready for
+structured queries.
 
 ## Three lanes
 
@@ -29,11 +35,11 @@ Every format reduces to one of three extractors, chosen at intake:
 |---|---|---|
 | **Markup** | HTML; Markdown, Word, ODT, RTF, EPUB (converted to HTML) | content tree |
 | **Visual** | PDF, images | content tree |
-| **Tabular** | spreadsheets; CSV/TSV; JSON | canonical Table + rows |
+| **Tabular** | spreadsheets; CSV/TSV; JSON | canonical table + rows |
 
 Slide decks (PowerPoint, ODP) are a fourth path, distinct from all three: they are read directly from their
-own shape/text structure (never rasterized to pages), with embedded images OCR'd individually — see
-"Reading pages (ocr)" below.
+own shape/text structure (never rendered to page images), with embedded images read individually — see
+"Reading pages" below.
 
 Plain text is a degenerate markup case: split on blank lines into paragraphs.
 
@@ -43,140 +49,115 @@ Plain text is a degenerate markup case: split on blank lines into paragraphs.
 |---|---|---|
 | spreadsheets (XLSX / XLS / ODS) | tabular | cells read directly |
 | CSV / TSV / JSON | tabular | typed parse / structural shred |
-| XML | tabular | shredded to JSON (attributes/text folded by the same convention as any XML→JSON tool), then the JSON path |
+| XML | tabular | shredded to the same normalized shape as JSON, then the JSON path |
 | HTML | markup | parsed as-is |
 | Markdown | markup | converted to HTML (math kept as LaTeX) |
 | Word / ODT / RTF / EPUB | markup | converted to HTML |
-| PowerPoint / ODP | — | converted to PPTX if needed, read directly from shapes/text, never rasterized |
+| PowerPoint / ODP | — | read directly from its shapes/text, never rendered to page images |
 | PDF | visual | every page rendered to an image and read whole by the vision model |
 | images | visual | read as one page |
-| SVG | visual | rasterized to PNG, then read as one image — SVG carries no accessible data path today, so a chart authored only as SVG is read the same as any other picture |
+| SVG | visual | rasterized to a raster image, then read as one image — SVG carries no accessible data path today, so a chart authored only as SVG is read the same as any other picture |
 
 ## Pipeline
 
-Ingestion runs as streaming workers on a bus — an upload feeds an always-running pipeline, not a
-per-upload script. Each phase is an independent, asynchronous consumer running concurrently, and work is
-**page-granular**: the unit of work is a page, not a document, so the whole corpus reads in parallel. Every
-stage is a FIFO-fed sliding window — it claims only as much as it can hold, and a slot frees the moment one
-item completes, never in batches. The phases:
+Ingestion runs as a set of always-on streaming stages connected by a shared queue, not a per-upload script —
+an upload joins a continuously running pipeline rather than triggering its own isolated job. Each stage is an
+independent, asynchronous consumer running concurrently with every other stage, and work is **page-granular**:
+the unit of work is a page, not a document, so a whole corpus is read in parallel rather than one document
+finishing before the next begins. Each stage claims only as much work as it currently has room for, and a
+slot frees the instant one item completes — never in batches — so nothing waits behind an arbitrary group
+boundary.
 
-```
-                              ┌→ render → rasterize → pages(ocr) ─┐
-upload → normalize → paginate ┤                                   ├→ structure → merge → relational store
-                              └→ (markup: html/pptx/text blocks) ─┘
-                     └──────────────────────────────────→ table_structure ──────→ merge
-```
+The pipeline has three parallel intake paths, one per lane, that converge on shared closing phases:
 
-| Phase | Work |
-|---|---|
-| normalize | route + convert to one of the three lanes |
-| paginate | for the visual lane: count PDF pages and emit one render job each. For the markup lane: read HTML/PPTX/plain-text structure directly (no render/ocr — a format-specific parser produces blocks synchronously). For the tabular lane: emit one `table_structure` job per unit (one per spreadsheet sheet, one for a whole CSV/TSV/JSON file) |
-| render | rasterize one PDF page |
-| ocr | read the whole rendered page image with the vision model → blocks, including any table on that page in the same pass (see "Reading pages" below) |
-| structure | a document's blocks (from either the visual or the markup lane, once every page/unit is in) → paratext split, reclassify, stitch tables; resolve each candidate table's structure with one model call per bounded table, full-grid for a vision-read table and budget-sampled for a markup-sourced one (see below) — then merge |
-| table_structure | tabular lane only (xlsx/csv/tsv/json) — one job per unit; for a spreadsheet sheet, the model sees every candidate at once and structures each real table, drops the spurious ones, and merges those that are one table split apart, because a raw cell range is boundary-ambiguous in a way nothing else in the pipeline is; CSV/TSV/JSON take no model call at all |
-| merge | assemble the content tree from the prepared blocks and the finished tables → persist |
+- The **visual** lane renders each page to an image and reads the whole page with the vision model in one
+  pass, tables included (see "Reading pages" below).
+- The **markup** lane parses HTML/PowerPoint/plain-text structure directly — no rendering, no vision model; a
+  format-specific parser produces the same block shape synchronously.
+- The **tabular** lane resolves each spreadsheet sheet, or each flat table file, into its canonical shape
+  directly — see "Tables" below.
 
-**Two structuring mechanisms exist, and which one applies is decided by whether a table's boundaries were
-ever in question — not by its source format.** A spreadsheet's raw cell range is the one place boundaries are
-genuinely undecidable, so it alone goes through the `table_structure` job: several candidates at once, one
-call, the model deciding membership as well as shape. Every other table — from a rendered page or from
-markup — is already exactly one bounded table by construction (the vision model already segmented it when it
-read the page; a `<table>` tag or a PPTX table/chart object already has hard edges), so structuring it is a
-`structure`-phase concern, resolved inline with no candidate list to build or job to queue: one small model
-call per table (`structure_single_table`), the same call for a vision-read table and a markup-sourced one —
-what differs is only how much of the grid that call is shown (below), not whether it is asked at all.
+The visual and markup lanes converge on a shared **structuring** phase once every page or unit of a document
+has been read: it splits out running headers/footers, reclassifies and stitches candidate tables, resolves
+each bounded table's internal shape with one model call (see "Tables" below), and hands the finished blocks to
+**merge**, which assembles the content tree and persists it together with any finished tables. The tabular
+lane resolves its own table structure inline and converges on the same merge phase. A document with no table
+needing a model call merges as soon as its pages or units are read — it is structured and stored *during* the
+run, not held behind work it doesn't have. (Becoming *searchable* is a later, separate step — see "Output and
+finalize" — not part of this pipeline.)
 
-A document with no tables needing a model call merges as soon as its pages/units are read, so it is
-structured and stored *during* the run rather than waiting behind work it does not have. (Becoming
-*searchable* is a later, separate step — the prep phase in Part I's finalize — not part of this pipeline.)
-
-The bus carries only lightweight in-flight state — page images and per-page blocks; the uploaded source is
-held once in a doc-keyed store and memory-mapped by each stage that reads it, never copied through the bus
-per page.
+The queue carries only lightweight in-flight state — page images and per-page blocks. The uploaded source
+itself is held once, in a shared store, for the length of the run, and read directly by whichever stage needs
+it, rather than being copied through the queue per page.
 
 ### What bounds the pipeline
 
 There is no layout detector and no crop step. A page is rendered once, whole, and read once, whole: the
-rendered image is sent to the vision model (Qwen, vision-language, served behind an OpenAI-compatible chat
-endpoint) as a single request asking for the page's content directly. This replaced an earlier two-model
-detect-then-crop-then-read design — a classifier that tried to skip pages whose text came from the PDF's own
-text layer was found unable to reliably rule out tables, lists, or other non-plain-text structure on a
-"digital" page, so that fast path was dropped entirely: every PDF page, digital or scanned, goes through the
-vision model unconditionally. Splitting a page into per-region crops read separately was retired along with
-it.
+rendered image is sent to the vision model as a single request asking for the page's content directly. This
+replaced an earlier two-model detect-then-crop-then-read design — a classifier that tried to skip pages whose
+text came from the source document's own text layer was found unable to reliably rule out tables, lists, or
+other non-plain-text structure on a "digital" page, so that fast path was dropped entirely: every page,
+digital or scanned, goes through the vision model unconditionally. Splitting a page into per-region crops read
+separately was retired along with it.
 
-**Every call class that reaches a GPU-backed model has its own pool, sized to its own cost profile, and every
-pool is global — shared across however many `citadel/app.py`, `citadel/worker.py`, or `citadel/slm.py`
-processes are actually running, not per-process.** A page-image OCR request carries the full image-token cost
-of a rendered page; a table's internal-structure call carries only the text tokens of a bounded grid; a batch
-summary or a large query-resolution call carries a much bigger prompt and runs far longer; an embedding call is
-small and high-volume. Running all of these under one shared limit means the cheap, fast calls queue behind
-the expensive, slow ones for no reason, and a limit sized for one profile starves the others. `GlobalCapacity`
-in `citadel/services/capacity.py` is the shared primitive behind all four pools: a Redis sorted set per pool
-(`cap:{pool}`), member = the caller's own deterministic dispatch key, score = acquire timestamp. Acquiring is
-one atomic Lua script (prune anything older than the pool's stale TTL, then admit only if under the limit) —
-correct regardless of how many processes call it concurrently, since Redis is the single source of truth, not
-any process's memory. A caller that can't get a slot waits on Redis pub/sub for the pool's release channel
-(with a bounded fallback timeout, since pub/sub delivers only to whoever is subscribed at publish time — a
-missed message just costs one extra timeout interval, never a stuck wait, because the atomic acquire is always
-re-tried regardless of whether a wakeup arrived) rather than polling in a loop. A slot whose holder crashes
-mid-call is not leaked forever: the stale-TTL pruning in the same acquire script reclaims it on the next
-attempt by anyone.
+**Every call class that reaches a model-serving backend has its own admission pool, sized to its own cost
+profile, and every pool is shared across however many copies of the application are actually running, not
+local to one.** A page-reading request carries the full image cost of a rendered page; a table's
+internal-structure call carries only the text of a bounded grid; a summarization or a large query-resolution
+call carries a much bigger prompt and runs far longer; an embedding call is small and high-volume. Running all
+of these under one shared limit would mean the cheap, fast calls queue behind the expensive, slow ones for no
+reason, and a limit sized for one profile would starve the others. Admission to a pool is one atomic check
+against a shared, durable counter — correct regardless of how many processes check it concurrently, since the
+counter is the single source of truth, not any one process's memory. A caller that can't get a slot waits for
+a release signal rather than polling in a loop, with a bounded fallback wait so a missed signal costs at most
+one extra interval, never a stuck wait. A slot whose holder crashes mid-call is not leaked forever — an
+expiry on every held slot reclaims it automatically on the next attempt by anyone.
 
-- **`get_vision_capacity()`** — page rasterization and embedded-image resolution share this one budget, sized
-  `OCR_CONCURRENCY + VISION_BUFFER` (32 + 16 = 48 today). A rasterized page's slot is acquired when the page
-  is claimed off the rasterize stream and released only once that same page's OCR call resolves — one slot
-  spans both phases, keyed by `doc_id:page_idx`, because the two phases are really one occupancy of the vision
-  pipeline for that page, not two independent draws. This is what keeps host memory bounded regardless of how
-  many documents or pages are in flight: a page cannot be rasterized far ahead of what the model can actually
-  read.
-- **`get_text_capacity()`** — sized `TEXT_CONCURRENCY + TEXT_BUFFER` (128 + 64 = 192 today). Every
-  vision-read and markup-sourced table's single-table structuring call (`structure_single_table`) acquires a
-  slot here, one per actual model call — the spreadsheet path does not: see below. Sized higher than the
-  vision pool because a text-structure call is materially cheaper and faster per request, not because more of
-  them run in total.
-- **`get_text_large_capacity()`** — the smallest of the four (`TEXT_LARGE_CONCURRENCY + TEXT_LARGE_BUFFER`,
-  16 + 8 = 24 today), because these are the opposite profile from text-structure: batch summaries, the
-  per-document summary reduction, query resolution/filtering, evidence-merge calls, and — because a
-  spreadsheet sheet's candidate-packed call (`structure_tables`) shares its slow/bursty profile, not
-  single-table structuring's fast/steady one — spreadsheet table-candidate structuring all draw from this
-  pool. Sharing one pool with the high-volume single-table-structure calls would let a finalize burst of many
-  batch summaries occupy most of that pool's slots and starve a concurrently-ingesting library's
-  table-structuring — a small, dedicated, low-concurrency pool is what keeps a slow/bursty call class from
-  crowding out a fast/steady one, in either direction.
-- **`get_embed_capacity()`** — embedding calls to the `bge` service, sized `EMBED_CONCURRENCY + EMBED_BUFFER`
-  (384 + 128 = 512 today) — deliberately matched to `bge`'s own `--max-num-seqs 512` ceiling, since embedding
-  calls are small enough per-request that the server, not the client pool, is the real limit worth sizing
+Four pools exist, each sized to its own call class's real cost, not to one shared guess:
+
+- **Vision** — page rendering and page reading, plus embedded-image reading, share one budget. A rendered
+  page's slot is held from the moment it is claimed for rendering until that same page's reading call
+  resolves — one slot spans both steps, because they are really one occupancy of the vision pipeline for that
+  page, not two independent draws. This is what keeps host memory bounded regardless of how many documents or
+  pages are in flight: a page cannot be rendered far ahead of what the model can actually read.
+- **Table/document structuring** — every vision-read and markup-sourced table's own structuring call draws
+  from this pool, sized considerably higher than the vision pool because a text-only structuring call is
+  materially cheaper and faster per request, not because more of them run in total.
+- **Large-prompt reduction** — the smallest of the four, because this is the opposite profile from
+  table/document structuring: summarization (both the per-section pass and the per-document reduction), query
+  resolution and filtering, evidence merging, and a spreadsheet's own multi-candidate table-structuring call
+  (which shares this slow/bursty profile, not single-table structuring's fast/steady one) all draw from this
+  pool. Sharing one pool with the high-volume single-table-structuring calls would let a burst of many
+  summaries at the end of an ingestion run occupy most of that pool's slots and starve a
+  concurrently-ingesting library's table structuring — a small, dedicated, low-concurrency pool is what keeps
+  a slow/bursty call class from crowding out a fast/steady one, in either direction.
+- **Embedding** — sized to match the embedding service's own concurrency ceiling, since embedding calls are
+  small enough per request that the service itself, not the client-side pool, is the real limit worth sizing
   against.
 
-A separate, process-local cap (`RENDER_CONCURRENCY`, derived from CPU count) bounds how many *documents* are
-concurrently having their pages walked into the render pipeline at all — this one is intentionally not global,
-since it bounds CPU-side rendering work local to each process, not a shared GPU-backed model; a document
-queued behind it is exactly the intended backpressure, keeping rendered-but-unconsumed pages from piling up in
-memory ahead of what the model can actually process.
+A separate, smaller, process-local limit bounds how many documents any one process is concurrently walking
+into the rendering pipeline at all — this one is intentionally not shared, since it bounds CPU-side rendering
+work local to each process rather than a shared model-serving backend; a document queued behind it is exactly
+the intended backpressure, keeping rendered-but-unconsumed pages from piling up in memory ahead of what the
+model can actually process.
 
-Beneath all of this sits a bound this system does not control: each inference server's own scheduler admits
-requests by available KV-cache/GPU-memory, not by request count, so the number of requests actually executing
-concurrently can be well below what's been admitted here — the rest queue inside the server. That queue is
-not starvation (the server is fully utilized while it's non-empty) but it does mean a naive client-side
-elapsed-time measurement on an individual request conflates real inference time with however long that
-request waited behind others for a slot. The page-OCR call gets an honest split without server-side
-instrumentation by streaming the response and timing to first token: everything before the first generated
-token is queue/scheduling wait (`ocr_wait`), everything from first token to completion is generation
-(`ocr_gpu`) — logged per document as `ocr_wait=…ms/pg ocr_gpu=…ms/pg`. This isn't a perfectly isolated GPU-only
-measurement (generation time still includes the server's own time-slicing across concurrently batched
-requests), but it separates queue wait from compute in a way a single blocking call cannot.
+Beneath all of this sits a bound the system does not control: each inference server's own scheduler admits
+requests by available compute/memory, not by request count, so the number of requests actually executing
+concurrently can be well below what's been admitted client-side — the rest queue inside the server itself.
+That queue is not starvation (the server is fully utilized while it's non-empty), but it does mean a naive
+elapsed-time measurement on an individual request conflates real processing time with however long that
+request waited behind others for a slot. The page-reading call gets an honest split without any server-side
+instrumentation, by streaming its response and timing to the first generated token: everything before that is
+queue/scheduling wait, everything after is generation — reported separately per page. This isn't a perfectly
+isolated measurement (generation time still includes the server's own interleaving with other concurrently
+running requests), but it separates queue wait from compute in a way a single blocking call cannot.
 
-The current numbers (32/16 vision, 128/64 text-structure, 16/8 text-large, 384/128 embed) are each sized to
-the cost profile of their call class, not to a single shared guess: `bge`'s pool is matched to its own
-`--max-num-seqs` ceiling, since embedding calls are small enough that the server's own capacity is the real
-limit worth sizing against. The vision/text pools sit above the inference server's actual KV-cache ceiling by
-design — the server admits by available cache, not by request count, so excess concurrency queues safely
-inside it rather than running in parallel; that's the intended shape, not a bug, and is what keeps the client
-pools from ever being the thing that starves the GPU.
+The vision and structuring pools deliberately sit above the inference server's own real concurrency ceiling —
+the server admits by available capacity, not by request count, so excess concurrency queues safely inside it
+rather than running in parallel; that is the intended shape, not a flaw, and is what keeps the client-side
+pools from ever being the thing that starves the model.
 
-### Reading pages (ocr)
+### Reading pages
 
 Every page — digital or scanned, dense or sparse — is rendered to one image and read by the vision model in
 one request. There is no region split and no per-block routing: the model returns the page's structured
@@ -185,50 +166,50 @@ into blocks.
 
 **Genuinely blank pages are detected before the model ever sees them.** A page's rendered image is checked
 for near-zero pixel variance first; a page that is blank produces zero blocks without a model call, rather
-than being sent for OCR. This exists because a vision-language model asked to read a page with nothing on it
-does not reliably say so — it can instead produce fluent, structurally plausible content that is not on the
+than being sent for reading. This exists because a vision-language model asked to read a page with nothing on
+it does not reliably say so — it can instead produce fluent, structurally plausible content that is not on the
 page at all, and a blank-page guard is the only thing that closes that off entirely rather than depending on
 prompt wording alone.
 
 **The model's own meta-commentary is stripped before parsing, not stored as content.** Even when correctly
 declining a page (a blank one that slipped past the guard, or one it judges unreadable), the model's response
 can carry a preamble or refusal sentence around the actual content — "here is the transcription...", "there
-is no visible text on this page" — and a whole-response code-fence wrapper some replies are wound in. Both
-are recognized and removed from the raw markdown before it is split into blocks, so a refusal never becomes a
-stored content row and a fence wrapper never causes the whole page to be read as one opaque code block by the
-fenced-code detection described next.
+is no visible text on this page" — and a whole-response wrapper some replies are wound in. Both are
+recognized and removed from the raw response before it is split into blocks, so a refusal never becomes a
+stored content row and a wrapper never causes the whole page to be read as one opaque block by the
+code-block detection described next.
 
 **The table/list/code distinction is asked for explicitly, in the same pass, rather than left to the model's
 default.** The prompt tells the model: tabular or record-like data — including a label/value form, a
-transposed layout, or a crosstab — becomes a markdown table shaped by its *true* row/column structure, not a
-literal mirror of the visual layout; a list or enumeration that is not tabular data stays a markdown list;
-code, a formula, or an algorithm listing is fenced and its line breaks preserved. This matters because a
-prompt that only describes what a table should look like, with no equivalent instruction for lists or code,
-pushes the model toward tables as its only structured option — a plain numbered list of clauses can come
-back as a table with mostly empty cells instead of a list.
+transposed layout, or a crosstab — becomes a table shaped by its *true* row/column structure, not a literal
+mirror of the visual layout; a list or enumeration that is not tabular data stays a list; code, a formula, or
+an algorithm listing is kept as its own block with line breaks preserved. This matters because a prompt that
+only describes what a table should look like, with no equivalent instruction for lists or code, pushes the
+model toward tables as its only structured option — a plain numbered list of clauses can come back as a table
+with mostly empty cells instead of a list.
 
-Fenced code blocks are recognized as their own block type by splitting the response on its own fence
-markers before the rest of the markdown is parsed, so a page containing a code sample keeps its exact
-indentation and line breaks rather than being flattened into a paragraph alongside everything else.
+Code blocks are recognized as their own block type by splitting the response on its own boundary markers
+before the rest is parsed, so a page containing a code sample keeps its exact indentation and line breaks
+rather than being flattened into a paragraph alongside everything else.
 
-**Embedded images** — inside DOCX, XLSX, PPTX, HTML and EPUB sources, not just PDF pages — go through the same
-vision model individually, so a table or text baked into an image is not lost. Before an embedded image is
-sent, it is size-filtered (decorative icons/logos below a pixel threshold are dropped rather than OCR'd) and
-content-hash deduplicated: identical images that recur across a document (a repeated letterhead or logo) are
-read once, and the result is reused for every occurrence rather than re-reading it each time. Both checks
-share the same admission budget as page rasterization above, so embedded-image OCR cannot bypass the memory
-bound that page rendering is subject to. A standalone SVG file is rasterized the same way a PDF page is and
-then read as one image — SVG has no accessible-data path today, so this is the same visual-lane treatment any
-picture gets, not a special case.
+**Embedded images** — inside Word, spreadsheet, PowerPoint, HTML and EPUB sources, not just PDF pages — go
+through the same vision model individually, so a table or text baked into an image is not lost. Before an
+embedded image is sent, it is size-filtered (decorative icons/logos below a pixel threshold are dropped
+rather than read) and content-hash deduplicated: identical images that recur across a document (a repeated
+letterhead or logo) are read once, and the result is reused for every occurrence rather than re-reading it
+each time. Both checks share the same admission budget as page rendering above, so embedded-image reading
+cannot bypass the memory bound that page rendering is subject to. A standalone SVG file is rasterized the
+same way a PDF page is and then read as one image — SVG has no accessible-data path today, so this is the
+same visual-lane treatment any picture gets, not a special case.
 
 Markup and visual pages converge on the same block shape, so everything after is format-agnostic.
 
 ## The content tree
 
 Each document becomes one tree: **document → sections (nested by heading depth) → leaves**. Sections carry
-a depth and a label; leaves carry content. Pagination is **provenance on the leaf** (page/sheet + box),
-never a tree level. Every node has a deterministic id of the form `library_document_page_ordinal`; tables
-use the same id.
+a depth and a label; leaves carry content. Pagination is **provenance on the leaf** (page/sheet + position),
+never a tree level. Every node has a deterministic id, derived from where it lives — library, document, page,
+and position — so the same content always resolves to the same id; a table uses the same scheme.
 
 Leaf kinds: paragraph, code, equation (LaTeX), list (one leaf, items with nesting depth), table.
 
@@ -245,71 +226,72 @@ searchable:
 | Untagged / inline text | captured as paragraphs |
 | Plain text | split into paragraphs on blank lines (no chunking) |
 | Images | junk filtered; alt / visual-model text kept; text-less images dropped |
-| Paratext (header / footer / page number) | not a leaf — folded into that page's leaves' search text; the printed page number kept as text, page position kept as provenance |
-| Embedded tables | first-class canonical Tables (below) |
+| Running headers/footers/page numbers | not a leaf — folded into that page's leaves' search text; the printed page number kept as text, page position kept as provenance |
+| Embedded tables | first-class canonical tables (below) |
 
 ## Tables: the integrity boundary
 
 Every table — spreadsheet cells, CSV, JSON, an HTML table, or a table on a scanned page — becomes one
 canonical shape: typed columns (each a header and a type), the full rows, a sample, a description, its
-title/caption/notes, and provenance. The full rows
-are **stored as relational rows and queried by SQL — never embedded.**
+title/caption/notes, and provenance. The full rows are **stored as relational rows and queried by structured
+query — never embedded.**
 
-The rule that makes it trustworthy: **the model emits structure and descriptions, never data.** It sees
-only anchors — the table's size, its top rows, and a few sampled rows — and returns the shape; every cell
-is copied verbatim from the source and column types are inferred from the values. This is the same
+The rule that makes it trustworthy: **the model emits structure and descriptions, never data.** It sees only
+an anchoring view of the table — its size and enough of its rows to see the shape — and returns that shape;
+every cell is copied verbatim from the source and column types are inferred from the values. This is the same
 boundary the query side relies on: the model writes the query, the database computes the values. It exists
 because the failure mode of every "AI reads your spreadsheet" system is the model quietly misreading or
 re-adding a number — so the model is never in a position to touch a value.
 
 A second rule decides *when* a model is asked at all, and it splits into two different questions that used
 to be conflated: **where do a table's boundaries lie**, and **what is its internal shape**. Boundaries are
-genuinely ambiguous only for a **spreadsheet's raw cell grid** — tables can begin anywhere on a sheet,
-several can share one, and nothing in the file says which cells belong to which table. That is the one place
-a model is shown several candidates at once and asked to decide membership, drop the spurious ones, and
-merge fragments of one table split apart.
+genuinely ambiguous only for a **spreadsheet's raw cell grid** — tables can begin anywhere on a sheet, several
+can share one, and nothing in the file says which cells belong to which table. That is the one place a model
+is shown several candidates at once and asked to decide membership, drop the spurious ones, and merge
+fragments of one table split apart.
 
-Internal shape — which rows are the header, whether the table is transposed, where a section label sits —
-is a narrower question that a *bounded, single* table can also need answered even when its boundaries were
-never in doubt. An HTML `<table>` or a PPTX table/chart is already exactly one table; nothing needs to
-decide where it starts or ends. But its *header* is not always in the markup — the same label/value form,
-transposed layout, or crosstab shape a scanned page can carry shows up in real HTML and PPTX just as often,
-and a mechanical "row 0 is the header" guess gets those wrong the same way it would for a scanned page. So
+Internal shape — which rows are the header, whether the table is transposed, where a section label sits — is
+a narrower question that a *bounded, single* table can also need answered even when its boundaries were never
+in doubt. An HTML table or a PowerPoint table/chart object is already exactly one table; nothing needs to
+decide where it starts or ends. But its header is not always explicit in the source — the same label/value
+form, transposed layout, or crosstab shape a scanned page can carry shows up in real markup just as often, and
+a mechanical "the first row is the header" guess gets those wrong the same way it would for a scanned page. So
 that one bounded table is still shown to the model — one grid in, one structure out, no candidate list, no
 merge/drop logic, because there is nothing to merge or drop. This is a materially cheaper call than the
-spreadsheet path: no token-budget packing, no multi-table splitting prompt, because a single already-bounded
-table never needs either.
+spreadsheet path: no token-budget packing across multiple candidates, no multi-table splitting judgment,
+because a single already-bounded table never needs either.
 
-A page read by the vision model converges on the same call as a markup-sourced table, not a third mechanism:
-the vision pass produces the page's markdown, a table-tagged region of it becomes a grid the same way a
-`<table>` becomes one, and that grid goes through the identical `structure_single_table` call. What's
-different is only how much of the grid the call is shown. A vision-read table is bounded by construction — a
-single page's whole OCR output is itself token-capped, so any table on it is provably small enough to show in
-full, uncapped, no sampling — while a markup-sourced table has no such bound (a docx/html/epub table can be
-arbitrarily large), so it is shown as much of itself as fits a dedicated per-call token budget, falling back
-to an evenly-spread sample only when it doesn't. Earlier, only markup tables got a structuring call at all and
-a vision-read table's shape was guessed mechanically (row 0 is the header) from the OCR grid alone — that
-mechanical guess is what produced the still-open two-level-nested-header failure mode; routing every bounded
-table through the same model call, vision-sourced or not, is the fix in progress for it.
+A page read by the vision model converges on the same mechanism as a markup-sourced table, not a separate
+one: the vision pass produces the page's structured text, a table-tagged region of it becomes a grid the same
+way an HTML table does, and that grid goes through the identical single-table structuring call. What differs
+is only how much of the grid the call is shown. A vision-read table is bounded by construction — a single
+page's whole reading output is itself capped, so any table on it is provably small enough to show in full,
+uncapped, with no sampling — while a markup-sourced table has no such bound (a source table can genuinely be
+arbitrarily large), so it is shown as much of itself as fits a dedicated budget for that call, falling back to
+an evenly-spread sample of the whole table only when it doesn't fit. Earlier, only markup-sourced tables got a
+structuring call at all, and a vision-read table's shape was guessed mechanically from the grid alone — that
+mechanical guess is the source of a still-open failure mode on tables with deep, two-level nested headers;
+routing every bounded table through the same structuring call, vision-sourced or not, is the fix in progress
+for it.
 
 The routing is therefore by **ambiguity, not by source** — the distinction matters, because a source-shaped
 rule invites a private path per format, and the whole point is that there is exactly one. Every table from
-every origin converges on a grid, one materializer turns a grid plus a structure into the canonical shape,
-and the only thing that varies is whether that structure was read from the format or asked of a model.
+every origin converges on a grid, one step turns a grid plus a structure into the canonical shape, and the
+only thing that varies is whether that structure was read from the format or asked of a model.
 
 Tables are separated **by schema**: a run of rows with consistent columns is one table; a schema change
 starts a new one, so a single source table yields **one or more** canonical tables — a stacked invoice
-splits into its summary block and its line-items.
+splits into its summary block and its line items.
 
-A table also has a **layout**, which the structure model reports alongside the columns: *relational* (each
+A table also has a **layout**, which the structuring step reports alongside the columns: *relational* (each
 column is a field, each row a record) or *crosstab* (a matrix — one measure spread across many columns
-labelled by the header rows, a grid of years across the top with a value in each cell). A crosstab is
-**denormalized to long form** at ingestion: the key columns that identify a row, one column per header-row
-dimension, and a single value column, so one wide row becomes many narrow ones. A World Development
-Indicators sheet of 66 year-columns lands as one relational table of `[Country, Code, Indicator, Code,
-Year, Value]` — 82,636 one-value rows — which is what makes it answerable by ordinary SQL. The distinction
-matters because a crosstab left wide is unqueryable: "the value for Bangladesh in 2010" is a *column name*,
-not a filter, and no `WHERE` can reach it.
+labelled by the header rows, for example a grid of years across the top with a value in each cell). A crosstab
+is **denormalized to long form** at ingestion: the key columns that identify a row, one column per header-row
+dimension, and a single value column, so one wide row becomes many narrow ones — a wide indicator sheet with
+dozens of year-columns becomes one relational table of country/indicator/year/value rows, each row a single
+data point, which is what makes it answerable by an ordinary filter. The distinction matters because a
+crosstab left wide is unqueryable: "the value for one country in one year" is a *column name* in a wide table,
+not something a filter can reach.
 
 The spreadsheet path is designed to be lossless cell-for-cell, including through denormalization: a crosstab's
 long-form row count always equals its source's non-empty cell count, by construction, not by post-hoc
@@ -319,94 +301,92 @@ reshape.
 By source:
 
 - **Spreadsheets** — every cell, merge, table object and frozen pane is captured; contiguous regions are
-  found and each region's structure resolved by the model from anchors. **The one ambiguous source, and the
-  only one that costs a structure call.** Column names are still derived from the header rows the model
-  points at, never written by it.
+  found and each region's structure resolved by the model from an anchoring view. **The one ambiguous source,
+  and the only one that costs a structure call for boundaries as well as shape.** Column names are still
+  derived from the header rows the model points at, never written by it.
 - **CSV/TSV** — one schema by construction. The parser handles quoting, embedded newlines and ragged rows,
   skips leading blank lines, and names the columns from the first non-empty row. No model.
-- **JSON** — shredded deterministically into normalized, joinable tables: nested objects flattened by
-  dotted key, lists of objects into child tables keyed back to their parent. An entity's keys are its
-  schema, so there is nothing to infer. No model.
+- **JSON** — shredded deterministically into normalized, joinable tables: nested objects flattened by key
+  path, lists of objects into child tables keyed back to their parent. An entity's keys are its schema, so
+  there is nothing to infer. No model.
 - **Tables on a rendered page (PDF, images)** — the grid is built deterministically from the vision model's
-  own OCR output for that page (markdown table syntax parsed into cells), and its *structure* — which row is
-  the header, orientation, section labels — is asked of the model exactly like a markup table, in the
-  `structure` phase, shown the whole grid uncapped rather than a sample, because a single page's OCR output is
-  itself token-bounded so the table on it is provably small enough to show in full. Tables continuing across
-  consecutive pages are stitched into one first — fragments with a matching column count across a page
-  boundary merged, repeated headers dropped, page furniture skipped — so a forty-page table is one table.
-- **Embedded HTML/PPTX tables and charts** — the grid is built deterministically with spans expanded (a
-  PPTX native chart's own category/series/value data is read directly, the same way a spreadsheet cell is —
-  no vision, no model, genuinely lossless). Its *structure* — header row(s), orientation, section labels —
-  is asked of the model exactly as described above: one bounded table, one call, no candidate list. The
-  header is not assumed from markup alone, because `<thead>`/`<th>` marks *that* a row is a header far more
-  reliably than it marks that a form-shaped or transposed table needs restructuring rather than a literal
-  read. Unlike a vision-read table, a markup-sourced table's source size has no natural cap — a docx/html/epub
-  table can genuinely be arbitrarily large — so it cannot always be shown in full: it is shown as much of
-  itself as fits a dedicated per-call token budget (top rows, bottom rows, and an even spread of the middle
+  own reading output for that page (table markup parsed into cells), and its structure — which row is the
+  header, orientation, section labels — is asked of the model exactly like a markup table, shown the whole
+  grid uncapped rather than a sample, because a single page's reading output is itself bounded so the table on
+  it is provably small enough to show in full. Tables continuing across consecutive pages are stitched into
+  one first — fragments with a matching column count across a page boundary merged, repeated headers dropped,
+  page furniture skipped — so a forty-page table is one table.
+- **Embedded HTML/PowerPoint tables and charts** — the grid is built deterministically with spans expanded
+  (a native chart's own category/series/value data is read directly, the same way a spreadsheet cell is — no
+  vision, no model, genuinely lossless). Its structure — header row(s), orientation, section labels — is
+  asked of the model exactly as described above: one bounded table, one call, no candidate list. The header is
+  not assumed from markup alone, because an explicit header marker in the source states *that* a row is a
+  header far more reliably than it states that a form-shaped or transposed table needs restructuring rather
+  than a literal read. Unlike a vision-read table, a markup-sourced table's source size has no natural cap — a
+  source table can genuinely be arbitrarily large — so it cannot always be shown in full: it is shown as much
+  of itself as fits a dedicated budget for that call (top rows, bottom rows, and an even spread of the middle
   when it doesn't all fit), never a flat row count.
 
-**The spreadsheet-candidate call (`table_structure`) is a different, deliberately narrower view, and stays
-that way.** It is shown a bounded sample and never the table: at most **20 rows** — the top few, the bottom
-few, and every Mth in between — against **every column**, because the columns are the schema and a header
-dropped is a schema lost. This payload is a function of a table's width, never of its length: a five-row
-sheet and a five-million-row sheet cost the same call. Sizing *this* view by a token budget was tried and
-rejected — because several candidates share one packed call here, letting any one candidate's view grow with
-its size let a prompt balloon to fill whatever window was available, producing 20k-token requests to decide
-which rows were headers. A single bounded table's own structuring call doesn't share that risk (nothing else
-is packed alongside it, and its budget is a fixed ceiling tied to the model's context window, not "whatever
-fits") — which is why that call was moved to a token budget while this one was not.
+**The spreadsheet-candidate call is a different, deliberately narrower view, and stays that way.** It is
+shown a small bounded sample and never the whole table — the top few rows, the bottom few, and an even spread
+in between — against every column, because the columns are the schema and a header dropped is a schema lost.
+This payload is a function of a table's width, never of its length: a small sheet and an enormous one cost
+the same call. Sizing *this* view by a token budget was tried and rejected — because several candidates share
+one packed call here, letting any one candidate's view grow with its size let a prompt balloon to fill
+whatever window was available, producing outsized requests just to decide which rows were headers. A single
+bounded table's own structuring call doesn't share that risk (nothing else is packed alongside it, and its
+budget is a fixed ceiling tied to the model's context window, not "whatever fits") — which is why that call
+was moved to a size-aware budget while this one was not.
 
 Structure detection over-produces — a block of prose gridded into cells, a figure or a caption read as a
 one-row table, a region that is not tabular at all — so membership is not a separate step but part of the
-same `table_structure` call described in the pipeline above: shown every candidate at once, the model
-structures each real table, drops the spurious ones, and merges the ones that are one table split apart, all
-in a single pass. There is no standalone validation call; a spurious grid is dropped in the same response
-that structures the genuine ones, before it ever reaches the query side. The model decides *membership*,
-never content — the same boundary as structure.
+same spreadsheet-candidate call described above: shown every candidate at once, the model structures each
+real table, drops the spurious ones, and merges the ones that are one table split apart, all in a single pass.
+There is no standalone validation call; a spurious grid is dropped in the same response that structures the
+genuine ones, before it ever reaches the query side. The model decides *membership*, never content — the
+same boundary as structure.
 
 ## Search representation
 
-Citadel retrieves **leaves and tables, never chunks**. A leaf's search text is its own cleaned text plus
-its context: library, filename, the headings above it, and the page's paratext; cleaning normalizes
-Unicode, rejoins hyphen-split words, collapses whitespace, and turns machine names into words. A table's
-search text is assembled the same way, from what the table already holds: library, file, sheet, title,
-caption, notes, and its column headers. It is built mechanically, not written by a model. Rows stay off the
-text path.
+Citadel retrieves **leaves and tables, never chunks**. A leaf's search text is its own cleaned text plus its
+context: library, filename, the headings above it, and the page's running text. Cleaning normalizes Unicode,
+rejoins hyphen-split words, collapses whitespace, and turns machine names into words. A table's search text is
+assembled the same way, from what the table already holds: library, file, sheet, title, caption, notes, and
+its column headers. It is built mechanically, not written by a model. Rows stay off the text path.
 
 Search text is indexed two ways: dense multilingual vectors for meaning, and exact lexical matching
-(substring and trigram) for the names, identifiers and codes a meaning vector blurs together. A table is
-*found* through its search text and *answered* by SQL over its rows.
+(substring and fuzzy) for the names, identifiers and codes a meaning vector blurs together. A table is
+*found* through its search text and *answered* by a structured query over its rows.
 
 ## Storage
 
-- A **doc-keyed source store** holds each uploaded file on shared disk for the length of its run — the
-  interface a real object store (S3) will later fill. Every stage that renders or reads the source
-  memory-maps it from here, so a large file is materialized once, not copied through the bus per page; it
-  is deleted when the document completes.
-- A **streaming bus** holds the pipeline's in-flight state (page images, per-page blocks) — ephemeral,
+- A **doc-keyed source store** holds each uploaded file for the length of its run — the interface a durable
+  object store will later fill. Every stage that renders or reads the source reads it directly from here, so
+  a large file is materialized once, not copied through the queue per page; it is deleted when the document
+  completes.
+- A **streaming queue** holds the pipeline's in-flight state (page images, per-page blocks) — ephemeral,
   bounded by backpressure so its memory stays flat regardless of upload size, and cleared after merge.
 - A **relational database** holds the durable content tree, the tables and their rows, and the search
   indexes — this is what queries run against. The rows of every table are stored together and projected
   into typed columns on demand, rather than materialized as one physical table each: a real corpus has far
   too many tables for a physical table apiece.
-- An **object store** holds the assembled per-document tree for download.
+- A **durable object store** holds the assembled per-document tree for download.
 
 ## Reliability
 
-- Delivery is at-least-once; a crashed run's pending work is reclaimed and reprocessed — including when the
-  worker that crashed never comes back under the same identity. Redis Streams consumer names are the running
-  container/pod's own hostname, not a manually assigned id: nothing has to be configured per replica, and
-  nothing breaks if an autoscaler kills a worker and replaces it with a differently-named one. A periodic
-  `XAUTOCLAIM` sweep on every stream reaps entries left in a dead consumer's pending-entries list once they've
-  sat unacknowledged past an idle threshold, regardless of which now-gone consumer held them — so a killed
-  worker's in-flight page is picked up by whichever worker is alive, not lost.
+- Delivery is at-least-once and self-healing: a crashed run's pending work is reclaimed and reprocessed —
+  including when the worker that crashed never comes back at all. Each worker's identity in the queue is
+  derived from the machine or container it runs on, not a manually assigned id, so nothing has to be
+  configured per replica and nothing breaks if an autoscaler replaces a worker with a differently-identified
+  one. Work left behind by a worker that never returns is automatically reclaimed by whichever worker is still
+  alive once it has sat unclaimed past an idle threshold — a killed worker's in-flight page is picked up
+  elsewhere, not lost.
 - Recording a page is idempotent, so a redelivered page is a no-op.
 - A single merge fires exactly once — when the last page or sheet of a document completes.
-- Finalize is claimed, not broadcast: the trigger runs over a Redis Streams consumer group (multiple
-  `app.py` replicas compete for the same finalize entries instead of every replica independently re-running
-  finalize off the same signal), and the finalize action itself is guarded by an advisory lock plus a
-  "not already started" check inside one transaction, so a duplicate or redelivered trigger for a library
-  already mid-finalize is a no-op rather than a second concurrent run.
+- The trigger that starts post-ingestion processing (below) is claimed by exactly one consumer, not broadcast
+  to every one of them, so running more than one copy of the application does not cause the same library to be
+  finalized twice; the action itself additionally refuses to start twice concurrently for the same library, so
+  even a redelivered or duplicate trigger is a no-op rather than a second concurrent run.
 - Work that fails is retried a bounded number of times, then given up cleanly.
 - Failures are scoped: a page that can't be read leaves a marker and the document still completes as
   *partial*; a whole-document failure is marked *failed*.
@@ -416,82 +396,73 @@ Search text is indexed two ways: dense multilingual vectors for meaning, and exa
 The result of ingestion is the materialized tree — sections and leaves with their content, and full
 canonical table representations. That is the ingestion contract, and it draws a hard line: **ingestion
 produces the queryable *structure*; it does not produce retrieval.** Once the tree and tables exist the
-library is **DB-queryable** — SQL runs over the typed tables — but not yet **retrieval-queryable**, which
-needs the summaries the resolver reads. Progress is a state per document (`queued → processing → ingested`,
-with `failed` / `skipped` for the special cases) and per library (`ingesting → ingested → ready`).
+library is queryable by structured query, but not yet **retrieval-queryable**, which needs the summaries the
+resolver reads. Progress is tracked as a state per document — queued, processing, ingested, with partial,
+failed, or skipped for the special cases — and a state per library — ingesting, ingested, ready, or failed if
+summarization or embedding could not complete after retrying.
 
 Making a library *answerable* is a **separate prep phase**, run once per library after its last document is
-stored — deliberately never interleaved with reading, so it can't contend with the vision model for the GPU.
-Everything in it is a *reduction over already-persisted structure*, not structure itself, which is exactly
-why it belongs after ingestion rather than inside it:
+stored — deliberately never interleaved with reading, so it can't contend with the vision model for the same
+GPU. Everything in it is a *reduction over already-persisted structure*, not structure itself, which is
+exactly why it belongs after ingestion rather than inside it:
 
-- **Summarize.** Every document is packed into batches and each batch summarized, then the document's own
+- **Summarize.** Every document is packed into sections and each section summarized, then the document's own
   summary is reduced from those — the whole library in one pass. These are what the resolver reads, so a
   library is not retrieval-queryable until they exist.
 - **Embed and index.** Each leaf's and table's search text is embedded into the dense index and the lexical
   index is built.
 
-Summaries and embeddings do not depend on each other, so they run **concurrently** and the library is ready
-once both land — the summary work is on Qwen, the embedding on a separately served `bge-m3` (below), and
-running them together hides the shorter (embedding) under the longer (summaries) instead of stacking the two.
-Summaries used to stream per document *during* ingestion, overlapping OCR; that overlap paid a GPU-contention
-tax and, worse, let a query in the window resolve over a partial inventory. Running them in this phase, gated
-on the library's last document draining, closes both.
+Summarization and embedding do not depend on each other, so they run **concurrently** and the library is ready
+once both land — summarization runs on the same general model that reads pages, embedding on a separately
+served embedding model, and running them together hides the shorter one (embedding) under the longer one
+(summarization) instead of stacking the two. Summaries used to stream per document *during* ingestion,
+overlapping page reading; that overlap paid a contention tax on the shared model and, worse, let a query in
+the window resolve over a partial inventory. Running them in this later phase, gated on the library's last
+document draining, closes both.
 
-**Readiness itself is a durable, crash-recoverable stream job, not an in-process wait.** The trigger into
-finalize is itself a Redis Streams consumer-group entry (`STREAM_FINALIZE`), not a Postgres `LISTEN/NOTIFY`
-broadcast — a broadcast delivers to every listener, so with more than one `app.py` replica each one would
-independently re-run finalize off the same signal; a consumer group instead lets replicas compete for the
-same entry, so exactly one of them claims it. Finalize itself is additionally guarded by an advisory lock
-plus a "not already started" check inside one transaction, so a redelivered or duplicate trigger for a
-library already mid-finalize is a no-op rather than a second concurrent run — the group gives at-least-once
-delivery, and this is what turns that into effectively-once execution. Once claimed, `citadel/app.py`'s
-finalize step doesn't block on anything itself — it starts batch-summary jobs, enqueues one embedding job onto
-`STREAM_EMBED`, and returns immediately. Two independent consumers in `citadel/worker.py` each record a flag
-(`citadel/services/readiness.py`) once their half is genuinely done: the last batch summary to complete
-records the `summaries` flag, and the embed job records `embedding` once `embed_library` finishes. Recording a
-flag is one atomic Lua script — set the flag, check whether both are now present, and if so emit one entry to
-`STREAM_LIBRARY_READY`, consumed by a small dedicated job that does the actual `LibraryStatus.READY` write.
-Every piece here is either a Redis Streams consumer-group read or an idempotent Lua script, the same pattern
-every other phase in this pipeline already uses — if `app.py` or a worker restarts mid-flight, nothing about
-the wait is lost, because nothing was held in a process's memory to begin with.
+**Readiness itself is a durable, crash-recoverable process, not an in-process wait.** The signal that starts
+the prep phase is claimed by exactly one consumer even when several copies of the application are running, not
+broadcast to every one of them — a broadcast would mean every running copy independently starts the same
+library's prep phase off the same signal; a claimed trigger instead lets them compete for the same signal, so
+exactly one claims it, and the action itself refuses to start twice concurrently for the same library, so a
+redelivered or duplicate trigger is a no-op rather than a second concurrent run. Once claimed, the prep phase
+doesn't block on anything itself — it starts the summarization work and starts the embedding work and returns
+immediately. Each half independently records that it is genuinely done — the last section summary to complete
+records one flag, the embedding pass records the other once it finishes — and the library is marked ready the
+moment both flags are present, checked atomically so there is no window where only one has landed. If the
+application or a worker restarts mid-flight, nothing about this wait is lost, because nothing about it was
+held in a process's memory to begin with — the whole thing is durable, queued state.
 
-**A document whose batch summary or a library whose embedding permanently fails moves the library to
-`LibraryStatus.FAILED`, not an indefinite silent hold.** A summary or embed job that exhausts its retries
-marks the library failed and logs why, rather than only logging and leaving the library's pending count stuck
-above zero forever with no visible state change. `FAILED` is a real, queryable status distinct from
-`ingested`/`ready` — a stuck library is now something the system reports, not something an operator has to
-notice is simply never finishing.
+**A document whose summarization or a library whose embedding permanently fails moves the library to a
+failed state, not an indefinite silent hold.** A summarization or embedding attempt that exhausts its retries
+marks the library failed and records why, rather than only logging and leaving the library stuck pending
+forever with no visible state change. Failed is a real, queryable status distinct from ingested or ready — a
+stuck library is now something the system reports, not something an operator has to notice is simply never
+finishing.
 
-**The embedding index is disposable; the tree and tables are not.** Nothing about the content tree or the
-canonical tables is specific to any embedding model — they are typed, structured, model-agnostic state,
-built once by the ingestion pipeline (Part I) and never touched by the prep phase. Embedding is a pure
-reduction *over* that structure, run separately, after it. Swapping the embedding model, or the summarizing
-model, therefore means re-running the prep phase against structure that already exists — not re-ingesting a
-single source file. The expensive step (OCR, layout, table structuring) is paid once, independent of which
-model reads the result afterward.
+**The search index is disposable; the tree and tables are not.** Nothing about the content tree or the
+canonical tables is specific to any embedding model — they are typed, structured, model-agnostic state, built
+once by the ingestion pipeline and never touched by the prep phase. Embedding is a pure reduction *over* that
+structure, run separately, after it. Swapping the embedding model, or the summarizing model, therefore means
+re-running the prep phase against structure that already exists — not re-ingesting a single source file. The
+expensive step (reading, layout, table structuring) is paid once, independent of which model reads the result
+afterward.
 
-Finalize keeps a `described` status transition so the phases it reports (and the UI reading them) are
-unchanged, but nothing is generated there any more: table structure and validation happen in the table
-stage, and there is no separate per-table description — a table's search and evidence text is built
-mechanically from what it already holds.
-
-The prep phase is gated by the library's **tier**. A *structure* library is ingested to the lossless tree
-and tables and stops there; a *search* library additionally gets the summaries, embeddings and indexes that
-Part II runs on. The tier is a pricing/access boundary, not a different pipeline — a structure library can be
+The prep phase is gated by the library's **tier**. A *structure* library is ingested to the lossless tree and
+tables and stops there; a *search* library additionally gets the summaries, embeddings and indexes that Part
+II runs on. The tier is a pricing/access boundary, not a different pipeline — a structure library can be
 upgraded and finalized later without re-ingesting. The phase is event-driven: it fires the moment a library's
-last in-flight document drains, and is re-checked on restart for any library that became ready while the app
-was down.
+last in-flight document drains, and is re-checked on restart for any library that became ready while the
+application was down.
 
 ---
 
 ## Part II — Query
 
-**Built.** One model call resolves the question against the whole library at a uniform grain and returns
-what the answer must account for and how deeply each of it must be read. Everything after that executes
-that decision: the database computes every figure, and one deterministic budget rule fits both kinds of
-evidence into a single answer. This replaced a wide-net pipeline (reformulate → retrieve → filter → compute
-→ unify → fit) described, with the reason it failed, at the end of this part.
+One model call resolves the question against the whole library at a uniform grain and returns what the
+answer must account for and how deeply each of it must be read. Everything after that executes that
+decision: the database computes every figure, and one deterministic budget rule fits both kinds of evidence
+into a single answer.
 
 The hard part is not finding candidates. It is deciding which of a large body of evidence actually bears
 on the question, fitting exactly that into one answer, and never letting the model invent a figure or
@@ -499,10 +470,10 @@ miscount what fits.
 
 ## Query pipeline
 
-```bash
-                     ┌─→ tables at full ──→ SQL ──→ execute ──────────────┐
-question ─→ resolve ─┤   (model over schema + samples)                    ├─→ synthesize → answer
- (inventory)         └─→ documents ──→ floor, then depth to an equal share┘        (model)
+```
+                     ┌─→ tables at full ──→ query ──→ execute ─────────────┐
+question ─→ resolve ─┤   (model over schema + samples)                     ├─→ synthesize → answer
+ (inventory)         └─→ documents ──→ floor, then depth to an equal share ┘        (model)
                          (summary / parts / wording)
 ```
 
@@ -518,115 +489,77 @@ column names per table, never the full content — and may legitimately return n
 reformulation, no corpus-wide similarity net, no per-section selection pass, and no cross-channel
 arbitration**. The reasons are below.
 
-### Batches — the unit of text relevance, built once in the prep phase
+### Sections — the unit of text relevance, built once in the prep phase
 
-The reason batches exist is **amortization**. Deciding which prose bears on a question requires reading
-prose, and reading a whole corpus per question is a map-reduce every time — paid again on every query, over
-text that never changed. Summarizing once, up front, moves that cost off the query path and makes it
-reusable: the corpus is read once, and every subsequent query judges relevance against the stored result.
-Query-time map-reduce then becomes the fallback for evidence that genuinely exceeds the window, not the
-routine path.
+The reason pre-built section summaries exist is **amortization**. Deciding which prose bears on a question
+requires reading prose, and reading a whole corpus per question is a map-reduce every time — paid again on
+every query, over text that never changed. Summarizing once, up front, moves that cost off the query path
+and makes it reusable: the corpus is read once, and every subsequent query judges relevance against the
+stored result. Query-time map-reduce then becomes the fallback for evidence that genuinely exceeds the
+window, not the routine path.
 
-Headings are author-written labels. "Introduction" or "Section 3" carries no signal, so a channel that
-judges relevance from headings alone judges from metadata rather than content. Tables have an organic
-compressed form — schema and sample rows, the table's own content uninterpreted — but prose has none:
-sampled paragraphs are not representative. This is the one place in the system where generated text is
-justified.
+Headings are author-written labels. "Introduction" or "Section 3" carries no signal, so a channel that judges
+relevance from headings alone judges from metadata rather than content. Tables have an organic compressed
+form — schema and sample rows, the table's own content uninterpreted — but prose has none: sampled
+paragraphs are not representative. This is the one place in the system where generated text is justified.
 
-Each document is packed into **batches**: content blocks in document order are accumulated until a token
-limit is reached (`BATCH_TOKENS = 32768`). Each batch is summarized once, in the **prep phase** — after the
-library's structure is complete, not during ingestion — one job per document on the stream, drained by the
-same bounded-concurrency pool as every other SLM stage. The batch stores its own **block-ordinal and page
-range** at creation, so citation is a stored field. Summary length is bounded per batch (`min(10% of content
-tokens, 4096)`) so the summaries stay a true reduction. Summaries are a *reduction over persisted structure*,
-not structure itself — which is why they run here, behind the same tier gate as embedding, rather than
-streaming during ingestion where they contended with OCR and could leave a query a partial inventory.
+Each document is packed into **sections**: content blocks in document order are accumulated up to a size
+limit, and each section is summarized once, in the **prep phase** — after the library's structure is
+complete, not during ingestion — drained by the same shared, bounded-concurrency pool as every other
+model-driven stage. Each section stores its own block range and page range at creation, so citation is a
+stored field, not recomputed. Summary length is bounded per section, proportionate to its own content, so
+the summaries stay a true reduction rather than growing to fill whatever room they're given. Summaries are a
+*reduction over persisted structure*, not structure itself — which is why they run here, behind the same
+tier gate as embedding, rather than streaming during ingestion where they contended with page reading and
+could leave a query a partial inventory.
 
-This gives the hierarchy the query side needs — document summary → batch summary → block — and it means
+This gives the hierarchy the query side needs — document summary → section summary → block — and it means
 relevance is judged against content, not labels. A document's own summary is written at the end of the same
-job, reduced from its batch summaries once they all exist, to a fixed per-document ceiling: it is that
+pass, reduced from its section summaries once they all exist, to a fixed per-document ceiling: it is that
 document's entry in the inventory, and the whole library's entries must fit one call.
 
 ### Resolution — coverage and depth, decided once
 
 Membership is decided **once**, for the whole question, with every item visible at the same grain. Each
 document appears as its summary; each table as its filename, where in the file it sits, its title or
-caption, its row count and its column names — no dtypes, no sample values, because those scale with width
-and this view exists to judge bearing, not to write SQL. The model returns the items the answer must
-account for, grouped by how deeply each must be read:
+caption, its row count and its column names — no data types, no sample values, because those scale with
+width and this view exists to judge bearing, not to write a query. The model returns the items the answer
+must account for, grouped by how deeply each must be read:
 
 | depth | a document | a table |
 |---|---|---|
-| `overall` | what it covers as a whole | what it is about and what it holds |
-| `parts` | what its individual relevant sections cover | — |
-| `full` | the wording of those sections | values drawn or computed from its rows |
+| overall | what it covers as a whole | what it is about and what it holds |
+| parts | what its individual relevant sections cover | — |
+| full | the wording of those sections | values drawn or computed from its rows |
 
 Two properties follow, and they are the point of the design. **Coverage is a set we can enforce**, not a
 length we infer from how much some stage happened to return. And **the two kinds of evidence are judged
-together**: a question about the collection can put a table in coverage at `overall` and a document at
-`parts` in the same decision, which two independently-run channels could never agree on.
+together**: a question about the collection can put a table in coverage at overall depth and a document at
+parts depth in the same decision, which two independently-run channels could never agree on.
 
 Only what is listed reaches the answer, so the prompt says exactly that — nothing downstream sees the
 inventory, and an item left out contributes nothing however plainly it was described.
 
 **Tables that need their rows.** Only those go to the query writer, and they arrive with full schema and
 sample rows — the expensive view, bought once the set is small. The sample rows show how values are
-*encoded* (`2022-Q2` versus `Q2 2022`, `"007"` as a string); a predicate written against a schema alone
-silently matches nothing. The row count is carried at both steps, and it does two jobs: at resolution it is
-how big a table is, which questions ask about directly; at writing it is what makes the model aggregate a
-large table rather than ask for raw rows.
+*encoded* (one date format versus another, a numeric-looking value stored as text); a query written against a
+schema alone can silently match nothing. The row count is carried at both steps, and it does two jobs: at
+resolution it is how big a table is, which questions ask about directly; at writing it is what makes the
+model aggregate a large table rather than ask for raw rows.
 
 The writer no longer states relevance — it only writes queries, because every table it sees was already
 resolved as needing its rows. A table that matters for *what it is* never reaches it, and is carried by its
-description instead. There is no synthetic relation over the corpus's own shape: the row counts and
-filenames are in the inventory the resolver reads, and a relation supplied for questions *about* the tables
-turned out to teach the model to project filenames whenever a question sounded corpus-shaped.
+description instead. There is no synthetic listing of the corpus's own shape offered to the writer: the row
+counts and filenames are already in the inventory the resolver reads.
 
-### Why the wide net was removed
-
-Similarity deciding *membership* over the whole corpus is what made broad questions pathological. "What are
-these documents" matches everything, so a corpus-wide net sweeps every passage in order to filter nothing.
-Under resolution the same question puts every document in coverage and lets depth be decided afterwards —
-the widest question becomes the *cheapest* path, not the most expensive.
-
-Similarity is gone from the query path entirely today. A document is carried at its summary, at the
-summaries of its parts, or at their wording; there is no ranking or filtering *within* a document to deepen
-it selectively. Structure alone decides membership and coverage.
-
-**Designed, not yet built: within-document retrieval as a depth mechanism, not a membership one.**
-Coverage stays exactly as above — resolution decides what the answer must account for, from document and
-table summaries, and nothing in that decision changes. What's missing is a way to reach *leaf*-level fidelity
-within an already-covered document when the budget allows it, instead of jumping straight from a batch
-summary to including every block at wording depth. The design:
-
-- **Depth is a ladder, and leaf-exact is the top rung.** For a covered document, depth already runs
-  document summary → batch summaries (parts) → full wording (every block). Leaf-level retrieval sits *above*
-  full wording, not beside it: given the budget to go deeper than a batch summary, prefer the exact leaves
-  that answer the question over the whole batch's blocks, because exact leaves are higher fidelity (no
-  summarization loss) and carry exact provenance (a specific page, not a batch spanning many).
-- **Gated on scope, not run unconditionally.** This only activates once coverage is narrow enough — a
-  handful of documents/batches, not the whole corpus — that scanning their leaves is affordable at all. A
-  corpus-wide question never reaches this path; it's answered from document summaries the same way it is
-  today, which is already the cheapest, not the most expensive, path for a broad question.
-- **Dense + sparse + RRF is a recall mechanism, not a relevance decision.** Once scope is narrow enough,
-  every leaf belonging to the covered batches is ranked by combining a dense (embedding) and sparse (lexical)
-  channel via RRF. The ranking's job is only to make sure nothing with real signal is buried — it is not
-  trusted to judge which ranked candidate actually answers the question, because score alone can rank a
-  passage that superficially repeats the query's terms above the passage that substantively answers it.
-- **The model is the precision decision, evaluated in ranked order.** The SLM judges candidates from the
-  ranked stream in chunks, the same membership-not-score principle used everywhere else in this design. This
-  is where relevance is actually decided.
-- **Early stopping, not a fixed cutoff.** Traversal stops once K consecutive chunks in ranked order come back
-  with nothing the model judges relevant — treated as evidence the signal is exhausted, not as an arbitrary
-  top-N. This depends on the ranking being *recall*-safe (real signal reliably surfaces somewhere reasonably
-  early, even if not in the ideal order), which dense+sparse+RRF is assumed to provide even though it cannot
-  provide precision.
-- **When even the pruned leaf set overflows the budget, prefer fewer leaves before coarser leaves.** The
-  existing fitting rule below already caps depth at an equal share per document; the same principle extends
-  one level deeper — truncate by keeping the top-ranked leaves per document, rather than falling back to
-  batch or document summaries, since falling back trades exact provenance and fidelity for a representation
-  that also carries unrelated content the query never asked about. Coarsening to batch/document summary
-  remains the last resort, not the first one.
+Coverage is decided structurally, from this compressed inventory, rather than by ranking passages against
+the question. A ranking that has to decide inclusion over an entire corpus makes the broadest questions the
+most expensive to answer well, because a broad question matches everything and a wide ranked sweep filters
+nothing; deciding coverage from a compact inventory instead makes the broadest question the *cheapest* path,
+not the most expensive one — every document goes into coverage and depth is decided afterward. There is no
+ranking or filtering *within* a document to deepen it selectively today: a document is carried at its
+summary, at the summaries of its parts, or at their full wording, chosen by the fitting rule below, not by a
+relevance score.
 
 ### Fitting — floor first, then rows, then depth
 
@@ -641,25 +574,25 @@ form of every item is paid for before the first expensive thing is bought. If ev
 summaries are merged — at document grain first — and never dropped.
 
 **Computed rows take what the floor leaves.** Results are exact and already minimal (the query produced
-exactly the rows asked for), and `_fit_results` keeps *every* result table, reducing rows round-robin across
-them only if they collectively overflow, with an explicit "showing N of M rows" marker. Nothing is
-re-aggregated after execution: the query already decided the shape. The genuine prevention is upstream — the
-writer sees each row count and aggregates in SQL when a raw `SELECT *` would be huge. Rows come *after* the
-floor because a result is an answer, and an answer may not crowd out what has to be accounted for.
+exactly the rows asked for), and every result table is kept, reducing rows only if they collectively overflow
+the remaining budget, with an explicit "showing some of the total rows" marker. Nothing is re-aggregated
+after execution: the query already decided the shape. The genuine prevention is upstream — the writer sees
+each row count and aggregates in the query itself when a raw unfiltered read would be huge. Rows come *after*
+the floor because a result is an answer, and an answer may not crowd out what has to be accounted for.
 
 **Depth takes what the rows leave, capped at an equal share per document.** Each covered document is carried
 one rung deeper while its own share of the remaining budget allows: the depths resolution asked for have
 first claim, and whatever is still spare carries the rest of the coverage from its summary to the summaries
-of its parts — an unspent budget buys nothing. Each ask carries its own way down, so a document whose
-wording will not fit lands on its parts rather than falling back to a one-line summary. Both rungs are
-priced from what ingestion stored — `content_tokens` for wording, summary tokens for parts — so an
-unaffordable rung is rejected before anything is read.
+of its parts — an unspent budget buys nothing. Each ask carries its own way down, so a document whose wording
+will not fit lands on its parts rather than falling back to a one-line summary. Both rungs are priced from
+what ingestion stored — content size for wording, summary size for parts — so an unaffordable rung is
+rejected before anything is read.
 
 The **equal share** is what keeps the answer proportionate. A long document's parts outnumber a short one's
-many times over, and without a ceiling the longest document in the coverage writes most of the answer: a
-825-page volume contributed ~25 summaries beside a one-page invoice's one, and the answer read as being
-mostly about that volume. No document may take more than `remaining / covered documents`, and one that
-cannot fit its share stays at its summary.
+many times over, and without a ceiling the longest document in the coverage would write most of the answer —
+a very long volume beside a one-page document would otherwise dominate an answer that should weigh both. No
+document may take more than its even share of what remains, and one that cannot fit its share stays at its
+summary.
 
 So depth is **measured, never classified**: real sizes against a real budget decide each rung, not a count
 or a score. Membership is never cut — a document that cannot be shown at the depth it asked for is shown at
@@ -668,26 +601,26 @@ any depth.
 
 ### Arithmetic stays in the database
 
-A `SUM` is computed by SQL, never by a model reading rows. The result tables are the answer; they are never
-reduced by re-aggregation. A join's cardinality is not predictable from its inputs, so a near-cartesian
-blowup is discoverable only after execution and is usually a wrong key — worth logging as a correctness
-signal, not just a budget event. Whenever rows are dropped to fit, it is marked, so the answer says "the top
-50 of 500" rather than presenting a partial as a total.
+A sum, average, or count is computed by the database, never by a model reading rows. The result tables are
+the answer; they are never reduced by re-aggregation. A join's cardinality is not predictable from its
+inputs, so a near-cartesian blowup is discoverable only after execution and is usually a wrong key — worth
+logging as a correctness signal, not just a budget event. Whenever rows are dropped to fit, it is marked, so
+the answer says it is showing part of a larger total rather than presenting a partial as a total.
 
-A single computed value carries no evidence of its own scope: `17582.254` under a model-chosen name reads the
-same whether it is a grand total or filtered to one segment and ship mode, and synthesis, seeing only the
-number, will disclaim or misattribute it. So each result is rendered with the **operation that produced it** —
-the executed query with its column references rewritten to header names, no internal position ids. This is
-provenance for synthesis to read, not for the reader to see: it states what a figure means so a filtered
+A single computed value carries no evidence of its own scope: a number under a model-chosen name reads the
+same whether it is a grand total or filtered to one narrow slice, and synthesis, seeing only the number, will
+disclaim or misattribute it. So each result is rendered with the **operation that produced it** — the
+executed query, with its column references rewritten to header names rather than internal identifiers. This
+is provenance for synthesis to read, not for the reader to see: it states what a figure means so a filtered
 figure is never mistaken for the whole, and synthesis is told to state the figure plainly and never surface
-the operation.
+the operation itself.
 
 ### Citation is structural and free
 
-Citations do not depend on depth. A batch shown at summary depth still cites at block and page level, because
-the batch stored its range when it was built; a block shown directly carries its own filename and page; a
-document shown at its own summary cites the file. This is what makes shallow depth honest: a document too
-broad to expand still contributes its real provenance.
+Citations do not depend on depth. A section shown at summary depth still cites at block and page level,
+because the section stored its range when it was built; a block shown directly carries its own filename and
+page; a document shown at its own summary cites the file. This is what makes shallow depth honest: a document
+too broad to expand still contributes its real provenance.
 
 What citation cannot check is *which rung a figure came from*. A number quoted out of a summary and a number
 computed from rows cite identically, and the fabrication check — which compares cited files against evidence
@@ -698,17 +631,16 @@ files — passes both. A figure lifted from prose that happens to be wrong is th
 One model call merges the text evidence and the computed results. Computed results are the authority for
 figures and totals; text supplies narrative and context; the model is where the two reconcile. If the
 evidence does not answer the question, it says so plainly. It is told to account for each piece of evidence
-once: many near-identical summaries from one long document are the condition under which a single free-running
-call degenerates into repeating itself until it hits its token cap.
+once: many near-identical summaries from one long document are the condition under which a single
+free-running call degenerates into repeating itself until it runs out of room.
 
 ### The one irreducible risk
 
 Summary quality. Two summaries now stand between the query and the content, and they fail differently. A bad
-**batch** summary misrepresents a section. A bad **document** summary is worse: it is the only thing
-resolution ever sees of that document, so a document whose summary omits what it holds is not merely
-under-read — it is never selected at all, and the failure is indistinguishable in the log from a document
-that genuinely bears on nothing. Both are set once, in the prep phase, and neither can be compensated
-downstream.
+**section** summary misrepresents a part of a document. A bad **document** summary is worse: it is the only
+thing resolution ever sees of that document, so a document whose summary omits what it holds is not merely
+under-read — it is never selected at all, and the failure is indistinguishable from a document that
+genuinely bears on nothing. Both are set once, in the prep phase, and neither can be compensated downstream.
 
 ### Open
 
@@ -718,98 +650,13 @@ downstream.
   given, never the whole, so the same question would be judged against a different denominator in every call
   and the union of their choices would be bounded by nothing. A per-item ceiling (a fixed document-summary
   length; identity and column names, never values, per table) keeps the inventory small, but the total is
-  still linear in items — 136 items measured at ~16k tokens — so past a few thousand, scoping needs its own
-  retrieval step ahead of resolution. The same ceiling appears at synthesis, where a floor that overflows is
-  merged. One library fits one call today, so this is deferred, not solved. Table entries carry a second
-  term: their cost is linear in total *columns*, not tables, so a corpus of wide sheets reaches the ceiling
-  sooner than a corpus of many narrow ones.
+  still linear in items, so past some corpus size, scoping needs its own retrieval step ahead of resolution.
+  The same ceiling appears at synthesis, where a floor that overflows is merged. One library fits one call
+  today, so this is deferred, not solved. Table entries carry a second term: their cost is linear in total
+  *columns*, not tables, so a corpus of wide sheets reaches the ceiling sooner than a corpus of many narrow
+  ones.
 
 - **Resolution is document-grain, so within-document specificity is invisible to it.** Only document
   summaries are read when coverage is decided, so something named in exactly one section of one document —
   and not in that document's summary — cannot be routed to. The false negative is indistinguishable from a
-  question the corpus genuinely has nothing on: both log as empty coverage.
-
-### The pipeline this replaced
-
-The first pipeline reformulated the question, retrieved a wide net (`CANDIDATES=1000`, RRF over dense and
-lexical channels), filtered it with a batched two-step model pass, wrote SQL for the kept tables, marked
-evidence essential or supporting, and fit deterministically. Its properties were sound in isolation — no
-score threshold, no reranker, no arbitrary read cap — but it rested on similarity deciding *membership*,
-which is the assumption that fails on broad questions. The old RRF net and early-stopping filter are retired
-from the query path as a membership decision; the same dense+sparse+RRF/early-stopping shape is designed to
-return in a different role — a recall-only pruner beneath the model's own precision judgment, scoped to
-already-covered documents to reach leaf depth (see "Why the wide net was removed" above) — not as a
-corpus-wide filter deciding what's in or out.
-
-It was replaced by two independent channels — a per-batch selection pass over every batch summary, and a
-table pass that both marked relevant tables and wrote the SQL. That failed differently, and structurally:
-
-- **Selection was a hard gate with a silent failure mode.** An empty return was indistinguishable from
-  "nothing here is relevant", and on a question spanning the whole corpus it returned nothing at all, so the
-  answer was written from the table channel alone with 96% of the budget unspent.
-- **Nothing decided between the channels.** They ran concurrently and never saw each other, so precedence
-  was fixed in code — computed rows claimed the budget first and text was the residual — regardless of what
-  the question needed.
-- **Relevance stated by the SQL writer taught the wrong lesson.** Its prompt's worked examples paired a
-  question *shape* with an answer, so a corpus-shaped question reliably produced a projection of filenames,
-  and a prose-sounding one reliably produced no tables at all. A synthetic `catalog(file, sheet, row_count)`
-  relation, added so questions *about* the tables could be a real `SELECT`, was what that projection read
-  from — it was removed along with the examples, because the same facts are already in the inventory
-  resolution reads.
-
-## Models
-
-One general vision-language model (Qwen, served by vLLM), run without a separate reasoning pass, performs
-every model step across ingestion and query — reading rendered pages and embedded images, table structuring,
-batch summarization, document summarization, query resolution, SQL writing, evidence merging, and synthesis.
-There is no separate layout/detection model and no separate text-only model: the same model that reads a
-page's pixels also structures tables and writes SQL.
-
-A multilingual dense representation (`BAAI/bge-m3`) carries meaning for search. It is served the same way as
-Qwen — its own vLLM instance, behind an OpenAI-compatible `/v1/embeddings` endpoint — rather than loaded
-in-process; every process that needs an embedding is a stateless HTTP client to that one service, gated by
-`get_embed_capacity()`, the same shared-service-plus-global-pool pattern used for every other model call. It
-used to be loaded directly into whichever process called it (`sentence-transformers`, on-device), which meant
-every replica of that process held its own full copy of the model in GPU memory with no cross-process
-coordination; serving it removes both problems at once. Nothing in the pipeline asks a model to hold data in
-its head: it reads, judges, and writes queries; the database keeps the numbers.
-
-### OCR model comparison
-
-`Qwen/Qwen3-VL-8B-Instruct-FP8` is the production OCR model, reached after comparing it against several
-alternatives on real corpus pages using the same tag-scheme prompt (`prompts/page_ocr.md`) and the same
-100-page sample drawn from the real document mix:
-
-- `Qwen/Qwen3.5-9B` (prior production model) — the baseline the tag scheme and collapse-mitigation prompt
-  rules were originally tuned against. Superseded by Qwen3-VL-8B, which won on 5 of 6 known issue categories
-  in a direct head-to-head on real pages.
-- `Qwen/Qwen3-VL-8B-Instruct-FP8` (current production model) — best quality observed of any model tested.
-  `finish_reason == "length"` (the near-universal signal for repetition-collapse across every model tried)
-  reduced to roughly 1-2% at 100/255-page scale after the three prompt fixes (tag-once, no-meta-commentary,
-  equation-chain-termination). Real GPU-executed concurrency is well below the app's dispatch cap
-  (`OCR_CONCURRENCY = 32`, `+ VISION_BUFFER` admitted client-side) — the gap is absorbed safely by vLLM's own
-  request queue, with no throughput benefit from the higher cap. The exact concurrency the server sustains is
-  a point-in-time operational figure, not a fixed architectural constant — it has been observed anywhere from
-  ~11 to the low-20s concurrent `Running` requests depending on config/corpus at the time; check
-  `docker logs citadel-qwen` for the current figure rather than citing a specific number here.
-- `Qwen/Qwen3-VL-4B-Instruct-FP8` — 14% collapse rate at scale, disqualifying.
-- `lovedheart/Qwen3.5-4B-FP8` (community FP8 quant; no official Qwen3.5-4B-Instruct-FP8 exists) — tested to
-  see whether a smaller, higher-concurrency model was "good enough" to free the 8B model for non-OCR SLM
-  traffic only. At 100-page scale: 8/100 pages (8%) ended with `finish_reason == "length"`, confirmed on
-  inspection to be genuine repetition-collapse (not just long legitimate content) — the same block of text
-  repeated verbatim several times before truncation. 7 of the 8 failures concentrated in one dense,
-  equation-heavy document, matching the known equation-chain collapse risk. This exceeds the acceptable
-  collapse rate; **Qwen3.5-4B-FP8 was rejected for OCR** and Qwen3-VL-8B remains the sole OCR model.
-- `PaddlePaddle/PaddleOCR-VL-1.6` — not a general instruction-following model; only recognizes 4 fixed
-  trigger prompts (`"OCR:"`, `"Table Recognition:"`, `"Formula Recognition:"`, `"Chart Recognition:"`), so the
-  tag-scheme prompt fails outright. Retested with the native `"OCR:"` prompt: 88/100 clean at 100-page scale,
-  notably worse than Qwen3-VL-8B and without the tag-scheme output it depends on. Not adopted.
-- `tencent/HunyuanOCR` — hits a real, unfixed, unreported upstream vLLM bug (`IndexError` in
-  `hunyuan_vision.py`'s `get_xdrope_input_positions`, triggered by a mismatch between detected image
-  placeholder tokens and `image_grid_thw` entries) that kills the whole vLLM engine process, reproducing even
-  on a single non-batched request against a real page. No known fix or workaround exists. Not adopted;
-  dropped rather than pursued further.
-
-None of the smaller/alternative models cleared the bar to safely replace or supplement Qwen3-VL-8B for OCR,
-so the architecture described above — one general vision-language model performing every step — stands
-unchanged.
+  question the corpus genuinely has nothing on: both surface as empty coverage.
