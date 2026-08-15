@@ -15,3 +15,4 @@ class LibraryStatus(StrEnum):
     PROCESSING = "processing"
     INGESTED = "ingested"
     READY = "ready"
+    FAILED = "failed"

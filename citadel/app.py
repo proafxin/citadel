@@ -1,68 +1,116 @@
 import asyncio
 import logging
 import signal
+import socket
 import traceback
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
-import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from citadel.bus import get_redis
-from citadel.db import get_engine
+from citadel.db import get_engine, get_sessionmaker
+from citadel.models.library import Library
+from citadel.models.status import LibraryStatus
 from citadel.router import router
 from citadel.services.batching import emit_library_batches
-from citadel.services.document import mark_described, mark_embed_started, mark_finalize_started
+from citadel.services.document import STREAM_FINALIZE, mark_described, mark_embed_started
+from citadel.services.ingestion import GROUP, ensure_group
 from citadel.services.ingestion import shutdown as shutdown_resources
 from citadel.services.readiness import flags_key
-from citadel.services.retrieval import STREAM_EMBED, pending_libraries
-from config import configure_logging, get_settings
+from citadel.services.retrieval import STREAM_EMBED
+from config import configure_logging
 
 logger = logging.getLogger(__name__)
 
+HOSTNAME_CONSUMER = f"finalize-{socket.gethostname()}"
+_FINALIZE_LOCK_CLASS = 3
+FINALIZE_MIN_IDLE_MS = 60_000
+FINALIZE_SWEEP_S = 30
+FINALIZE_READ_COUNT = 16
+FINALIZE_BLOCK_MS = 5_000
 
-async def _finalize(library_id: int, tag: str) -> None:
+
+async def _claim_finalize(library_id: int) -> bool:
+    async with get_sessionmaker()() as session, session.begin():
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:cls, :lib)"), {"cls": _FINALIZE_LOCK_CLASS, "lib": library_id}
+        )
+        library = await session.get(Library, library_id)
+        if library is None or library.status != LibraryStatus.INGESTED or library.finalize_started_at is not None:
+            return False
+        library.finalize_started_at = datetime.now(UTC)
+        return True
+
+
+async def _finalize(library_id: int) -> None:
+    if not await _claim_finalize(library_id):
+        logger.info("finalize skipped (already claimed) library=%d", library_id)
+        return
     logger.info("finalizing library=%d", library_id)
     await get_redis().delete(flags_key(library_id))
-    await mark_finalize_started(library_id)
     await mark_described(library_id)
     emitted = await emit_library_batches(library_id)
     await mark_embed_started(library_id)
     await get_redis().xadd(STREAM_EMBED, {"library_id": str(library_id)})
-    logger.info("%s library=%d documents=%d — awaiting summaries+embed", tag, library_id, emitted)
+    logger.info("finalized library=%d documents=%d — awaiting summaries+embed", library_id, emitted)
 
 
-async def finalize_libraries(queue: asyncio.Queue[int]) -> None:
+async def _settle_finalize(msg_id: bytes) -> None:
+    redis = get_redis()
+    await redis.xack(STREAM_FINALIZE, GROUP, msg_id)
+    await redis.xdel(STREAM_FINALIZE, msg_id)
+
+
+async def _consume_entries(entries: list[tuple[bytes, dict[bytes, bytes]]]) -> None:
+    for msg_id, raw in entries:
+        await _finalize(int(raw[b"library_id"]))
+        await _settle_finalize(msg_id)
+
+
+async def _drain_own(consumer: str) -> None:
+    redis = get_redis()
+    last = "0"
     while True:
-        library_id = await queue.get()
-        await _finalize(library_id, "finalized")
+        fresh = await redis.xreadgroup(GROUP, consumer, {STREAM_FINALIZE: last}, count=FINALIZE_READ_COUNT)
+        entries = fresh[0][1] if fresh else []
+        if not entries:
+            return
+        await _consume_entries(entries)
+        last = entries[-1][0].decode()
 
 
-LISTEN_HEALTH_S = 30
-LISTEN_RETRY_S = 2
-_LISTEN_ERRORS = (OSError, asyncpg.PostgresError, asyncpg.InterfaceError)
-
-
-async def _listen(queue: asyncio.Queue[int]) -> None:
+async def _sweep_stale(consumer: str) -> None:
+    redis = get_redis()
     while True:
-        try:
-            conn = await asyncpg.connect(get_settings().pg_dsn)
-        except _LISTEN_ERRORS:
-            logger.warning("embed listener cannot connect — retrying")
-            await asyncio.sleep(LISTEN_RETRY_S)
-            continue
-        try:
-            await conn.add_listener("embed", lambda _conn, _pid, _channel, payload: queue.put_nowait(int(payload)))
-            for library_id in await pending_libraries():
-                queue.put_nowait(library_id)
-            while True:
-                await asyncio.sleep(LISTEN_HEALTH_S)
-                await conn.execute("SELECT 1")
-        except _LISTEN_ERRORS:
-            logger.warning("embed listener connection lost — reconnecting")
-        finally:
-            conn.terminate()
+        await asyncio.sleep(FINALIZE_SWEEP_S)
+        _, claimed, _ = await redis.xautoclaim(
+            STREAM_FINALIZE, GROUP, consumer, FINALIZE_MIN_IDLE_MS, "0-0", count=FINALIZE_READ_COUNT
+        )
+        if claimed:
+            await _consume_entries(claimed)
+
+
+async def consume_finalize() -> None:
+    consumer = HOSTNAME_CONSUMER
+    await ensure_group(STREAM_FINALIZE)
+    await _drain_own(consumer)
+    redis = get_redis()
+    sweeper = asyncio.create_task(_sweep_stale(consumer))
+    try:
+        while True:
+            fresh = await redis.xreadgroup(
+                GROUP, consumer, {STREAM_FINALIZE: ">"}, count=FINALIZE_READ_COUNT, block=FINALIZE_BLOCK_MS
+            )
+            entries = fresh[0][1] if fresh else []
+            if entries:
+                await _consume_entries(entries)
+    finally:
+        sweeper.cancel()
+        await asyncio.gather(sweeper, return_exceptions=True)
 
 
 def _fatal_on_worker_death(task: asyncio.Task[None]) -> None:
@@ -79,17 +127,11 @@ def _fatal_on_worker_death(task: asyncio.Task[None]) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
-    queue: asyncio.Queue[int] = asyncio.Queue()
-    tasks = [
-        asyncio.create_task(finalize_libraries(queue)),
-        asyncio.create_task(_listen(queue)),
-    ]
-    for task in tasks:
-        task.add_done_callback(_fatal_on_worker_death)
+    task = asyncio.create_task(consume_finalize())
+    task.add_done_callback(_fatal_on_worker_death)
     yield
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
     await shutdown_resources()
     await get_engine().dispose()
 

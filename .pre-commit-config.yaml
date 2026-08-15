@@ -10,14 +10,14 @@ repos:
     - id: check-added-large-files
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.1
+    rev: v0.16.3
     hooks:
     - id: ruff-check
       args: ["--config=pyproject.toml", "--fix", '--unsafe-fixes']
     - id: ruff-format
 
   - repo: https://github.com/semgrep/pre-commit
-    rev: v1.171.0
+    rev: v1.173.0
     hooks:
     - id: semgrep
       types: [python]

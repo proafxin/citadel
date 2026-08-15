@@ -12,6 +12,7 @@ from pydantic import TypeAdapter
 from sqlalchemy import func, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
 from citadel.models.content import ContentNode
 from citadel.models.document import Document
@@ -50,9 +51,11 @@ async def create_documents(library_id: int, filenames: list[str]) -> list[int]:
         return [document.id for document in documents]
 
 
+STREAM_FINALIZE = "finalize"
+
+
 async def notify_embed(library_id: int) -> None:
-    async with get_sessionmaker()() as session, session.begin():
-        await session.execute(text("SELECT pg_notify('embed', :library)"), {"library": str(library_id)})
+    await get_redis().xadd(STREAM_FINALIZE, {"library_id": str(library_id)})
 
 
 _LIBRARY_LOCK_CLASS = 1
@@ -70,21 +73,20 @@ async def library_inflight(session: AsyncSession, library_id: int) -> int:
     return count or 0
 
 
-async def _maybe_notify_embed(session: AsyncSession, library_id: int) -> None:
+async def _maybe_notify_embed(session: AsyncSession, library_id: int) -> bool:
     await session.execute(
         text("SELECT pg_advisory_xact_lock(:cls, :library)"), {"cls": _LIBRARY_LOCK_CLASS, "library": library_id}
     )
     library = await session.get(Library, library_id)
     if library is None:
-        return
+        return False
     if await library_inflight(session, library_id) != 0:
-        return
+        return False
     now = datetime.now(UTC)
     if library.ingested_at is None:
         library.ingested_at = now
     library.status = LibraryStatus.INGESTED
-    if library.tier == "tier_2":
-        await session.execute(text("SELECT pg_notify('embed', :library)"), {"library": str(library_id)})
+    return library.tier == "tier_2"
 
 
 async def begin_library_ingest(library_id: int) -> None:
@@ -116,14 +118,6 @@ def _ingest_seconds(document: Document) -> float | None:
     return (datetime.now(UTC) - document.processing_started_at).total_seconds()
 
 
-async def mark_finalize_started(library_id: int) -> None:
-    async with get_sessionmaker()() as session, session.begin():
-        library = await session.get(Library, library_id)
-        if library is None:
-            return
-        library.finalize_started_at = datetime.now(UTC)
-
-
 async def mark_described(library_id: int) -> None:
     async with get_sessionmaker()() as session, session.begin():
         library = await session.get(Library, library_id)
@@ -147,6 +141,14 @@ async def mark_library_ready(library_id: int) -> None:
             return
         library.status = LibraryStatus.READY
         library.ready_at = datetime.now(UTC)
+
+
+async def mark_library_failed(library_id: int) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        library = await session.get(Library, library_id)
+        if library is None:
+            return
+        library.status = LibraryStatus.FAILED
 
 
 def _reclassify_regions(blocks: list[Block]) -> list[Block]:
@@ -361,20 +363,22 @@ async def save_document_tree(
         document.drops = prepared.drops
         document.paratext = prepared.paratext
         if await session.scalar(select(ContentNode.id).where(ContentNode.document_id == doc_id).limit(1)) is not None:
-            await _maybe_notify_embed(session, library_id)
-            return
-        rows: list[dict[str, object]] = []
-        table_blocks: list[tuple[int, MaterializedTable]] = []
-        for index, block in enumerate(built):
-            if block.kind == "table":
-                table = next(tables)
-                table_blocks.append((index, table))
-                rows.append(_block_row(block, doc_id, _table_search(table, library_name, filename)))
-            else:
-                rows.append(_block_row(block, doc_id, search_text.get(index)))
-        ids = await _insert_blocks(session, rows)
-        await _insert_tables_bulk(session, doc_id, [(ids[index], table) for index, table in table_blocks])
-        await _maybe_notify_embed(session, library_id)
+            should_notify = await _maybe_notify_embed(session, library_id)
+        else:
+            rows: list[dict[str, object]] = []
+            table_blocks: list[tuple[int, MaterializedTable]] = []
+            for index, block in enumerate(built):
+                if block.kind == "table":
+                    table = next(tables)
+                    table_blocks.append((index, table))
+                    rows.append(_block_row(block, doc_id, _table_search(table, library_name, filename)))
+                else:
+                    rows.append(_block_row(block, doc_id, search_text.get(index)))
+            ids = await _insert_blocks(session, rows)
+            await _insert_tables_bulk(session, doc_id, [(ids[index], table) for index, table in table_blocks])
+            should_notify = await _maybe_notify_embed(session, library_id)
+    if should_notify:
+        await notify_embed(library_id)
 
 
 def _sheet_text_search(library_name: str, filename: str, sheet_name: str, text: str) -> str:
@@ -460,7 +464,10 @@ async def finalize_tabular(doc_id: int) -> None:
             return
         document.status = DocumentStatus.INGESTED
         document.ingest_seconds = _ingest_seconds(document)
-        await _maybe_notify_embed(session, document.library_id)
+        library_id = document.library_id
+        should_notify = await _maybe_notify_embed(session, library_id)
+    if should_notify:
+        await notify_embed(library_id)
     await persist_document_tree(doc_id)
 
 
@@ -471,7 +478,10 @@ async def mark_document(doc_id: int, status: DocumentStatus) -> None:
             return
         document.status = status
         document.ingest_seconds = _ingest_seconds(document)
-        await _maybe_notify_embed(session, document.library_id)
+        library_id = document.library_id
+        should_notify = await _maybe_notify_embed(session, library_id)
+    if should_notify:
+        await notify_embed(library_id)
 
 
 async def _load_tables(session: AsyncSession, doc_id: int) -> dict[int, Table]:

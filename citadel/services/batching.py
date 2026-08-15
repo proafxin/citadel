@@ -15,6 +15,7 @@ from citadel.models.document import Document
 from citadel.models.status import DocumentStatus
 from citadel.models.table import Table
 from citadel.prompts import load_prompt
+from citadel.services.document import mark_library_failed
 from citadel.services.readiness import record_library_flag
 
 STREAM_BATCH = "batch"
@@ -240,8 +241,9 @@ def _batch_row(doc_id: int, spec: BatchSpec, summary: str) -> ContentBatch:
     )
 
 
-async def mark_summary_failed(doc_id: int) -> None:
-    logger.error("batch summary permanently failed doc=%d — library stays blocked from ready", doc_id)
+async def mark_summary_failed(doc_id: int, library_id: int) -> None:
+    logger.error("batch summary permanently failed doc=%d library=%d — marking library failed", doc_id, library_id)
+    await mark_library_failed(library_id)
 
 
 async def _summarize_batch(doc_id: int, spec: BatchSpec) -> ContentBatch:

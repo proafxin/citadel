@@ -45,8 +45,6 @@ class Settings(BaseSettings):
 
     tree_store_dir: Path = Path("data/trees")
 
-    worker_id: str
-
     @property
     def qwen_base_url(self) -> str:
         return f"http://{self.qwen_host}:{self.qwen_port}/v1"
@@ -59,13 +57,6 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         return (
             f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
-            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-        )
-
-    @property
-    def pg_dsn(self) -> str:
-        return (
-            f"postgresql://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 

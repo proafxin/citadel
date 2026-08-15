@@ -145,18 +145,6 @@ async def handle_embed(fields: dict[str, str]) -> None:
     await record_library_flag(library_id, "embedding")
 
 
-async def pending_libraries() -> list[int]:
-    async with get_sessionmaker()() as session:
-        return list(
-            await session.scalars(
-                select(Document.library_id)
-                .join(Library, Document.library_id == Library.id)
-                .where(Library.tier == "tier_2", Document.status == DocumentStatus.INGESTED)
-                .distinct()
-            )
-        )
-
-
 def _table_cand(table: Table, filename: str, page_no: int | None) -> TableCand:
     return TableCand(
         table.content_id,
