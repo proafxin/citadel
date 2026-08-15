@@ -2,7 +2,7 @@ import logging
 from itertools import starmap
 from typing import Protocol
 
-from citadel.llm import SLM_MODEL_LEN, STRUCTURE_MAX_TOKENS, call_structured, count_tokens, count_tokens_batch
+from citadel.llm import call_structured, count_tokens, count_tokens_batch
 from citadel.prompts import load_prompt
 from citadel.schemas.table import TableStructure
 from citadel.services.capacity import get_text_capacity
@@ -20,9 +20,7 @@ class Position(Protocol):
 
 
 _MAX_CELL = 40
-_PROMPT_OVERHEAD_MARGIN = 1024
-_PROMPT_OVERHEAD = count_tokens(load_prompt("table_structure_single")) + _PROMPT_OVERHEAD_MARGIN
-SINGLE_TABLE_BUDGET = SLM_MODEL_LEN - STRUCTURE_MAX_TOKENS - _PROMPT_OVERHEAD
+SINGLE_TABLE_BUDGET = 8192
 
 _TABLE_ENTRY_SCHEMA = {
     "type": "object",
@@ -198,13 +196,31 @@ def _combine(members: list[MaterializedTable], chain: list[int]) -> Materialized
     )
 
 
+_MIN_CHAIN = 2
+
+
 def _adjacency_groups(regions: list[Position]) -> list[list[int]]:
+    row_order = sorted(range(len(regions)), key=lambda i: regions[i].min_row)
+    rank = {index: position for position, index in enumerate(row_order)}
     by_columns: dict[tuple[int, int], list[int]] = {}
     for index, region in enumerate(regions):
         by_columns.setdefault((region.min_col, region.max_col), []).append(index)
-    return [
-        sorted(indices, key=lambda i: regions[i].min_row) for indices in by_columns.values() if len(indices) > 1
-    ]
+    groups: list[list[int]] = []
+    for indices in by_columns.values():
+        if len(indices) < _MIN_CHAIN:
+            continue
+        ordered = sorted(indices, key=lambda i: regions[i].min_row)
+        chain = [ordered[0]]
+        for index in ordered[1:]:
+            if rank[index] == rank[chain[-1]] + 1:
+                chain.append(index)
+                continue
+            if len(chain) >= _MIN_CHAIN:
+                groups.append(chain)
+            chain = [index]
+        if len(chain) >= _MIN_CHAIN:
+            groups.append(chain)
+    return groups
 
 
 async def merge_candidates(
