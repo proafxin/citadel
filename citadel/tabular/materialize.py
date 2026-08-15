@@ -68,6 +68,26 @@ def _grid_header(grid: list[list[str]], header_rows: list[int], col: int) -> str
     return " ".join(parts) or None
 
 
+def _strip_notes(text: str | None, notes: list[str] | None) -> str | None:
+    if text is None or not notes:
+        return text
+    stripped = text
+    for note in notes:
+        stripped = stripped.replace(note, "").strip()
+    return stripped or None
+
+
+def _naming_rows(grid: list[list[str]], header_rows: list[int], col_start: int, count: int) -> list[int]:
+    if len(header_rows) <= 1:
+        return header_rows
+    naming = [
+        row
+        for row in header_rows
+        if sum(1 for offset in range(count) if _grid_cell(grid, row, col_start + offset)) > 1
+    ]
+    return naming or header_rows
+
+
 def _clean_name(name: str | None) -> str | None:
     return None if name is not None and _lossless_decimal(name.strip()) else name
 
@@ -138,13 +158,15 @@ def _materialize_relational(
     )
     dtypes = [dtype_of([raw[index] for raw in collected]) for index in range(count)]
     if header_rows:
+        naming_rows = _naming_rows(grid, header_rows, structure.col_start, count)
         headers: list[str | None] = [
-            _grid_header(grid, header_rows, structure.col_start + index) for index in range(count)
+            _grid_header(grid, naming_rows, structure.col_start + index) for index in range(count)
         ]
     elif structure.columns:
         headers = [structure.columns[index] if index < len(structure.columns) else None for index in range(count)]
     else:
         headers = [None] * count
+    headers = [_strip_notes(header, structure.notes) for header in headers]
     columns = [
         Column(header=_clean_name(headers[index]) or f"col{index}", dtype=dtypes[index]) for index in range(count)
     ]
