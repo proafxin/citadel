@@ -16,7 +16,6 @@ from citadel.schemas.query import QueryPlan
 from citadel.services.capacity import (
     get_embed_capacity,
     get_interactive_capacity,
-    get_text_capacity,
     get_text_large_capacity,
 )
 from config import EMBED_SERVED_NAME, QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL, get_settings
@@ -148,13 +147,8 @@ async def call_text(prompt: str, max_tokens: int, key: str) -> str:
         await cap.release(key)
 
 
-async def call_text_table(prompt: str, max_tokens: int, key: str) -> str:
-    cap = get_text_capacity()
-    await cap.acquire(key)
-    try:
-        return (await _post_qwen(_text_payload(prompt, max_tokens))).strip()
-    finally:
-        await cap.release(key)
+async def call_text_table(prompt: str, max_tokens: int) -> str:
+    return (await _post_qwen(_text_payload(prompt, max_tokens))).strip()
 
 
 async def call_embed(texts: list[str], key: str) -> list[list[float]]:
@@ -191,14 +185,14 @@ async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -
     return (await _post_qwen(payload)).strip()
 
 
-async def call_structure_single(payload: str, key: str) -> str:
+async def call_structure_single(payload: str) -> str:
     prompt = f"{load_prompt('table_structure_single')}\n{payload}"
-    return await call_text_table(prompt, STRUCTURE_MAX_TOKENS, key)
+    return await call_text_table(prompt, STRUCTURE_MAX_TOKENS)
 
 
-async def call_structure_candidates(payload: str, prompt_name: str, key: str) -> str:
+async def call_structure_candidates(payload: str, prompt_name: str) -> str:
     prompt = f"{load_prompt(prompt_name)}\n{payload}"
-    return await call_text_table(prompt, STRUCTURE_MAX_TOKENS, key)
+    return await call_text_table(prompt, STRUCTURE_MAX_TOKENS)
 
 
 async def merge_evidence(query: str, items: list[str]) -> str:

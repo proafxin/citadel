@@ -852,14 +852,13 @@ async def _structured_table(doc_id: str, index: int, grid: list[list[str]] | Non
 async def handle_structure(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     redis = get_redis()
-    kind = (await redis.hget(f"doc:{doc_id}", "kind") or b"").decode()
     blocks = await _read_doc_blocks(doc_id)
     prepared = prepare_document(blocks)
     await redis.set(f"structures:{doc_id}", dump_structures(prepared), ex=DOC_TTL)
     indices = table_block_indices(prepared.stitched)
     if indices:
         results = await asyncio.gather(
-            *(_structured_table(doc_id, kind, index, prepared.stitched[index].grid) for index in indices)
+            *(_structured_table(doc_id, index, prepared.stitched[index].grid) for index in indices)
         )
         tables = {
             str(index): dump_tables([table] if table else []) for index, table in zip(indices, results, strict=True)

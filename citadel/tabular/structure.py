@@ -5,7 +5,7 @@ import time
 from collections import Counter
 
 from citadel.llm import call_structure_candidates, call_structure_single, count_tokens_batch, pack_indices
-from citadel.services.capacity import get_text_capacity
+from citadel.services.capacity import get_text_capacity, get_text_large_capacity
 from citadel.services.tabular import grid_from_markdown, single_table_structure
 from citadel.tabular.flag import column_kinds, payload_rows
 from citadel.tabular.materialize import MaterializedTable, materialize
@@ -104,7 +104,7 @@ async def structure_single_table(grid: list[list[str]], *, key: str) -> Material
     cap = get_text_capacity()
     await cap.acquire(key)
     try:
-        raw = await call_structure_single(text, key)
+        raw = await call_structure_single(text)
     finally:
         await cap.release(key)
     title, notes, body = _parse_single(raw)
@@ -117,13 +117,13 @@ async def _collect_sections(
     texts: list[str], packs: list[list[int]], prompt_name: str, sheet_no: int, label: str
 ) -> list[tuple[list[int], str | None, list[str], str]]:
     sections: list[tuple[list[int], str | None, list[str], str]] = []
-    cap = get_text_capacity()
+    cap = get_text_large_capacity()
     for pack_no, pack in enumerate(packs):
         payload = "\n\n".join(texts[index] for index in pack)
         key = f"structure:{label or prompt_name}:{sheet_no}:{pack_no}"
         await cap.acquire(key)
         try:
-            raw = await call_structure_candidates(payload, prompt_name, key)
+            raw = await call_structure_candidates(payload, prompt_name)
         finally:
             await cap.release(key)
         sections.extend(_parse_sections(raw))
