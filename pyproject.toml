@@ -1,6 +1,6 @@
 [project]
 name = "citadel"
-version = "2.0.1"
+version = "2.0.2"
 description = "Citadel: personal search engine"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -36,10 +36,8 @@ dependencies = [
 [dependency-groups]
 dev = [
     "coverage>=7.15.4",
-    "mypy>=2.3.0",
     "pre-commit>=4.6.2",
     "pytest>=9.0.3",
-    "scikit-learn>=1.9.0",
 ]
 
 [[tool.uv.index]]
