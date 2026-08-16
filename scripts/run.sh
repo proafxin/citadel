@@ -11,7 +11,7 @@ export MALLOC_ARENA_MAX=2
 export MALLOC_TRIM_THRESHOLD_=131072
 
 docker compose exec -T redis redis-cli FLUSHALL >/dev/null
-docker compose down postgres --remove-orphans -v
+docker compose down postgres --remove-orphans
 docker compose up -d postgres
 
 if ! curl -sf "http://localhost:${CITADEL_QWEN_PORT:-8100}/v1/models" >/dev/null 2>&1; then

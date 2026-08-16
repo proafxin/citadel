@@ -73,13 +73,21 @@ def _payload_text(grid: list[list[str]], indices: list[int], width: int, max_cel
     return "\n".join(_row_line(index, grid[index], width, max_cell) for index in indices)
 
 
+_SAMPLE_RUN = 3
+
+
 def _spread(rows: list[int], room: int) -> list[int]:
     if room <= 0 or not rows:
         return []
     if room >= len(rows):
         return rows
-    step = len(rows) / room
-    return sorted({rows[int(index * step)] for index in range(room)})
+    runs = max(room // _SAMPLE_RUN, 1)
+    step = len(rows) / runs
+    selected: set[int] = set()
+    for index in range(runs):
+        start = int(index * step)
+        selected.update(rows[start : start + _SAMPLE_RUN])
+    return sorted(selected)
 
 
 def _budgeted_sample(grid: list[list[str]], width: int, budget: int) -> list[int]:
