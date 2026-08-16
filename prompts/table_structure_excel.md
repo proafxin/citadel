@@ -26,6 +26,7 @@ with no gap between them (see "Multiple tables" below). For each table:
 | `header_rows` | line numbers | lines that name the columns. Empty if this table has no header row of its own. |
 | `transposed` | boolean | true if field names run down a column instead of across a row. |
 | `data_start`, `data_end` | line numbers | this table's own data, inclusive. |
+| `col_start`, `col_end` | column numbers | this table's own columns, inclusive. |
 | `section_rows` | line numbers | lines that only introduce a group of rows beneath them, within the data range. |
 | `columns` | strings | column names, one per column — only when `header_rows` is empty and the columns need names. |
 | `title` | string | this table's own title, if one is visibly attached. |
@@ -55,9 +56,10 @@ columns; a single value column is the transposed case above, not a header row.
 
 ## Multiple tables
 
-A region can stack more than one table with no gap between them. Return one entry per table, each covering
-only its own rows, in top-to-bottom order. A lone label is a title for one table (see above), not a second
-table, when every row beneath it keeps the same shape as what follows.
+A region can stack more than one table with no gap between them, either one above another or side by side.
+Return one entry per table, each covering only its own rows and columns, top-to-bottom then left-to-right
+order. A lone label is a title for one table (see above), not a second table, when every row beneath it keeps
+the same shape as what follows.
 
 ## Header spans and merging
 

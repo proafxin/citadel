@@ -30,12 +30,25 @@ _TABLE_ENTRY_SCHEMA = {
         "transposed": {"type": "boolean"},
         "data_start": {"type": "integer"},
         "data_end": {"type": "integer"},
+        "col_start": {"type": "integer"},
+        "col_end": {"type": "integer"},
         "section_rows": {"type": "array", "items": {"type": "integer"}},
         "columns": {"type": "array", "items": {"type": "string"}},
         "title": {"type": "string"},
         "notes": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["header_rows", "transposed", "data_start", "data_end", "section_rows", "columns", "title", "notes"],
+    "required": [
+        "header_rows",
+        "transposed",
+        "data_start",
+        "data_end",
+        "col_start",
+        "col_end",
+        "section_rows",
+        "columns",
+        "title",
+        "notes",
+    ],
 }
 _TABLE_STRUCTURE_SCHEMA = {
     "type": "object",
@@ -107,24 +120,38 @@ def _bounds(entry: dict) -> tuple[int, int] | None:
         return None
 
 
+def _cols_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    return a[0] <= b[1] and b[0] <= a[1]
+
+
 def _non_overlapping(entries: list[dict]) -> list[dict]:
     valid = [(entry, bounds) for entry in entries if (bounds := _bounds(entry)) is not None]
     ordered = sorted(valid, key=lambda pair: pair[1][0])
-    claimed_until = -1
+    claimed: list[tuple[int, int, int]] = []
     result: list[dict] = []
     for entry, (data_start, data_end) in ordered:
+        col_range = _entry_col_range(entry)
+        claimed_until = max(
+            (until for c_start, c_end, until in claimed if _cols_overlap(col_range, (c_start, c_end))),
+            default=-1,
+        )
         start = max(data_start, claimed_until + 1)
         if start > data_end:
             continue
         result.append({**entry, "data_start": start, "data_end": data_end})
-        claimed_until = data_end
+        claimed.append((*col_range, data_end))
     return result
 
 
-def _structure(entry: dict, width: int) -> TableStructure:
+def _entry_col_range(entry: dict) -> tuple[int, int]:
+    return int(entry["col_start"]), int(entry["col_end"])
+
+
+def _structure(entry: dict) -> TableStructure:
+    col_start, col_end = _entry_col_range(entry)
     return TableStructure(
-        col_start=0,
-        col_end=width - 1,
+        col_start=col_start,
+        col_end=col_end,
         header_rows=list(entry.get("header_rows") or []) or None,
         transposed=bool(entry.get("transposed")),
         data_start=int(entry["data_start"]),
@@ -147,7 +174,6 @@ async def structure_candidate(
 ) -> list[MaterializedTable]:
     if not grid:
         return []
-    width = max((len(row) for row in grid), default=0)
     text = _candidate_text(grid, full=full, budget=None if full else SINGLE_TABLE_BUDGET)
     prompt_name = "table_structure_known" if known_table else "table_structure_excel"
     prompt = f"{load_prompt(prompt_name)}\n{text}"
@@ -160,7 +186,7 @@ async def structure_candidate(
     tables: list[MaterializedTable] = []
     for entry in _non_overlapping(data.get("tables") or []):
         try:
-            structure = _structure(entry, width)
+            structure = _structure(entry)
         except (KeyError, ValueError, TypeError):
             logger.warning("structure_candidate dropped malformed entry=%r", entry)
             continue
