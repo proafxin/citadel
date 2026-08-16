@@ -62,7 +62,7 @@ When a header spans several rows, or a heading covers several columns, list ever
 name yourself.
 
 A cell inside the header block can also state something about the table as a whole rather than naming the
-column it happens to sit in — a unit, currency, or scale (`in million USD`, `all figures in %`) is the most
+column it happens to sit in — a unit, currency, or scale annotation is the most
 common case. If a header row is only that kind of cell plus otherwise-empty cells, it is not naming any
 column: put its text in `notes` and leave that row out of `header_rows` entirely, the same as a title.
 
