@@ -313,6 +313,7 @@ async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tup
                 structure_candidate(
                     grid,
                     key=f"structure:{doc_id}:sheet{sheet.sheet_no}:{index}",
+                    known_table=False,
                     sheet_no=sheet.sheet_no,
                     anchors=_region_anchors(region),
                 )

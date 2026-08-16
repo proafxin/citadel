@@ -53,7 +53,7 @@ def _row_line(index: int, row: list[str], width: int, max_cell: int | None) -> s
     cells = [(row[col] if col < len(row) else "").strip() for col in range(width)]
     if max_cell is not None:
         cells = [cell[:max_cell] for cell in cells]
-    return f"row {index}: " + " | ".join(cells)
+    return f"{index}: " + " | ".join(cells)
 
 
 def _payload_text(grid: list[list[str]], indices: list[int], width: int, max_cell: int | None) -> str:
@@ -137,13 +137,20 @@ def _structure(entry: dict, width: int) -> TableStructure:
 
 
 async def structure_candidate(
-    grid: list[list[str]], *, key: str, full: bool = False, sheet_no: int = 0, anchors: dict | None = None
+    grid: list[list[str]],
+    *,
+    key: str,
+    full: bool = False,
+    known_table: bool = True,
+    sheet_no: int = 0,
+    anchors: dict | None = None,
 ) -> list[MaterializedTable]:
     if not grid:
         return []
     width = max((len(row) for row in grid), default=0)
     text = _candidate_text(grid, full=full, budget=None if full else SINGLE_TABLE_BUDGET)
-    prompt = f"{load_prompt('table_structure_single')}\n{text}"
+    prompt_name = "table_structure_known" if known_table else "table_structure_excel"
+    prompt = f"{load_prompt(prompt_name)}\n{text}"
     cap = get_text_capacity()
     await cap.acquire(key)
     try:

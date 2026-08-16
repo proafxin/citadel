@@ -81,9 +81,7 @@ def _naming_rows(grid: list[list[str]], header_rows: list[int], col_start: int, 
     if len(header_rows) <= 1:
         return header_rows
     naming = [
-        row
-        for row in header_rows
-        if sum(1 for offset in range(count) if _grid_cell(grid, row, col_start + offset)) > 1
+        row for row in header_rows if sum(1 for offset in range(count) if _grid_cell(grid, row, col_start + offset)) > 1
     ]
     return naming or header_rows
 
