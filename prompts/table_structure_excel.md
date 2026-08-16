@@ -9,18 +9,17 @@ N rows, M cols; column kinds: col0:kind, col1:kind, ...
 I: cell | cell | cell
 J: cell | cell | cell
 
-A line number is that line's real position in the source; some lines in between may be omitted. You never
-rewrite or copy out cell values — you return a structural description, and the source lines are applied to
-it mechanically afterward.
+A line number is that line's real position in the source; some lines in between may be omitted. Never
+rewrite or copy out cell values — describe the table using the fields below instead.
 
-This region was not identified as a table beforehand — it may turn out to be a caption, a stray label, an
-equation, or other content that only happens to look like a grid.
+This may not be a table. If it is a caption, a stray label, an equation, or other content that only looks
+like a grid, return an empty list.
 
 ## Output
 
-A list of tables found in this region — one entry per table present. Empty if nothing in this region is
-genuinely tabular data. Otherwise almost always exactly one entry; more than one only when the region stacks
-two or more tables with no gap between them (see "Multiple tables" below). For each table:
+A list of tables found in this region: one entry per table present, in top-to-bottom order. Empty if nothing
+in this region is genuinely tabular data. More than one entry only when the region stacks two or more tables
+with no gap between them (see "Multiple tables" below). For each table:
 
 | field | type | meaning |
 |---|---|---|
@@ -32,40 +31,37 @@ two or more tables with no gap between them (see "Multiple tables" below). For e
 | `title` | string | this table's own title, if one is visibly attached. |
 | `notes` | strings | footnotes visibly attached to this table. |
 
-These fields always refer to the line numbers shown to you, never a re-numbering after transposing.
+These fields always refer to the line numbers shown, never a re-numbering after transposing.
 
 ## Orientation
 
-Most tables list one record per row with field names along the top. A few are turned on their side: field
-names run down the first column, one record per following column — set `transposed` true for those. A block
-can also run the other way with only one record in it: one column names a set of quantities, the column right
-next to it holds each one's single value, one quantity per row — set `transposed` true for that too, even
-though it only has one column of data, so each quantity becomes its own named column instead of a row.
+`transposed` is true when field names run down a column and each record occupies its own column to the
+right — including a single record with one column of values, where each field name becomes its own column
+and that value column becomes the data row.
+
+Two columns — one of label-like names, one of values — are transposed only if every row names an attribute
+of the same one record. If each row instead names a separate, unrelated record, leave it as an ordinary
+two-column table: `transposed` false, `header_rows` empty, no `columns` override needed.
 
 ## Header row vs. title
 
 A row with a single cell filled, sitting alone above the rest of the table, names the table as a whole, not
-a column — put its text in `title` and never in `header_rows`, regardless of which column that cell falls
-in. A block of label-and-value pairs (one left column of field names beside exactly one right column of
-values) has no header row of its own either: leave `header_rows` empty and, if the columns need names, give
-them in `columns` instead. A left column of field-like names followed by TWO OR MORE value columns is a real
-comparison table, not a label-value block — it does have a genuine header row.
+a column: put its text in `title`, never in `header_rows`, regardless of which column that cell falls in. A
+left column of field-like names followed by two or more value columns has a genuine header row naming those
+columns; a single value column is the transposed case above, not a header row.
 
 ## Multiple tables
 
-A region can stack more than one table with no gap between them — a metadata strip sitting directly above an
-unrelated item table, a summary table tacked onto the end of a data table, each with its own column shape.
-Return one entry per table, each covering only its own rows, in top-to-bottom order. Do not confuse this
-with a lone label that titles the rows beneath it: if every row under a lone-label row keeps the same shape
-as what follows, that label is a title for one table (see above), not a second table.
+A region can stack more than one table with no gap between them. Return one entry per table, each covering
+only its own rows, in top-to-bottom order. A lone label is a title for one table (see above), not a second
+table, when every row beneath it keeps the same shape as what follows.
 
 ## Header spans and merging
 
 When a header spans several rows, or a heading covers several columns, list every row that is part of it in
-`header_rows` — those rows are combined into one name per column mechanically, so do not write the combined
-name yourself.
+`header_rows`. Do not write the combined column name yourself.
 
-A cell inside the header block can also state something about the table as a whole rather than naming the
-column it happens to sit in — a unit, currency, or scale annotation is the most
-common case. If a header row is only that kind of cell plus otherwise-empty cells, it is not naming any
-column: put its text in `notes` and leave that row out of `header_rows` entirely, the same as a title.
+A cell inside the header block that states something about the table as a whole (a unit, currency, or scale)
+rather than naming the column it sits in is not naming any column. When a header row is only that kind of
+cell plus otherwise-empty cells, put its text in `notes` and leave that row out of `header_rows` entirely,
+the same as a title.
