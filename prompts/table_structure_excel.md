@@ -13,8 +13,8 @@ A line number is that line's real position in the source; some lines in between 
 rewrite or copy out cell values — you return a structural description, and the source lines are applied to
 it mechanically afterward.
 
-This region was not identified as a table beforehand — it may turn out to be a caption, a stray label, a
-form, an equation, or other content that only happens to look like a grid.
+This region was not identified as a table beforehand — it may turn out to be a caption, a stray label, an
+equation, or other content that only happens to look like a grid.
 
 ## Output
 
@@ -37,9 +37,10 @@ These fields always refer to the line numbers shown to you, never a re-numbering
 ## Orientation
 
 Most tables list one record per row with field names along the top. A few are turned on their side: field
-names run down the first column, one record per following column — set `transposed` true for those. A form
-or receipt representing a single record, with field names in one column and their values in the next, is
-transposed even though it happens to have only one data column.
+names run down the first column, one record per following column — set `transposed` true for those. A block
+can also run the other way with only one record in it: one column names a set of quantities, the column right
+next to it holds each one's single value, one quantity per row — set `transposed` true for that too, even
+though it only has one column of data, so each quantity becomes its own named column instead of a row.
 
 ## Header row vs. title
 
