@@ -97,6 +97,8 @@ async def begin_library_ingest(library_id: int) -> None:
         library = await session.get(Library, library_id)
         if library is None or library.status == LibraryStatus.PROCESSING:
             return
+        if library.ingest_started_at is not None and library.ingested_at is not None:
+            library.ingest_elapsed_seconds += (library.ingested_at - library.ingest_started_at).total_seconds()
         library.status = LibraryStatus.PROCESSING
         library.ingest_started_at = datetime.now(UTC)
         library.ingested_at = None

@@ -18,6 +18,7 @@ class LibraryRead(BaseModel):
     status: str
     ingest_started_at: datetime | None = None
     ingested_at: datetime | None = None
+    ingest_elapsed_seconds: float = 0.0
     finalize_started_at: datetime | None = None
     described_at: datetime | None = None
     embed_started_at: datetime | None = None
@@ -28,7 +29,7 @@ class LibraryRead(BaseModel):
     def ingest_seconds(self) -> float | None:
         if self.ingest_started_at is None or self.ingested_at is None:
             return None
-        return (self.ingested_at - self.ingest_started_at).total_seconds()
+        return self.ingest_elapsed_seconds + (self.ingested_at - self.ingest_started_at).total_seconds()
 
     @computed_field
     @property

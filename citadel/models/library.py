@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime
+from sqlalchemy import DateTime, Float
 from sqlalchemy.orm import Mapped, mapped_column
 
 from citadel.models.base import Base
@@ -15,6 +15,7 @@ class Library(Base):
     status: Mapped[str] = mapped_column(default=LibraryStatus.READY, server_default=LibraryStatus.READY)
     ingest_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    ingest_elapsed_seconds: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     finalize_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     described_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     embed_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
