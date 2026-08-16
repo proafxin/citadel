@@ -24,22 +24,22 @@ c0: buyer (integer)  e.g. 1, 1, 2
 c1: spend (integer)  e.g. 40, 60, 90
 {"queries": ["SELECT t0.c1 AS customer, SUM(t1.c1) AS total_spend FROM t0 JOIN t1 ON t0.c0 = t1.c0 GROUP BY t0.c1"]}
 
-question: how many orders are there per shipping mode
+question: how many tickets are there per priority level
 tables:
-t0 (sales.xlsx) rows=834
-c0: Order ID (string)  e.g. CA-2011-100293, CA-2011-140886
-c1: Order Date (string)  e.g. 2013-03-14, 2013-09-30
-c2: Ship Mode (string)  e.g. Standard Class, First Class, Second Class
-c3: Segment (string)  e.g. Consumer, Corporate, Home Office
-c4: Sales (decimal)  e.g. 91.056, 69.216
-{"queries": ["SELECT t0.c2 AS ship_mode, COUNT(*) AS orders FROM t0 GROUP BY t0.c2"]}
+t0 (helpdesk.csv) rows=500
+c0: Ticket ID (string)  e.g. TCK-0001, TCK-0002
+c1: Created Date (string)  e.g. 2023-01-05, 2023-02-11
+c2: Priority (string)  e.g. High, Medium, Low
+c3: Department (string)  e.g. Support, Billing, Sales
+c4: Hours Spent (decimal)  e.g. 2.5, 1.0
+{"queries": ["SELECT t0.c2 AS priority, COUNT(*) AS tickets FROM t0 GROUP BY t0.c2"]}
 
-question: how many standard class consumer orders are there
+question: how many high priority billing tickets are there
 tables:
-t0 (sales.xlsx) rows=834
-c0: Order ID (string)  e.g. CA-2011-100293, CA-2011-140886
-c2: Ship Mode (string)  e.g. Standard Class, First Class, Second Class
-c3: Segment (string)  e.g. Consumer, Corporate, Home Office
-{"queries": ["SELECT COUNT(*) AS standard_class_consumer_orders FROM t0 WHERE t0.c2 = 'Standard Class' AND t0.c3 = 'Consumer'"]}
+t0 (helpdesk.csv) rows=500
+c0: Ticket ID (string)  e.g. TCK-0001, TCK-0002
+c2: Priority (string)  e.g. High, Medium, Low
+c3: Department (string)  e.g. Support, Billing, Sales
+{"queries": ["SELECT COUNT(*) AS high_priority_billing_tickets FROM t0 WHERE t0.c2 = 'High' AND t0.c3 = 'Billing'"]}
 
 Respond ONLY with a JSON object of the form {"queries": ["..."]}.
