@@ -31,6 +31,9 @@ below). For each table:
 
 These fields always refer to the line numbers shown to you, never a re-numbering after transposing.
 
+When a title, note, or column name is spread across more than one cell, join their text into one clean value
+(for example with spaces). Never copy the `|` cell separators from the input into a text value.
+
 ## Orientation
 
 Most tables list one record per row with field names along the top. A few are turned on their side: field

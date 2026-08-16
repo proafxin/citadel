@@ -33,14 +33,6 @@ def cell_value(cell: Cell) -> RawCellValue:
 
 
 @dataclass
-class MergedRange:
-    min_row: int
-    min_col: int
-    max_row: int
-    max_col: int
-
-
-@dataclass
 class SheetTable:
     min_row: int
     min_col: int
@@ -64,7 +56,6 @@ class SheetExtraction:
     max_row: int
     max_col: int
     cells: list[Cell]
-    merges: list[MergedRange]
     tables: list[SheetTable]
     pivots: list[SheetPivot]
     images: list[bytes]
@@ -136,13 +127,6 @@ def _capture_cells(values_sheet: Worksheet, formulas_sheet: Worksheet) -> list[C
     return cells
 
 
-def _capture_merges(worksheet: Worksheet) -> list[MergedRange]:
-    return [
-        MergedRange(min_row=rng.min_row, min_col=rng.min_col, max_row=rng.max_row, max_col=rng.max_col)
-        for rng in worksheet.merged_cells.ranges
-    ]
-
-
 def _capture_tables(worksheet: Worksheet) -> list[SheetTable]:
     tables: list[SheetTable] = []
     for table in worksheet.tables.values():
@@ -183,7 +167,6 @@ def extract_sheet(values_sheet: Worksheet, formulas_sheet: Worksheet, sheet_no: 
         max_row=formulas_sheet.max_row or 0,
         max_col=formulas_sheet.max_column or 0,
         cells=_capture_cells(values_sheet, formulas_sheet),
-        merges=_capture_merges(formulas_sheet),
         tables=_capture_tables(formulas_sheet),
         pivots=_capture_pivots(formulas_sheet),
         images=_capture_images(formulas_sheet),
@@ -262,17 +245,6 @@ def _render_cell(value: RawCellValue) -> str:
 
 def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
     values = {(cell.row, cell.col): cell_value(cell) for cell in region.cells}
-    for merge in sheet.merges:
-        if merge.max_row < region.min_row or merge.min_row > region.max_row:
-            continue
-        if merge.max_col < region.min_col or merge.min_col > region.max_col:
-            continue
-        top_left = values.get((merge.min_row, merge.min_col))
-        if top_left is None:
-            continue
-        for row in range(max(merge.min_row, region.min_row), min(merge.max_row, region.max_row) + 1):
-            for col in range(max(merge.min_col, region.min_col), min(merge.max_col, region.max_col) + 1):
-                values.setdefault((row, col), top_left)
     return [
         [_render_cell(values.get((row, col))) for col in range(region.min_col, region.max_col + 1)]
         for row in range(region.min_row, region.max_row + 1)

@@ -33,6 +33,9 @@ with no gap between them (see "Multiple tables" below). For each table:
 
 These fields always refer to the line numbers shown, never a re-numbering after transposing.
 
+When a title, note, or column name is spread across more than one cell, join their text into one clean value
+(for example with spaces). Never copy the `|` cell separators from the input into a text value.
+
 ## Orientation
 
 `transposed` is true when field names run down a column and each record occupies its own column to the
