@@ -15,9 +15,9 @@ services:
       - --port
       - "8100"
       - --kv-cache-dtype
-      - fp8
+      - auto
       - --gpu-memory-utilization
-      - "0.84"
+      - "0.85"
       - --max-model-len
       - "32768"
       - --mm-processor-cache-gb
