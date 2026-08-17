@@ -194,7 +194,11 @@ async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -
 
 async def call_structured(prompt: str, schema: dict, max_tokens: int = STRUCTURE_MAX_TOKENS) -> dict:
     raw = await _post_qwen(_struct_payload(prompt, _inline_refs(schema), max_tokens))
-    return json.loads(_extract_json(raw))
+    try:
+        return json.loads(_extract_json(raw))
+    except json.JSONDecodeError:
+        logger.exception("call_structured got unparseable output max_tokens=%d raw=%r", max_tokens, raw)
+        raise
 
 
 async def merge_evidence(query: str, items: list[str]) -> str:

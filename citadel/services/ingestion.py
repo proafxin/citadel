@@ -848,12 +848,16 @@ _TEXT_SOURCE_KINDS = {"html", "html_pandoc", "pptx"}
 
 
 async def _structured_table(
-    doc_id: str, kind: str, index: int, grid: list[list[str]] | None
+    doc_id: str, kind: str, index: int, page_idx: int, grid: list[list[str]] | None
 ) -> list[MaterializedTable]:
     if not grid:
         return []
     full = kind not in _TEXT_SOURCE_KINDS
-    return await structure_candidate(grid, key=f"structure:{doc_id}:{index}", full=full)
+    try:
+        return await structure_candidate(grid, key=f"structure:{doc_id}:{index}", full=full)
+    except json.JSONDecodeError:
+        logger.exception("structure failed doc=%s index=%d page=%d", doc_id, index, page_idx)
+        raise
 
 
 async def handle_structure(fields: dict[str, str]) -> None:
@@ -866,7 +870,10 @@ async def handle_structure(fields: dict[str, str]) -> None:
     indices = table_block_indices(prepared.stitched)
     if indices:
         results = await asyncio.gather(
-            *(_structured_table(doc_id, kind, index, prepared.stitched[index].grid) for index in indices)
+            *(
+                _structured_table(doc_id, kind, index, prepared.stitched[index].page_idx, prepared.stitched[index].grid)
+                for index in indices
+            )
         )
         tables = {str(index): dump_tables(table_list) for index, table_list in zip(indices, results, strict=True)}
         await redis.hset(f"tables:{doc_id}", mapping=tables)
