@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -20,7 +21,7 @@ INTERACTIVE_BUFFER = 16
 EMBED_CONCURRENCY = 384
 EMBED_BUFFER = 128
 
-WAIT_FALLBACK_S = 5.0
+POLL_INTERVAL_S = 0.2
 
 
 _ACQUIRE_LUA = """
@@ -44,9 +45,6 @@ class GlobalCapacity:
     def _counter_key(self) -> str:
         return f"cap:{self.pool}"
 
-    def _channel(self) -> str:
-        return f"cap:{self.pool}:release"
-
     async def free(self) -> int:
         used = int(await get_redis().get(self._counter_key()) or 0)
         return self.limit - used
@@ -57,28 +55,19 @@ class GlobalCapacity:
 
     async def take(self, key: str = "") -> None:
         del key
-        if await self._try_acquire():
-            return
-        async with get_redis().pubsub(ignore_subscribe_messages=True) as pubsub:
-            await pubsub.subscribe(self._channel())
-            while not await self._try_acquire():
-                await pubsub.get_message(timeout=WAIT_FALLBACK_S)
+        while not await self._try_acquire():  # ruff: ignore[async-busy-wait] -- polling cross-process Redis state, not a local condition
+            await asyncio.sleep(POLL_INTERVAL_S)
 
     async def release(self, key: str = "") -> None:
         del key
-        redis = get_redis()
-        await redis.decr(self._counter_key())
-        await redis.publish(self._channel(), "released")
+        await get_redis().decr(self._counter_key())
 
     async def acquire(self, key: str = "") -> None:
         await self.take(key)
 
     async def wait_free(self) -> None:
-        if await self.free() > 0:
-            return
-        async with get_redis().pubsub(ignore_subscribe_messages=True) as pubsub:
-            await pubsub.subscribe(self._channel())
-            await pubsub.get_message(timeout=WAIT_FALLBACK_S)
+        while await self.free() <= 0:  # ruff: ignore[async-busy-wait] -- polling cross-process Redis state, not a local condition
+            await asyncio.sleep(POLL_INTERVAL_S)
 
 
 @lru_cache
