@@ -66,7 +66,19 @@ the same shape as what follows.
 When a header spans several rows, or a heading covers several columns, list every row that is part of it in
 `header_rows`. Do not write the combined column name yourself.
 
+A header block can span rows unevenly: some columns' names may end sooner than others, leaving blank cells
+in that row for the remaining columns. Include every such row in `header_rows` regardless, so no row between
+the top of the header block and `data_start` is left out of both `header_rows` and the data range.
+
 A cell inside the header block that states something about the table as a whole (a unit, currency, or scale)
 rather than naming the column it sits in is not naming any column. When a header row is only that kind of
 cell plus otherwise-empty cells, put its text in `notes` and leave that row out of `header_rows` entirely,
 the same as a title.
+
+## Rows that are not data
+
+A row belongs in `data_start`/`data_end` only if it describes one record of its own, the same kind of thing
+every other data row describes. A row that instead summarizes, aggregates, describes, or notes something
+about the data collectively — a total, a count, a source, a comment on the data as a whole — is not a data
+row, no matter where it sits or how ordinary it looks. Exclude it from the data range the same as a title or
+header row, whether it appears above, below, or between the real records.

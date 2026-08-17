@@ -1,6 +1,7 @@
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, time
 from decimal import Decimal
 
 from citadel.schemas.table import CellValue, Column, ColumnDType, TableStructure
@@ -11,6 +12,9 @@ SAMPLE_TABLE_ROWS = 10
 
 _INT = re.compile(r"-?\d+")
 _FLOAT = re.compile(r"-?\d+\.\d+")
+_EXP = re.compile(r"-?\d+(\.\d+)?[eE][-+]?\d+")
+_BOOLEAN_VALUES = {"True", "False"}
+_MIDNIGHT = time(0, 0)
 
 
 @dataclass
@@ -39,14 +43,44 @@ def _lossless_decimal(value: str) -> bool:
     return bool(_FLOAT.fullmatch(value)) and str(Decimal(value)) == value
 
 
-def dtype_of(values: list[str]) -> ColumnDType:
-    present = [value for value in values if value]
-    if not present:
-        return ColumnDType.STRING
+def _lossless_float(value: str) -> bool:
+    return bool(_EXP.fullmatch(value))
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _numeric_dtype(present: list[str]) -> ColumnDType | None:
     if all(_lossless_int(value) for value in present):
         return ColumnDType.INTEGER
     if all(_lossless_int(value) or _lossless_decimal(value) for value in present):
         return ColumnDType.DECIMAL
+    if all(_lossless_int(value) or _lossless_decimal(value) or _lossless_float(value) for value in present):
+        return ColumnDType.FLOAT
+    return None
+
+
+def _temporal_dtype(present: list[str]) -> ColumnDType | None:
+    parsed = [dt for value in present if (dt := _parse_datetime(value)) is not None]
+    if len(parsed) != len(present):
+        return None
+    return ColumnDType.DATE if all(dt.time() == _MIDNIGHT for dt in parsed) else ColumnDType.DATETIME
+
+
+def dtype_of(values: list[str]) -> ColumnDType:
+    present = [value for value in values if value]
+    if not present:
+        return ColumnDType.STRING
+    if (numeric := _numeric_dtype(present)) is not None:
+        return numeric
+    if all(value in _BOOLEAN_VALUES for value in present):
+        return ColumnDType.BOOLEAN
+    if (temporal := _temporal_dtype(present)) is not None:
+        return temporal
     return ColumnDType.STRING
 
 

@@ -42,14 +42,6 @@ class SheetTable:
 
 
 @dataclass
-class SheetPivot:
-    min_row: int
-    min_col: int
-    max_row: int
-    max_col: int
-
-
-@dataclass
 class SheetExtraction:
     sheet_no: int
     sheet_name: str
@@ -57,7 +49,6 @@ class SheetExtraction:
     max_col: int
     cells: list[Cell]
     tables: list[SheetTable]
-    pivots: list[SheetPivot]
     images: list[bytes]
 
 
@@ -143,19 +134,6 @@ def _capture_tables(worksheet: Worksheet) -> list[SheetTable]:
     return tables
 
 
-def _capture_pivots(worksheet: Worksheet) -> list[SheetPivot]:
-    names = set(worksheet.parent.sheetnames)
-    pivots: list[SheetPivot] = []
-    for pivot in worksheet._pivots:
-        ref = getattr(pivot.location, "ref", None)
-        source = getattr(pivot.cache.cacheSource, "worksheetSource", None)
-        if ref is None or source is None or source.sheet not in names:
-            continue
-        min_col, min_row, max_col, max_row = range_boundaries(ref)
-        pivots.append(SheetPivot(min_row=min_row, min_col=min_col, max_row=max_row, max_col=max_col))
-    return pivots
-
-
 def _capture_images(worksheet: Worksheet) -> list[bytes]:
     return [image._data() for image in worksheet._images]
 
@@ -168,7 +146,6 @@ def extract_sheet(values_sheet: Worksheet, formulas_sheet: Worksheet, sheet_no: 
         max_col=formulas_sheet.max_column or 0,
         cells=_capture_cells(values_sheet, formulas_sheet),
         tables=_capture_tables(formulas_sheet),
-        pivots=_capture_pivots(formulas_sheet),
         images=_capture_images(formulas_sheet),
     )
 
@@ -251,16 +228,6 @@ def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
     ]
 
 
-def _pivot_covers(region: Region, pivots: list[SheetPivot]) -> bool:
-    return any(
-        region.min_row <= pivot.max_row
-        and region.max_row >= pivot.min_row
-        and region.min_col <= pivot.max_col
-        and region.max_col >= pivot.min_col
-        for pivot in pivots
-    )
-
-
 def _region_anchors(region: Region) -> dict:
     return {"min_row": region.min_row, "min_col": region.min_col, "max_row": region.max_row, "max_col": region.max_col}
 
@@ -271,7 +238,7 @@ async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tup
     for region in find_regions(sheet):
         grid = region_grid(sheet, region)
         kind = classify_grid(grid)
-        if kind == "empty" or _pivot_covers(region, sheet.pivots):
+        if kind == "empty":
             continue
         if kind != "table":
             body = " ".join([grid_text(grid), *region_comments(region)]).strip()
