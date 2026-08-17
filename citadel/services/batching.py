@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -24,8 +25,10 @@ logger = logging.getLogger(__name__)
 
 SAMPLE_ROWS = 3
 SUMMARY_RATIO = 0.1
-SUMMARY_TOKENS_MAX = 4096
-DOCUMENT_SUMMARY_TOKENS = 500
+SUMMARY_TOKENS_MAX = 2048
+DOCUMENT_SUMMARY_TOKENS = 4096
+DOCUMENT_SUMMARY_MAX_TOKENS = DOCUMENT_SUMMARY_TOKENS * 2 + 512
+DOCUMENT_SUMMARY_INPUT_BUDGET = SLM_MODEL_LEN - DOCUMENT_SUMMARY_MAX_TOKENS
 BATCH_TOKENS = SLM_MODEL_LEN - (SUMMARY_TOKENS_MAX * 2 + 512) - 2048
 
 _BLOCK_ORDINALS = text("""
@@ -215,7 +218,34 @@ def _document_summary_prompt(filename: str, summaries: list[str]) -> tuple[str, 
         f"{load_prompt('document_summary').replace('{summary_tokens}', str(DOCUMENT_SUMMARY_TOKENS))}\n"
         f"filename: {filename}\nparts:\n{body}"
     )
-    return prompt, DOCUMENT_SUMMARY_TOKENS * 2 + 512
+    return prompt, DOCUMENT_SUMMARY_MAX_TOKENS
+
+
+def _chunk_by_tokens(summaries: list[str], counts: list[int], budget: int) -> list[list[str]]:
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    used = 0
+    for summary, tokens in zip(summaries, counts, strict=True):
+        if current and used + tokens > budget:
+            chunks.append(current)
+            current, used = [], 0
+        current.append(summary)
+        used += tokens
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def _reduce_summaries(doc_id: int, filename: str, summaries: list[str]) -> str | None:
+    if not summaries:
+        return None
+    counts = await asyncio.to_thread(count_tokens_batch, summaries)
+    if sum(counts) <= DOCUMENT_SUMMARY_INPUT_BUDGET:
+        prompt, max_tokens = _document_summary_prompt(filename, summaries)
+        return await call_text(prompt, max_tokens, key=f"doc={doc_id}:summary")
+    chunks = _chunk_by_tokens(summaries, counts, DOCUMENT_SUMMARY_INPUT_BUDGET)
+    reduced = await asyncio.gather(*(_reduce_summaries(doc_id, filename, chunk) for chunk in chunks))
+    return await _reduce_summaries(doc_id, filename, [summary for summary in reduced if summary])
 
 
 async def _document_summary(doc_id: int, summaries: list[str]) -> str | None:
@@ -223,8 +253,7 @@ async def _document_summary(doc_id: int, summaries: list[str]) -> str | None:
         return None
     async with get_sessionmaker()() as session:
         filename = await session.scalar(select(Document.filename).where(Document.id == doc_id)) or ""
-    prompt, max_tokens = _document_summary_prompt(filename, summaries)
-    return await call_text(prompt, max_tokens, key=f"doc={doc_id}:summary")
+    return await _reduce_summaries(doc_id, filename, summaries)
 
 
 def _batch_row(doc_id: int, spec: BatchSpec, summary: str) -> ContentBatch:
