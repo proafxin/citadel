@@ -1,6 +1,4 @@
-import asyncio
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 
 from redis.commands.core import AsyncScript
@@ -9,62 +7,26 @@ from citadel.bus import get_redis
 
 OCR_CONCURRENCY = 32
 VISION_BUFFER = 16
-VISION_STALE_S = 120
 
 TEXT_CONCURRENCY = 128
 TEXT_BUFFER = 64
-TEXT_STALE_S = 60
 
 TEXT_LARGE_CONCURRENCY = 16
 TEXT_LARGE_BUFFER = 8
-TEXT_LARGE_STALE_S = 600
 
 INTERACTIVE_CONCURRENCY = 32
 INTERACTIVE_BUFFER = 16
-INTERACTIVE_STALE_S = 600
 
 EMBED_CONCURRENCY = 384
 EMBED_BUFFER = 128
-EMBED_STALE_S = 60
 
 WAIT_FALLBACK_S = 5.0
 
 
-@dataclass
-class Capacity:
-    limit: int
-    inflight: int = 0
-    slot: asyncio.Event = field(default_factory=asyncio.Event)
-
-    async def free(self) -> int:
-        return self.limit - self.inflight
-
-    async def take(self, key: str = "") -> None:
-        del key
-        self.inflight += 1
-
-    async def release(self, key: str = "") -> None:
-        del key
-        self.inflight -= 1
-        self.slot.set()
-
-    async def wait_free(self) -> None:
-        self.slot.clear()
-        if await self.free() > 0:
-            return
-        await self.slot.wait()
-
-    async def acquire(self, key: str = "") -> None:
-        while await self.free() <= 0:
-            await self.wait_free()
-        await self.take(key)
-
-
 _ACQUIRE_LUA = """
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1] - ARGV[2])
-if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then return 0 end
-redis.call('ZADD', KEYS[1], ARGV[1], ARGV[4])
-redis.call('EXPIRE', KEYS[1], ARGV[2])
+local n = tonumber(redis.call('GET', KEYS[1]) or '0')
+if n >= tonumber(ARGV[1]) then return 0 end
+redis.call('INCR', KEYS[1])
 return 1
 """
 
@@ -78,59 +40,72 @@ def _acquire_script() -> AsyncScript:
 class GlobalCapacity:
     pool: str
     limit: int
-    stale_ttl_s: int
 
-    def _zkey(self) -> str:
+    def _counter_key(self) -> str:
         return f"cap:{self.pool}"
 
     def _channel(self) -> str:
         return f"cap:{self.pool}:release"
 
     async def free(self) -> int:
-        used = await get_redis().zcard(self._zkey())
+        used = int(await get_redis().get(self._counter_key()) or 0)
         return self.limit - used
 
-    async def _try_acquire(self, key: str) -> bool:
+    async def _try_acquire(self) -> bool:
         script = _acquire_script()
-        return bool(await script(keys=[self._zkey()], args=[time.time(), self.stale_ttl_s, self.limit, key]))
+        return bool(await script(keys=[self._counter_key()], args=[self.limit]))
 
-    async def take(self, key: str) -> None:
-        if await self._try_acquire(key):
+    async def take(self, key: str = "") -> None:
+        del key
+        if await self._try_acquire():
             return
         async with get_redis().pubsub(ignore_subscribe_messages=True) as pubsub:
             await pubsub.subscribe(self._channel())
-            while not await self._try_acquire(key):
+            while not await self._try_acquire():
                 await pubsub.get_message(timeout=WAIT_FALLBACK_S)
 
-    async def release(self, key: str) -> None:
+    async def release(self, key: str = "") -> None:
+        del key
         redis = get_redis()
-        await redis.zrem(self._zkey(), key)
-        await redis.publish(self._channel(), key)
+        await redis.decr(self._counter_key())
+        await redis.publish(self._channel(), "released")
 
-    async def acquire(self, key: str) -> None:
+    async def acquire(self, key: str = "") -> None:
         await self.take(key)
+
+    async def wait_free(self) -> None:
+        if await self.free() > 0:
+            return
+        async with get_redis().pubsub(ignore_subscribe_messages=True) as pubsub:
+            await pubsub.subscribe(self._channel())
+            await pubsub.get_message(timeout=WAIT_FALLBACK_S)
+
+
+@lru_cache
+def get_capacity(pool: str, limit: int) -> GlobalCapacity:
+    return GlobalCapacity(pool, limit)
 
 
 @lru_cache
 def get_vision_capacity() -> GlobalCapacity:
-    return GlobalCapacity("vision", OCR_CONCURRENCY + VISION_BUFFER, VISION_STALE_S)
+    return GlobalCapacity("vision", OCR_CONCURRENCY + VISION_BUFFER)
 
 
 @lru_cache
 def get_text_capacity() -> GlobalCapacity:
-    return GlobalCapacity("text-structure", TEXT_CONCURRENCY + TEXT_BUFFER, TEXT_STALE_S)
+    return GlobalCapacity("text-structure", TEXT_CONCURRENCY + TEXT_BUFFER)
 
 
 @lru_cache
 def get_interactive_capacity() -> GlobalCapacity:
-    return GlobalCapacity("interactive", INTERACTIVE_CONCURRENCY + INTERACTIVE_BUFFER, INTERACTIVE_STALE_S)
+    return GlobalCapacity("interactive", INTERACTIVE_CONCURRENCY + INTERACTIVE_BUFFER)
 
 
 @lru_cache
 def get_text_large_capacity() -> GlobalCapacity:
-    return GlobalCapacity("text-large", TEXT_LARGE_CONCURRENCY + TEXT_LARGE_BUFFER, TEXT_LARGE_STALE_S)
+    return GlobalCapacity("text-large", TEXT_LARGE_CONCURRENCY + TEXT_LARGE_BUFFER)
 
 
 @lru_cache
 def get_embed_capacity() -> GlobalCapacity:
-    return GlobalCapacity("embed", EMBED_CONCURRENCY + EMBED_BUFFER, EMBED_STALE_S)
+    return GlobalCapacity("embed", EMBED_CONCURRENCY + EMBED_BUFFER)

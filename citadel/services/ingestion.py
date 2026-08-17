@@ -30,7 +30,7 @@ from citadel.models.document import Document
 from citadel.models.status import DocumentStatus
 from citadel.schemas.content import Block
 from citadel.schemas.document import DocProgress, DocumentRead, IngestResponse
-from citadel.services.capacity import get_vision_capacity
+from citadel.services.capacity import get_capacity, get_vision_capacity
 from citadel.services.document import (
     begin_library_ingest,
     collect_tables,
@@ -111,11 +111,6 @@ def get_pdfium_pool() -> ProcessPoolExecutor:
     return pool
 
 
-@lru_cache
-def get_pdfium_gate() -> asyncio.Semaphore:
-    return asyncio.Semaphore(PDFIUM_WORKERS)
-
-
 def _kill_pdfium_pool(pool: ProcessPoolExecutor) -> None:
     for process in pool._processes.values():
         process.kill()
@@ -124,7 +119,9 @@ def _kill_pdfium_pool(pool: ProcessPoolExecutor) -> None:
 
 async def _run_pdfium[T](func: Callable[..., T], *args: object, job_timeout: float) -> tuple[T, float, float]:
     mark = time.time()
-    async with get_pdfium_gate():
+    cap = get_capacity("pdfium", PDFIUM_WORKERS)
+    await cap.acquire()
+    try:
         wait = time.time() - mark
         mark = time.time()
         pool = get_pdfium_pool()
@@ -140,6 +137,8 @@ async def _run_pdfium[T](func: Callable[..., T], *args: object, job_timeout: flo
             raise TimeoutError(msg)
         result = next(iter(done)).result()
         return result, wait, time.time() - mark
+    finally:
+        await cap.release()
 
 
 _PROFILE_DIRS: list[str] = []

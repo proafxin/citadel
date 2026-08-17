@@ -9,7 +9,7 @@ from typing import Any, cast
 from citadel.bus import get_redis
 from citadel.db import get_engine
 from citadel.services.batching import STREAM_BATCH, mark_summary_failed, record_summary, summarize_document
-from citadel.services.capacity import OCR_CONCURRENCY, Capacity, get_vision_capacity
+from citadel.services.capacity import OCR_CONCURRENCY, GlobalCapacity, get_capacity, get_vision_capacity
 from citadel.services.document import mark_library_failed, mark_library_ready
 from citadel.services.ingestion import (
     BULK_READ_COUNT,
@@ -58,8 +58,6 @@ MERGE_CONCURRENCY = CPU_EIGHTH
 STRUCTURE_CONCURRENCY = CPU_EIGHTH
 
 HOSTNAME = socket.gethostname()
-STALE_MIN_IDLE_MS = 120_000
-STALE_SWEEP_S = 30
 
 _tasks: set[asyncio.Task[None]] = set()
 
@@ -120,7 +118,7 @@ async def _retry_or_fail(
     return False
 
 
-async def _recover(stream: str, consumer: str, cap: Capacity | None, spawn: Spawn) -> None:
+async def _recover(stream: str, consumer: str, cap: GlobalCapacity | None, spawn: Spawn) -> None:
     redis = get_redis()
     last = "0"
     while True:
@@ -142,7 +140,7 @@ async def _recover(stream: str, consumer: str, cap: Capacity | None, spawn: Spaw
 async def _pump(
     stream: str,
     consumer: str,
-    cap: Capacity | None,
+    cap: GlobalCapacity | None,
     spawn: Spawn,
     downstream: Callable[[], Awaitable[int]] | None = None,
 ) -> None:
@@ -167,31 +165,19 @@ async def _pump(
             spawn(msg_id.decode(), raw)
 
 
-async def _reap_stale(stream: str, consumer: str, cap: Capacity | None, spawn: Spawn) -> None:
-    redis = get_redis()
-    while True:
-        await asyncio.sleep(STALE_SWEEP_S)
-        if cap is not None and await cap.free() <= 0:
-            continue
-        count = await cap.free() if cap is not None else BULK_READ_COUNT
-        _, claimed, _ = await redis.xautoclaim(stream, GROUP, consumer, STALE_MIN_IDLE_MS, "0-0", count=count)
-        for msg_id, raw in claimed:
-            if cap is not None:
-                await cap.take()
-            spawn(msg_id.decode(), raw)
-
-
 async def _drive(
-    stream: str, cap: Capacity | None, spawn: Spawn, downstream: Callable[[], Awaitable[int]] | None = None
+    stream: str, cap: GlobalCapacity | None, spawn: Spawn, downstream: Callable[[], Awaitable[int]] | None = None
 ) -> None:
     await ensure_group(stream)
     consumer = f"{stream}-{HOSTNAME}"
     logger.info("consuming %s concurrency=%s", stream, cap.limit if cap is not None else "unbounded")
     await _recover(stream, consumer, cap, spawn)
-    await asyncio.gather(_pump(stream, consumer, cap, spawn, downstream), _reap_stale(stream, consumer, cap, spawn))
+    await _pump(stream, consumer, cap, spawn, downstream)
 
 
-async def _normalize_job(cap: Capacity, profiles: asyncio.Queue[str], msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _normalize_job(
+    cap: GlobalCapacity, profiles: asyncio.Queue[str], msg_id: str, raw: dict[bytes, bytes]
+) -> None:
     stream = STREAM_INGEST
     profile = await profiles.get()
     try:
@@ -209,7 +195,7 @@ async def _normalize_job(cap: Capacity, profiles: asyncio.Queue[str], msg_id: st
         await cap.release()
 
 
-async def _paginate_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _paginate_job(cap: GlobalCapacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_NORMALIZED
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
@@ -225,7 +211,7 @@ async def _paginate_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> 
         await cap.release()
 
 
-async def _render_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _render_job(cap: GlobalCapacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = render_stream(raw[b"doc_id"].decode())
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
@@ -245,7 +231,7 @@ def _vision_key(fields: dict[str, str]) -> str:
     return f"{fields['doc_id']}:{fields['page_idx']}"
 
 
-async def _rasterize_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _rasterize_job(cap: GlobalCapacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_RASTERIZE
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
@@ -266,7 +252,7 @@ async def _rasterize_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) ->
         await cap.release()
 
 
-async def _ocr_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _ocr_job(cap: GlobalCapacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_PAGES
     terminal = True
     fields: dict[str, str] | None = None
@@ -311,7 +297,7 @@ async def _release_if_drained() -> None:
     logger.info("pipeline drained → released process pools")
 
 
-async def _merge_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _merge_job(cap: GlobalCapacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_MERGE
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
@@ -329,7 +315,7 @@ async def _merge_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> Non
         await cap.release()
 
 
-async def _structure_job(cap: Capacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
+async def _structure_job(cap: GlobalCapacity, msg_id: str, raw: dict[bytes, bytes]) -> None:
     stream = STREAM_STRUCTURE
     try:
         fields = await _decode_or_settle(stream, msg_id, raw)
@@ -432,17 +418,17 @@ async def _library_ready_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
 
 
 async def normalize() -> None:
-    cap = Capacity(NORMALIZE_CONCURRENCY)
+    cap = get_capacity("normalize", NORMALIZE_CONCURRENCY)
     profiles = make_profile_pool(cap.limit)
     await _drive(STREAM_INGEST, cap, lambda mid, raw: _spawn(_normalize_job(cap, profiles, mid, raw)))
 
 
 async def paginate() -> None:
-    cap = Capacity(PAGINATE_CONCURRENCY)
+    cap = get_capacity("paginate", PAGINATE_CONCURRENCY)
     await _drive(STREAM_NORMALIZED, cap, lambda mid, raw: _spawn(_paginate_job(cap, mid, raw)))
 
 
-async def _claim_ready(consumer: str, cap: Capacity, spawn: Spawn, room: int) -> int:
+async def _claim_ready(consumer: str, cap: GlobalCapacity, spawn: Spawn, room: int) -> int:
     redis = get_redis()
     docs = sorted(name.decode() for name in cast("set[bytes]", await redis.smembers(RENDER_DOCS)))
     if not docs:
@@ -470,7 +456,7 @@ async def _claim_ready(consumer: str, cap: Capacity, spawn: Spawn, room: int) ->
     return claimed
 
 
-async def _recover_render(consumer: str, cap: Capacity, spawn: Spawn) -> None:
+async def _recover_render(consumer: str, cap: GlobalCapacity, spawn: Spawn) -> None:
     redis = get_redis()
     for name in cast("set[bytes]", await redis.smembers(RENDER_DOCS)):
         stream = render_stream(name.decode())
@@ -478,22 +464,7 @@ async def _recover_render(consumer: str, cap: Capacity, spawn: Spawn) -> None:
         await _recover(stream, consumer, cap, spawn)
 
 
-async def _reap_render(consumer: str, cap: Capacity, spawn: Spawn) -> None:
-    redis = get_redis()
-    while True:
-        await asyncio.sleep(STALE_SWEEP_S)
-        for name in cast("set[bytes]", await redis.smembers(RENDER_DOCS)):
-            if await cap.free() <= 0:
-                break
-            stream = render_stream(name.decode())
-            room = await cap.free()
-            _, claimed, _ = await redis.xautoclaim(stream, GROUP, consumer, STALE_MIN_IDLE_MS, "0-0", count=room)
-            for msg_id, raw in claimed:
-                await cap.take()
-                spawn(msg_id.decode(), raw)
-
-
-async def _render_loop(consumer: str, cap: Capacity, spawn: Spawn) -> None:
+async def _render_loop(consumer: str, cap: GlobalCapacity, spawn: Spawn) -> None:
     while True:
         if await cap.free() <= 0:
             await cap.wait_free()
@@ -505,33 +476,33 @@ async def _render_loop(consumer: str, cap: Capacity, spawn: Spawn) -> None:
 
 async def render() -> None:
     await ensure_group(STREAM_PAGES)
-    cap = Capacity(RENDER_CONCURRENCY)
+    cap = get_capacity("render", RENDER_CONCURRENCY)
     consumer = f"render-{HOSTNAME}"
 
     def spawn(mid, raw):
         return _spawn(_render_job(cap, mid, raw))
 
     await _recover_render(consumer, cap, spawn)
-    await asyncio.gather(_render_loop(consumer, cap, spawn), _reap_render(consumer, cap, spawn))
+    await _render_loop(consumer, cap, spawn)
 
 
 async def rasterize() -> None:
-    cap = Capacity(RASTERIZE_PULL_CONCURRENCY)
+    cap = get_capacity("rasterize", RASTERIZE_PULL_CONCURRENCY)
     await _drive(STREAM_RASTERIZE, cap, lambda mid, raw: _spawn(_rasterize_job(cap, mid, raw)))
 
 
 async def ocr() -> None:
-    cap = Capacity(OCR_CONCURRENCY)
+    cap = get_capacity("ocr-stream", OCR_CONCURRENCY)
     await _drive(STREAM_PAGES, cap, lambda mid, raw: _spawn(_ocr_job(cap, mid, raw)))
 
 
 async def merge() -> None:
-    cap = Capacity(MERGE_CONCURRENCY)
+    cap = get_capacity("merge", MERGE_CONCURRENCY)
     await _drive(STREAM_MERGE, cap, lambda mid, raw: _spawn(_merge_job(cap, mid, raw)))
 
 
 async def structure() -> None:
-    cap = Capacity(STRUCTURE_CONCURRENCY)
+    cap = get_capacity("structure", STRUCTURE_CONCURRENCY)
     await _drive(STREAM_STRUCTURE, cap, lambda mid, raw: _spawn(_structure_job(cap, mid, raw)))
 
 

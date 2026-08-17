@@ -28,8 +28,6 @@ logger = logging.getLogger(__name__)
 
 HOSTNAME_CONSUMER = f"finalize-{socket.gethostname()}"
 _FINALIZE_LOCK_CLASS = 3
-FINALIZE_MIN_IDLE_MS = 60_000
-FINALIZE_SWEEP_S = 30
 FINALIZE_READ_COUNT = 16
 FINALIZE_BLOCK_MS = 5_000
 
@@ -83,34 +81,18 @@ async def _drain_own(consumer: str) -> None:
         last = entries[-1][0].decode()
 
 
-async def _sweep_stale(consumer: str) -> None:
-    redis = get_redis()
-    while True:
-        await asyncio.sleep(FINALIZE_SWEEP_S)
-        _, claimed, _ = await redis.xautoclaim(
-            STREAM_FINALIZE, GROUP, consumer, FINALIZE_MIN_IDLE_MS, "0-0", count=FINALIZE_READ_COUNT
-        )
-        if claimed:
-            await _consume_entries(claimed)
-
-
 async def consume_finalize() -> None:
     consumer = HOSTNAME_CONSUMER
     await ensure_group(STREAM_FINALIZE)
     await _drain_own(consumer)
     redis = get_redis()
-    sweeper = asyncio.create_task(_sweep_stale(consumer))
-    try:
-        while True:
-            fresh = await redis.xreadgroup(
-                GROUP, consumer, {STREAM_FINALIZE: ">"}, count=FINALIZE_READ_COUNT, block=FINALIZE_BLOCK_MS
-            )
-            entries = fresh[0][1] if fresh else []
-            if entries:
-                await _consume_entries(entries)
-    finally:
-        sweeper.cancel()
-        await asyncio.gather(sweeper, return_exceptions=True)
+    while True:
+        fresh = await redis.xreadgroup(
+            GROUP, consumer, {STREAM_FINALIZE: ">"}, count=FINALIZE_READ_COUNT, block=FINALIZE_BLOCK_MS
+        )
+        entries = fresh[0][1] if fresh else []
+        if entries:
+            await _consume_entries(entries)
 
 
 def _fatal_on_worker_death(task: asyncio.Task[None]) -> None:
