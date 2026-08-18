@@ -1,13 +1,13 @@
 
 services:
   qwen:
-    image: vllm/vllm-openai:v0.26.0
+    image: vllm/vllm-openai:latest
     container_name: citadel-qwen
     restart: always
     ipc: host
     command:
       - --model
-      - lovedheart/Qwen3.5-9B-FP8
+      - Qwen/Qwen3.5-9B
       - --served-model-name
       - qwen
       - --host
@@ -15,15 +15,15 @@ services:
       - --port
       - "8100"
       - --kv-cache-dtype
-      - fp8
+      - auto
       - --gpu-memory-utilization
-      - "0.90"
+      - "0.97"
       - --max-model-len
       - "32768"
       - --mm-processor-cache-gb
       - "0"
       - --max-num-seqs
-      - "64"
+      - "32"
       - --uvicorn-log-level
       - info
     environment:
@@ -64,7 +64,7 @@ services:
       - --pooler-config
       - '{"task": "embed", "pooling_type": "CLS"}'
       - --gpu-memory-utilization
-      - "0.1"
+      - "0.07"
       - --max-num-seqs
       - "256"
       - --max-model-len

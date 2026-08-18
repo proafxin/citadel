@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-docker compose up -d qwen bge redis
+docker compose up -d qwen redis
 
 until curl -sf "http://localhost:${CITADEL_QWEN_PORT:-8100}/v1/models" >/dev/null 2>&1; do
     if [ "$(docker inspect -f '{{.RestartCount}}' citadel-qwen 2>/dev/null || echo 99)" -ge 3 ]; then
@@ -12,6 +12,8 @@ until curl -sf "http://localhost:${CITADEL_QWEN_PORT:-8100}/v1/models" >/dev/nul
     fi
     sleep 2
 done
+
+docker compose up -d bge
 
 until curl -sf "http://localhost:${CITADEL_BGE_PORT:-8101}/v1/models" >/dev/null 2>&1; do
     if [ "$(docker inspect -f '{{.RestartCount}}' citadel-bge 2>/dev/null || echo 99)" -ge 3 ]; then
