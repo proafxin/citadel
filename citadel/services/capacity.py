@@ -6,7 +6,7 @@ from redis.commands.core import AsyncScript
 
 from citadel.bus import get_redis
 
-OCR_CONCURRENCY = 56
+OCR_CONCURRENCY = 24
 VISION_BUFFER = 8
 
 TEXT_CONCURRENCY = 128
