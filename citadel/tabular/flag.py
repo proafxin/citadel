@@ -18,9 +18,10 @@ def _kind(cell: str) -> str:
 
 def column_kinds(grid: list[list[str]]) -> list[str]:
     width = max((len(row) for row in grid), default=0)
+    body = grid[1:] or grid
     kinds: list[str] = []
     for col in range(width):
-        counts = Counter(k for row in grid if col < len(row) and (k := _kind(row[col])) != "empty")
+        counts = Counter(k for row in body if col < len(row) and (k := _kind(row[col])) != "empty")
         kinds.append(counts.most_common(1)[0][0] if counts else "text")
     return kinds
 
