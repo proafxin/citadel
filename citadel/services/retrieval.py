@@ -185,6 +185,21 @@ async def scope_block_ids(ranges: list[tuple[int, int, int]]) -> list[int]:
         return list(await session.scalars(select(ContentNode.id).where(or_(*clauses)).order_by(ContentNode.id)))
 
 
+async def scope_text_block_ids(ranges: list[tuple[int, int, int]]) -> list[int]:
+    if not ranges:
+        return []
+    clauses = [
+        (ContentNode.document_id == doc_id) & (ContentNode.block_ordinal >= start) & (ContentNode.block_ordinal <= end)
+        for doc_id, start, end in ranges
+    ]
+    async with get_sessionmaker()() as session:
+        return list(
+            await session.scalars(
+                select(ContentNode.id).where(or_(*clauses), ContentNode.type != "table").order_by(ContentNode.id)
+            )
+        )
+
+
 @dataclass
 class BlockText:
     content_id: int

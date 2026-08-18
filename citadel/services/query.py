@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import re
 import time
@@ -8,7 +7,6 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from itertools import starmap
 from typing import Any
-from typing import cast as type_cast
 
 from sqlalchemy import BigInteger, Boolean, Date, DateTime, Numeric, Select, Text, case, cast, func, select, text
 from sqlalchemy.dialects import postgresql
@@ -17,19 +15,20 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import TypeEngine
 
-from citadel.bus import get_redis
 from citadel.db import get_sessionmaker
 from citadel.llm import (
-    RESOLVE_BUDGET,
+    RELEVANCE_BUDGET,
     SLM_MODEL_LEN,
     STRUCT_MAX_TOKENS,
     SYNTH_MAX_TOKENS,
-    call_resolve,
-    count_tokens,
+    call_level1_relevance,
+    call_level2_relevance,
+    call_stage1_relevance,
     count_tokens_batch,
     merge_evidence,
-    resolve_prompt_tokens,
+    relevance_prompt_tokens,
     synthesize,
+    write_final_report,
     write_queries,
 )
 from citadel.models.table import TableRow
@@ -43,8 +42,9 @@ from citadel.services.retrieval import (
     load_library_batches,
     load_library_documents,
     load_library_name,
-    scope_block_ids,
+    scope_text_block_ids,
 )
+from citadel.services.search import rank_content
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,7 @@ STATEMENT_TIMEOUT_MS = 3000
 SYNTH_BUDGET = SLM_MODEL_LEN - SYNTH_MAX_TOKENS - 2048
 MERGE_INPUT_BUDGET = STRUCT_MAX_TOKENS // 2
 SCHEMA_SAMPLES = 3
+LEVEL2_STOP_STREAK = 2
 _PG = postgresql.dialect()
 _DTYPE_SA: dict[str, type[TypeEngine[Any]]] = {
     "integer": BigInteger,
@@ -273,111 +274,30 @@ def _result_render(result: SqlResult) -> str:
     )
 
 
-def _fit_results(results: list[SqlResult], budget: int) -> list[SqlResult]:
-    if not results or budget <= 0:
-        return []
-    kept: list[list[list]] = [[] for _ in results]
-    used = sum(
-        count_tokens(f"[{result.label}]\ncomputed by: {result.query}\n" + " | ".join(result.columns))
-        for result in results
-    )
-    pointer = [0] * len(results)
-    added = True
-    while added:
-        added = False
-        for index, result in enumerate(results):
-            cursor = pointer[index]
-            if cursor >= len(result.rows):
-                continue
-            cost = count_tokens(_row_text(result.rows[cursor])) + 1
-            if used + cost > budget:
-                continue
-            kept[index].append(result.rows[cursor])
-            used += cost
-            pointer[index] += 1
-            added = True
-    return [SqlResult(r.label, r.columns, kept[i], r.total, r.refs, r.query) for i, r in enumerate(results) if kept[i]]
-
-
-@dataclass
-class _TableChannel:
-    blocks: list[str]
-    fitted: list[SqlResult]
-    described: int
-
-
-def _table_channel(results: list[SqlResult], describe: list[str], rows_budget: int) -> _TableChannel:
-    fitted = _fit_results(results, rows_budget)
-    return _TableChannel([*describe, *(_result_render(result) for result in fitted)], fitted, len(describe))
-
-
-@dataclass
-class _Evidence:
-    text: str
-    sources: list[int]
-    tokens: int
-    score: int
-    heading: str | None
-    document_id: int
-
-
-def _group_key(evidence: _Evidence, level: int) -> object:
-    if level == 0:
-        return (evidence.document_id, evidence.heading)
-    if level == 1:
-        return evidence.document_id
-    return 0
-
-
-def _chunk_by_tokens(items: list[_Evidence], budget: int) -> list[list[_Evidence]]:
-    chunks: list[list[_Evidence]] = []
-    current: list[_Evidence] = []
+def _chunk_texts(texts: list[str], counts: list[int], budget: int) -> list[list[str]]:
+    chunks: list[list[str]] = []
+    current: list[str] = []
     used = 0
-    for item in items:
-        if current and used + item.tokens > budget:
+    for item, tokens in zip(texts, counts, strict=True):
+        if current and used + tokens > budget:
             chunks.append(current)
             current, used = [], 0
         current.append(item)
-        used += item.tokens
+        used += tokens
     if current:
         chunks.append(current)
     return chunks
 
 
-async def _merge_chunk(question: str, chunk: list[_Evidence]) -> _Evidence:
-    summary = await merge_evidence(question, [evidence.text for evidence in chunk])
-    sources = [source for evidence in chunk for source in evidence.sources]
-    if summary:
-        tokens = count_tokens(summary)
-    else:
-        summary = "\n".join(evidence.text for evidence in chunk)
-        tokens = sum(evidence.tokens for evidence in chunk)
-    return _Evidence(summary, sources, tokens, max(e.score for e in chunk), chunk[0].heading, chunk[0].document_id)
-
-
-async def _reduce(question: str, evidences: list[_Evidence], budget: int, level: int) -> list[_Evidence]:
-    total = sum(evidence.tokens for evidence in evidences)
-    if total <= budget:
-        return evidences
-    overflow = total - budget
-    order = sorted(range(len(evidences)), key=lambda index: (evidences[index].score, -evidences[index].tokens))
-    marked: set[int] = set()
-    marked_tokens = 0
-    for index in order:
-        marked.add(index)
-        marked_tokens += evidences[index].tokens
-        if marked_tokens >= overflow:
-            break
-    groups: dict[object, list[_Evidence]] = {}
-    for index in marked:
-        groups.setdefault(_group_key(evidences[index], level), []).append(evidences[index])
-    chunks = [chunk for items in groups.values() for chunk in _chunk_by_tokens(items, MERGE_INPUT_BUDGET)]
-    merged = await asyncio.gather(*(_merge_chunk(question, chunk) for chunk in chunks))
-    survivors = [evidences[index] for index in range(len(evidences)) if index not in marked]
-    combined = survivors + list(merged)
-    if sum(evidence.tokens for evidence in combined) >= total:
-        return combined
-    return await _reduce(question, combined, budget, level + 1)
+async def _summarize_texts(question: str, texts: list[str]) -> str | None:
+    if not texts:
+        return None
+    counts = await asyncio.to_thread(count_tokens_batch, texts)
+    if sum(counts) <= MERGE_INPUT_BUDGET:
+        return await merge_evidence(question, texts) or "\n".join(texts)
+    chunks = _chunk_texts(texts, counts, MERGE_INPUT_BUDGET)
+    reduced = await asyncio.gather(*(_summarize_texts(question, chunk) for chunk in chunks))
+    return await _summarize_texts(question, [text for text in reduced if text])
 
 
 def _doc_item(doc: DocRef) -> str:
@@ -389,185 +309,6 @@ def _table_item(table: TableCand, labels: dict[int, str]) -> str:
     columns = ", ".join(str(column.get("header") or "?") for column in table.columns)
     head = f"table — {_table_label(table, labels)} rows={table.n_rows}"
     return f"{head}: {' | '.join(named)}. columns {columns}" if named else f"{head}: columns {columns}"
-
-
-@dataclass
-class _Coverage:
-    documents: dict[int, str]
-    tables: dict[int, str]
-
-
-def _inventory(
-    documents: list[DocRef], tables: list[TableCand], labels: dict[int, str]
-) -> tuple[list[str], list[tuple[str, int]]]:
-    by_document: dict[int, list[int]] = {}
-    for index, table in enumerate(tables):
-        by_document.setdefault(table.document_id, []).append(index)
-    items: list[str] = []
-    index_map: list[tuple[str, int]] = []
-    for doc_index, doc in enumerate(documents):
-        items.append(_doc_item(doc))
-        index_map.append(("doc", doc_index))
-        for table_index in by_document.get(doc.id, []):
-            items.append(_table_item(tables[table_index], labels))
-            index_map.append(("table", table_index))
-    return items, index_map
-
-
-def _split_coverage(
-    doc_coverage: dict[int, str], table_coverage: dict[int, str], index_map: list[tuple[str, int]]
-) -> _Coverage:
-    documents: dict[int, str] = {}
-    tables: dict[int, str] = {}
-    for index, depth in doc_coverage.items():
-        if index >= len(index_map):
-            continue
-        kind, orig = index_map[index]
-        if kind != "doc":
-            logger.warning("resolve named a table as a document item=%d depth=%s — dropped", index, depth)
-            continue
-        documents[orig] = depth
-    for index, depth in table_coverage.items():
-        if index >= len(index_map):
-            continue
-        kind, orig = index_map[index]
-        if kind != "table":
-            logger.warning("resolve named a document as a table item=%d depth=%s — dropped", index, depth)
-            continue
-        tables[orig] = depth
-    return _Coverage(documents, tables)
-
-
-def _pack_documents(
-    documents: list[DocRef], tables: list[TableCand], labels: dict[int, str], question: str, library: str
-) -> list[list[DocRef]]:
-    batches: list[list[DocRef]] = []
-    current: list[DocRef] = []
-    for doc in documents:
-        candidate = [*current, doc]
-        items, _ = _inventory(candidate, tables, labels)
-        tokens = resolve_prompt_tokens(question, items, library)
-        if current and tokens > RESOLVE_BUDGET:
-            batches.append(current)
-            current = [doc]
-        else:
-            current = candidate
-    if current:
-        batches.append(current)
-    return batches
-
-
-STREAM_RESOLVE_BATCH = "resolve_batch"
-
-
-def _resolve_pending_key(library_id: int) -> str:
-    return f"resolve:pending:{library_id}"
-
-
-def _resolve_results_key(library_id: int) -> str:
-    return f"resolve:results:{library_id}"
-
-
-def _resolve_done_stream(library_id: int) -> str:
-    return f"resolve:done:{library_id}"
-
-
-async def emit_resolve_batches(
-    library_id: int,
-    question: str,
-    library: str,
-    batches: list[list[DocRef]],
-    tables: list[TableCand],
-    labels: dict[int, str],
-) -> int:
-    redis = get_redis()
-    await redis.delete(_resolve_done_stream(library_id))
-    await redis.delete(_resolve_results_key(library_id))
-    jobs: list[tuple[int, list[str], list[tuple[str, int]]]] = []
-    for batch_no, batch in enumerate(batches):
-        items, index_map = _inventory(batch, tables, labels)
-        if items:
-            jobs.append((batch_no, items, index_map))
-    await redis.set(_resolve_pending_key(library_id), len(jobs))
-    for batch_no, items, index_map in jobs:
-        await redis.xadd(
-            STREAM_RESOLVE_BATCH,
-            {
-                "library_id": str(library_id),
-                "batch_no": str(batch_no),
-                "question": question,
-                "library": library,
-                "items": json.dumps(items),
-                "index_map": json.dumps(index_map),
-            },
-        )
-    return len(jobs)
-
-
-async def resolve_batch_job(fields: dict[str, str]) -> None:
-    library_id = int(fields["library_id"])
-    items = json.loads(fields["items"])
-    index_map = [(kind, index) for kind, index in json.loads(fields["index_map"])]
-    key = f"resolve:{library_id}:{fields['batch_no']}"
-    doc_coverage, table_coverage = await call_resolve(fields["question"], items, key, fields["library"])
-    coverage = _split_coverage(doc_coverage, table_coverage, index_map)
-    payload = json.dumps({"documents": coverage.documents, "tables": coverage.tables})
-    await get_redis().hset(_resolve_results_key(library_id), fields["batch_no"], payload)
-
-
-async def record_resolve_batch(library_id: int) -> None:
-    redis = get_redis()
-    remaining = await redis.decr(_resolve_pending_key(library_id))
-    if remaining != 0:
-        return
-    raw_results = await redis.hgetall(_resolve_results_key(library_id))
-    merged_documents: dict[int, str] = {}
-    merged_tables: dict[int, str] = {}
-    for raw in raw_results.values():
-        parsed = json.loads(raw)
-        merged_documents.update({int(index): depth for index, depth in parsed["documents"].items()})
-        merged_tables.update({int(index): depth for index, depth in parsed["tables"].items()})
-    await redis.xadd(
-        _resolve_done_stream(library_id),
-        {"documents": json.dumps(merged_documents), "tables": json.dumps(merged_tables)},
-    )
-
-
-async def wait_resolve(library_id: int, dispatched: int) -> _Coverage:
-    if dispatched == 0:
-        return _Coverage({}, {})
-    entries = type_cast(
-        "list[tuple[bytes, list[tuple[bytes, dict[bytes, bytes]]]]]",
-        await get_redis().xread({_resolve_done_stream(library_id): "0"}, block=0),
-    )
-    _, messages = entries[0]
-    _, raw = messages[0]
-    documents = {int(index): depth for index, depth in json.loads(raw[b"documents"]).items()}
-    tables = {int(index): depth for index, depth in json.loads(raw[b"tables"]).items()}
-    return _Coverage(documents, tables)
-
-
-async def resolve(
-    library_id: int,
-    question: str,
-    documents: list[DocRef],
-    tables: list[TableCand],
-    labels: dict[int, str],
-    library: str,
-) -> _Coverage:
-    batches = _pack_documents(documents, tables, labels, question, library)
-    logger.info("resolve batches=%d documents=%d tables=%d", len(batches), len(documents), len(tables))
-    dispatched = await emit_resolve_batches(library_id, question, library, batches, tables, labels)
-    return await wait_resolve(library_id, dispatched)
-
-
-async def run_tables(
-    question: str, tables: list[TableCand], depths: dict[int, str], labels: dict[int, str], library: str
-) -> list[SqlResult]:
-    queried = [tables[index] for index in sorted(depths) if depths[index] == "data"]
-    if not queried:
-        return []
-    return await _aggregate(question, queried, labels, library)
 
 
 def _batch_cite(batch: BatchRef) -> str:
@@ -586,93 +327,143 @@ def _doc_summary_text(doc: DocRef) -> str:
     return f"[{doc.filename}] {doc.summary}"
 
 
-def _doc_evidence(doc: DocRef, tokens: int) -> _Evidence:
-    return _Evidence(_doc_summary_text(doc), [doc.id], tokens, 0, None, doc.id)
+async def _fits_or_summarized(question: str, texts: list[str], counts: list[int], budget: int) -> list[str] | None:
+    if sum(counts) <= budget:
+        return None
+    summary = await _summarize_texts(question, texts)
+    return [summary] if summary else []
 
 
-async def _reduce_floor(question: str, documents: list[DocRef], counts: list[int], budget: int) -> list[str]:
-    evidences = [_doc_evidence(doc, counts[index]) for index, doc in enumerate(documents)]
-    reduced = await _reduce(question, evidences, budget, 0)
-    logger.info("text floor reduced documents=%d out=%d budget=%d", len(documents), len(reduced), budget)
-    return [evidence.text for evidence in reduced]
+def _stage1_pack(documents: list[DocRef], question: str) -> list[list[DocRef]]:
+    batches: list[list[DocRef]] = []
+    current: list[DocRef] = []
+    for doc in documents:
+        candidate = [*current, doc]
+        tokens = relevance_prompt_tokens("stage1_relevance", question, [_doc_item(d) for d in candidate])
+        if current and tokens > RELEVANCE_BUDGET:
+            batches.append(current)
+            current = [doc]
+        else:
+            current = candidate
+    if current:
+        batches.append(current)
+    return batches
 
 
-async def _doc_blocks(batches: list[BatchRef]) -> list[str]:
-    ranges = [(batch.document_id, batch.start_block_ordinal, batch.end_block_ordinal) for batch in batches]
-    texts = await load_block_texts(await scope_block_ids(ranges))
-    blocks = sorted(texts.values(), key=lambda block: (block.document_id, block.block_ordinal))
-    return [block.text for block in blocks]
+async def stage1_relevant_documents(question: str, documents: list[DocRef]) -> list[DocRef]:
+    if not documents:
+        return []
+    batches = _stage1_pack(documents, question)
+    picks = await asyncio.gather(
+        *(
+            call_stage1_relevance(question, [_doc_item(doc) for doc in batch], f"stage1:{batch_no}")
+            for batch_no, batch in enumerate(batches)
+        )
+    )
+    relevant = [batch[index] for batch, indices in zip(batches, picks, strict=True) for index in indices]
+    logger.info("stage1 documents=%d relevant=%d", len(documents), len(relevant))
+    return relevant
 
 
-async def _deeper_texts(depth: str, batches: list[BatchRef]) -> list[str]:
-    if depth == "parts":
-        return [_summary_text(batch) for batch in batches]
-    return await _doc_blocks(batches)
+async def level0_gate(question: str, documents: list[DocRef], budget: int) -> list[str] | None:
+    texts = [_doc_summary_text(doc) for doc in documents]
+    counts = await asyncio.to_thread(count_tokens_batch, texts)
+    reduced = await _fits_or_summarized(question, texts, counts, budget)
+    if reduced is not None:
+        logger.info("level0 gate closed documents=%d", len(documents))
+    return reduced
 
 
-def _upgrade_order(documents: list[DocRef], depths: dict[int, str]) -> list[tuple[DocRef, tuple[str, ...], bool]]:
-    ladders = {"wording": ("wording", "parts"), "parts": ("parts",)}
-    asked: list[tuple[DocRef, tuple[str, ...], bool]] = [
-        (doc, ladders[depth], False)
-        for depth in ("wording", "parts")
-        for doc in documents
-        if depths.get(doc.id) == depth
-    ]
-    return asked + [(doc, ("parts",), True) for doc in documents if depths.get(doc.id, "overview") == "overview"]
+def _batch_item(batch: BatchRef) -> str:
+    return f"batch — {_batch_cite(batch)}: {batch.summary}"
 
 
-async def _upgrade(
-    doc: DocRef, ladder: tuple[str, ...], batches: list[BatchRef], floor_cost: int, allowance: int
-) -> tuple[list[str], int, str] | None:
-    for depth in ladder:
-        stored = doc.content_tokens if depth == "wording" else sum(batch.summary_tokens for batch in batches)
-        if stored > allowance + floor_cost:
-            continue
-        texts = await _deeper_texts(depth, batches)
-        if not texts:
-            continue
-        cost = sum(await asyncio.to_thread(count_tokens_batch, texts))
-        if cost - floor_cost <= allowance:
-            return texts, cost - floor_cost, depth
+async def level1_relevant(
+    question: str, batches: list[BatchRef], tables: list[TableCand], labels: dict[int, str]
+) -> tuple[list[BatchRef], list[TableCand]]:
+    if not batches and not tables:
+        return [], []
+    items = [_batch_item(batch) for batch in batches] + [_table_item(table, labels) for table in tables]
+    tokens = relevance_prompt_tokens("level1_relevance", question, items)
+    if tokens > RELEVANCE_BUDGET:
+        logger.warning("level1 inventory does not fit one call tokens=%d budget=%d", tokens, RELEVANCE_BUDGET)
+    batch_indices, table_indices = await call_level1_relevance(question, items, "level1")
+    relevant_batches = [batches[index] for index in batch_indices if index < len(batches)]
+    relevant_tables = [tables[index] for index in table_indices if index < len(tables)]
+    return relevant_batches, relevant_tables
+
+
+async def level1_gate(
+    question: str, batches: list[BatchRef], tables: list[TableCand], labels: dict[int, str], budget: int
+) -> list[str] | None:
+    texts = [_summary_text(batch) for batch in batches] + [_table_render(table, labels) for table in tables]
+    counts = await asyncio.to_thread(count_tokens_batch, texts)
+    reduced = await _fits_or_summarized(question, texts, counts, budget)
+    if reduced is not None:
+        logger.info("level1 gate closed batches=%d tables=%d", len(batches), len(tables))
+    return reduced
+
+
+def _window_by_tokens(ids: list[int], counts: dict[int, int], budget: int) -> list[list[int]]:
+    windows: list[list[int]] = []
+    current: list[int] = []
+    used = 0
+    for content_id in ids:
+        tokens = counts[content_id]
+        if current and used + tokens > budget:
+            windows.append(current)
+            current, used = [], 0
+        current.append(content_id)
+        used += tokens
+    if current:
+        windows.append(current)
+    return windows
+
+
+def _batch_for_block(batches: list[BatchRef], document_id: int, block_ordinal: int) -> BatchRef | None:
+    for batch in batches:
+        if batch.document_id == document_id and batch.start_block_ordinal <= block_ordinal <= batch.end_block_ordinal:
+            return batch
     return None
 
 
-async def render_text(
-    question: str, documents: list[DocRef], depths: dict[int, str], batches: dict[int, list[BatchRef]], budget: int
-) -> list[str]:
-    if not documents or budget <= 0:
-        logger.info("text floor documents=%d budget=%d", len(documents), budget)
+async def level2_relevant_texts(question: str, library_id: int, batches: list[BatchRef]) -> list[str]:
+    if not batches:
         return []
-    floor = [_doc_summary_text(doc) for doc in documents]
-    counts = await asyncio.to_thread(count_tokens_batch, floor)
-    if sum(counts) > budget:
-        return await _reduce_floor(question, documents, counts, budget)
-    spare = budget - sum(counts)
-    share = spare // len(documents)
-    rendered = {doc.id: [text] for doc, text in zip(documents, floor, strict=True)}
-    costs = dict(zip((doc.id for doc in documents), counts, strict=True))
-    deepened: dict[int, str] = {}
-    greedy: list[str] = []
-    for doc, ladder, spent_spare in _upgrade_order(documents, depths):
-        upgraded = await _upgrade(doc, ladder, batches.get(doc.id, []), costs[doc.id], min(share, spare))
-        if upgraded is not None:
-            rendered[doc.id], delta, reached = upgraded
-            spare -= delta
-            deepened[doc.id] = reached
-            if spent_spare:
-                greedy.append(doc.filename)
-    logger.info(
-        "text documents=%d floor=%d share=%d asked=%s greedy=%d capped=%s spare=%d budget=%d",
-        len(documents),
-        sum(counts),
-        share,
-        {doc.filename: deepened[doc.id] for doc in documents if doc.id in deepened and doc.filename not in greedy},
-        len(greedy),
-        [doc.filename for doc in documents if doc.id not in deepened],
-        spare,
-        budget,
+    ranges = [(batch.document_id, batch.start_block_ordinal, batch.end_block_ordinal) for batch in batches]
+    content_ids = await scope_text_block_ids(ranges)
+    if not content_ids:
+        return []
+    ordered = await rank_content(question, content_ids, key=f"level2:{library_id}")
+    blocks = await load_block_texts(ordered)
+    ordered = [content_id for content_id in ordered if content_id in blocks]
+    counts = dict(
+        zip(ordered, await asyncio.to_thread(count_tokens_batch, [blocks[cid].text for cid in ordered]), strict=True)
     )
-    return [text for doc in documents for text in rendered[doc.id]]
+    windows = _window_by_tokens(ordered, counts, RELEVANCE_BUDGET)
+    texts: list[str] = []
+    empty_streak = 0
+    walked = 0
+    for index, window in enumerate(windows):
+        picks = await call_level2_relevance(
+            question, [blocks[cid].text for cid in window], f"level2:{library_id}:{index}"
+        )
+        walked += 1
+        if not picks:
+            empty_streak += 1
+            if empty_streak >= LEVEL2_STOP_STREAK:
+                break
+            continue
+        empty_streak = 0
+        for pick in picks:
+            if pick >= len(window):
+                continue
+            block = blocks[window[pick]]
+            batch = _batch_for_block(batches, block.document_id, block.block_ordinal)
+            citation = _batch_cite(batch) if batch is not None else block.document_id
+            texts.append(f"[{citation}] {block.text}")
+    logger.info("level2 pooled=%d windows=%d/%d relevant=%d", len(content_ids), walked, len(windows), len(texts))
+    return texts
 
 
 _CITE = re.compile(r"\[([^\]]+)\]")
@@ -711,63 +502,71 @@ def _check_citations(response: str, evidence_files: set[str], table_labels: set[
     logger.debug("answer:\n%s", response)
 
 
-@dataclass
-class _Assembled:
-    passages: list[str]
-    rendered: list[str]
-    channel: _TableChannel
+async def _respond(question: str, started: float, passages: list[str], results: list[str]) -> AsyncIterator[str]:
+    parts: list[str] = []
+    async for token in synthesize(question, passages, results):
+        parts.append(token)
+        yield token
+    logger.info(
+        "query done %r passages=%d results=%d %.1fs", question[:80], len(passages), len(results), time.time() - started
+    )
+    _check_citations("".join(parts), _evidence_files(passages), set())
 
 
-def _log_evidence(
+async def _consume(stream: AsyncIterator[str]) -> str:
+    return "".join([token async for token in stream])
+
+
+async def _string_stream(text: str) -> AsyncIterator[str]:
+    yield text
+
+
+async def _table_report(question: str, result_blocks: list[str]) -> str:
+    if not result_blocks:
+        return ""
+    return await _consume(synthesize(question, [], result_blocks))
+
+
+async def _level2_respond(
     question: str,
     started: float,
-    passages: list[str],
-    results: list[SqlResult],
-    channel: _TableChannel,
-) -> None:
-    table_tokens = sum(count_tokens(block) for block in channel.blocks)
+    library_id: int,
+    relevant_batches: list[BatchRef],
+    relevant_tables: list[TableCand],
+    labels: dict[int, str],
+    library: str,
+) -> AsyncIterator[str]:
+    texts, results = await asyncio.gather(
+        level2_relevant_texts(question, library_id, relevant_batches),
+        _aggregate(question, relevant_tables, labels, library),
+    )
+    result_blocks = [_result_render(result) for result in results]
+    text_report, table_report = await asyncio.gather(
+        _summarize_texts(question, texts), _table_report(question, result_blocks)
+    )
+    table_labels = {labels[table.table_id] for table in relevant_tables}
+    if text_report and table_report:
+        stream = write_final_report(question, text_report, table_report)
+    elif text_report:
+        stream = _string_stream(text_report)
+    elif table_report:
+        stream = _string_stream(table_report)
+    else:
+        stream = synthesize(question, [], [])
+    parts: list[str] = []
+    async for token in stream:
+        parts.append(token)
+        yield token
     logger.info(
-        "query done %r results=%d/%d described=%d table_tokens=%d dropped_rows=%d passages=%d synth_tokens=%d/%d %.1fs",
+        "query done %r batches=%d tables=%d results=%d %.1fs",
         question[:80],
-        len(channel.fitted),
+        len(relevant_batches),
+        len(relevant_tables),
         len(results),
-        channel.described,
-        table_tokens,
-        sum(r.total for r in results) - sum(len(r.rows) for r in channel.fitted),
-        len(passages),
-        table_tokens + sum(count_tokens(block) for block in passages),
-        SYNTH_BUDGET,
         time.time() - started,
     )
-    logger.debug(
-        "synthesis input\npassages:\n%s\n\ntable evidence:\n%s", "\n".join(passages), "\n".join(channel.blocks)
-    )
-
-
-def _batches_by_document(batches: list[BatchRef]) -> dict[int, list[BatchRef]]:
-    grouped: dict[int, list[BatchRef]] = {}
-    for batch in batches:
-        grouped.setdefault(batch.document_id, []).append(batch)
-    return grouped
-
-
-async def _assemble(
-    question: str,
-    library_id: int,
-    documents: list[DocRef],
-    tables: list[TableCand],
-    depths: dict[int, str],
-    results: list[SqlResult],
-    labels: dict[int, str],
-) -> _Assembled:
-    describe = [_table_render(table, labels) for table in tables]
-    floor = [_doc_summary_text(doc) for doc in documents]
-    reserved = sum(count_tokens(block) for block in describe) + sum(await asyncio.to_thread(count_tokens_batch, floor))
-    channel = _table_channel(results, describe, max(SYNTH_BUDGET - reserved, 0))
-    table_tokens = sum(count_tokens(block) for block in channel.blocks)
-    batches = _batches_by_document(await load_library_batches(library_id)) if documents else {}
-    passages = await render_text(question, documents, depths, batches, max(SYNTH_BUDGET - table_tokens, 0))
-    return _Assembled(passages, channel.blocks, channel)
+    evidence_files = _evidence_files(texts) | _result_fallback_files(results, table_labels)
+    _check_citations("".join(parts), evidence_files, table_labels)
 
 
 async def answer(question: str, library_id: int) -> AsyncIterator[str]:
@@ -775,28 +574,31 @@ async def answer(question: str, library_id: int) -> AsyncIterator[str]:
     logger.info("query start library=%d %r", library_id, question)
     library = await load_library_name(library_id)
     documents = await load_library_documents(library_id)
-    tables = await load_all_tables(library_id)
+
+    necessary = await stage1_relevant_documents(question, documents)
+    if not necessary:
+        async for token in _respond(question, started, [], []):
+            yield token
+        return
+
+    floor_report = await level0_gate(question, necessary, SYNTH_BUDGET)
+    if floor_report is not None:
+        async for token in _respond(question, started, floor_report, []):
+            yield token
+        return
+
+    necessary_ids = {doc.id for doc in necessary}
+    tables = [table for table in await load_all_tables(library_id) if table.document_id in necessary_ids]
     labels = _table_labels(tables)
-    coverage = await resolve(library_id, question, documents, tables, labels, library)
-    covered_docs = [documents[index] for index in sorted(coverage.documents)]
-    covered_tables = [tables[index] for index in sorted(coverage.tables)]
-    depths = {documents[index].id: depth for index, depth in coverage.documents.items()}
-    results = await run_tables(question, tables, coverage.tables, labels, library)
-    logger.info(
-        "coverage documents=%d/%d tables=%d/%d results=%d rows=%s",
-        len(covered_docs),
-        len(documents),
-        len(covered_tables),
-        len(tables),
-        len(results),
-        [result.total for result in results],
-    )
-    built = await _assemble(question, library_id, covered_docs, covered_tables, depths, results, labels)
-    table_labels = {labels[table.table_id] for table in covered_tables}
-    evidence_files = _evidence_files(built.passages) | _result_fallback_files(results, table_labels)
-    _log_evidence(question, started, built.passages, results, built.channel)
-    parts: list[str] = []
-    async for token in synthesize(question, built.passages, built.rendered):
-        parts.append(token)
+    batches = [batch for batch in await load_library_batches(library_id) if batch.document_id in necessary_ids]
+
+    relevant_batches, relevant_tables = await level1_relevant(question, batches, tables, labels)
+    level1_report = await level1_gate(question, relevant_batches, relevant_tables, labels, SYNTH_BUDGET)
+    if level1_report is not None:
+        async for token in _respond(question, started, level1_report, []):
+            yield token
+        return
+
+    respond = _level2_respond(question, started, library_id, relevant_batches, relevant_tables, labels, library)
+    async for token in respond:
         yield token
-    _check_citations("".join(parts), evidence_files, table_labels)

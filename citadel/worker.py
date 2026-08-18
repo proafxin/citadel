@@ -46,7 +46,6 @@ from citadel.services.ingestion import (
     requeue_message,
     shutdown,
 )
-from citadel.services.query import STREAM_RESOLVE_BATCH, record_resolve_batch, resolve_batch_job
 from citadel.services.readiness import STREAM_LIBRARY_READY
 from citadel.services.retrieval import STREAM_EMBED, handle_embed
 from config import CPU_EIGHTH, configure_logging
@@ -362,26 +361,6 @@ async def _batch_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
     await record_summary(int(fields["library_id"]))
 
 
-async def _resolve_batch_job(msg_id: str, raw: dict[bytes, bytes]) -> None:
-    stream = STREAM_RESOLVE_BATCH
-    fields = await _decode_or_settle(stream, msg_id, raw)
-    if fields is None:
-        return
-    work = await _run_cancelable(resolve_batch_job(fields))
-    error = work.exception()
-    if error is None:
-        await _settle(stream, msg_id)
-        await record_resolve_batch(int(fields["library_id"]))
-    else:
-        logger.error(
-            "resolve batch failed library=%s batch=%s\n%s",
-            fields.get("library_id", "?"),
-            fields.get("batch_no", "?"),
-            _tb(error),
-        )
-        await _retry_or_fail(stream, msg_id, raw, lambda: record_resolve_batch(int(fields["library_id"])))
-
-
 async def _embed_giveup(library_id: str) -> None:
     logger.error("embedding permanently failed library=%s — marking library failed", library_id)
     await mark_library_failed(int(library_id))
@@ -514,10 +493,6 @@ async def batch() -> None:
     await _drive(STREAM_BATCH, None, lambda mid, raw: _spawn(_batch_job(mid, raw)))
 
 
-async def resolve_batches() -> None:
-    await _drive(STREAM_RESOLVE_BATCH, None, lambda mid, raw: _spawn(_resolve_batch_job(mid, raw)))
-
-
 async def embed() -> None:
     await _drive(STREAM_EMBED, None, lambda mid, raw: _spawn(_embed_job(mid, raw)))
 
@@ -542,7 +517,6 @@ async def _main() -> None:
         table_structure,
         merge,
         batch,
-        resolve_batches,
         embed,
         library_ready,
     )

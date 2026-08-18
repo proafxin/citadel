@@ -31,7 +31,7 @@ STRUCTURE_MAX_TOKENS = 2048
 SYNTH_MAX_TOKENS = 8192
 SLM_MODEL_LEN = 32768
 PAGE_OCR_MAX_TOKENS = 3584
-RESOLVE_BUDGET = SLM_MODEL_LEN - STRUCT_MAX_TOKENS - 2048
+RELEVANCE_BUDGET = SLM_MODEL_LEN - STRUCT_MAX_TOKENS - 2048
 
 
 @functools.lru_cache
@@ -220,76 +220,70 @@ _QUERIES_SCHEMA = {
     "required": ["queries"],
 }
 
-_RESOLVE_SCHEMA = {
+_STAGE1_SCHEMA = {
     "type": "object",
-    "properties": {
-        "documents": {
-            "type": "object",
-            "properties": {
-                "overview": {"type": "array", "items": {"type": "integer"}},
-                "parts": {"type": "array", "items": {"type": "integer"}},
-                "wording": {"type": "array", "items": {"type": "integer"}},
-            },
-            "required": ["overview", "parts", "wording"],
-        },
-        "tables": {
-            "type": "object",
-            "properties": {
-                "metadata": {"type": "array", "items": {"type": "integer"}},
-                "data": {"type": "array", "items": {"type": "integer"}},
-            },
-            "required": ["metadata", "data"],
-        },
-    },
-    "required": ["documents", "tables"],
+    "properties": {"documents": {"type": "array", "items": {"type": "integer"}}},
+    "required": ["documents"],
 }
 
-_DOC_DEPTHS = ("wording", "parts", "overview")
-_TABLE_DEPTHS = ("data", "metadata")
+_LEVEL1_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "batches": {"type": "array", "items": {"type": "integer"}},
+        "tables": {"type": "array", "items": {"type": "integer"}},
+    },
+    "required": ["batches", "tables"],
+}
+
+_LEVEL2_SCHEMA = {
+    "type": "object",
+    "properties": {"relevant": {"type": "array", "items": {"type": "integer"}}},
+    "required": ["relevant"],
+}
 
 
-def _depth_indices(data: dict, key: str, count: int) -> list[int]:
-    return [index for index in data.get(key, []) if isinstance(index, int) and 0 <= index < count]
+def _indices(data: dict, key: str, count: int) -> list[int]:
+    return sorted({index for index in data.get(key, []) if isinstance(index, int) and 0 <= index < count})
 
 
-def _kind_coverage(node: dict, depths: tuple[str, ...], count: int) -> dict[int, str]:
-    coverage: dict[int, str] = {}
-    for depth in depths:
-        for index in _depth_indices(node, depth, count):
-            coverage.setdefault(index, depth)
-    return coverage
-
-
-def _resolve_prompt(query: str, items: list[str], library: str) -> str:
+def _inventory_prompt(prompt_name: str, query: str, items: list[str]) -> str:
     listing = "\n\n".join(f"[{index}] {item}" for index, item in enumerate(items))
-    return f"{load_prompt('resolve_query')}\nlibrary: {library}\nquestion: {query}\ninventory:\n{listing}"
+    return f"{load_prompt(prompt_name)}\nquestion: {query}\ninventory:\n{listing}"
 
 
-def resolve_prompt_tokens(query: str, items: list[str], library: str = "") -> int:
-    return count_tokens(_resolve_prompt(query, items, library))
+def relevance_prompt_tokens(prompt_name: str, query: str, items: list[str]) -> int:
+    return count_tokens(_inventory_prompt(prompt_name, query, items))
 
 
-async def call_resolve(
-    query: str, items: list[str], key: str, library: str = ""
-) -> tuple[dict[int, str], dict[int, str]]:
-    prompt = _resolve_prompt(query, items, library)
+async def call_stage1_relevance(query: str, items: list[str], key: str) -> list[int]:
+    prompt = _inventory_prompt("stage1_relevance", query, items)
     tokens = count_tokens(prompt)
-    if tokens > RESOLVE_BUDGET:
-        logger.warning("resolve inventory does not fit one call tokens=%d budget=%d", tokens, RESOLVE_BUDGET)
-    data = await call_slm(prompt, _RESOLVE_SCHEMA, key)
-    count = len(items)
-    doc_coverage = _kind_coverage(data.get("documents", {}), _DOC_DEPTHS, count)
-    table_coverage = _kind_coverage(data.get("tables", {}), _TABLE_DEPTHS, count)
-    logger.info(
-        "resolve items=%d covered=%d %s",
-        count,
-        len(doc_coverage) + len(table_coverage),
-        {depth: sum(1 for value in doc_coverage.values() if value == depth) for depth in _DOC_DEPTHS}
-        | {depth: sum(1 for value in table_coverage.values() if value == depth) for depth in _TABLE_DEPTHS},
+    if tokens > RELEVANCE_BUDGET:
+        logger.warning("stage1 inventory does not fit one call tokens=%d budget=%d", tokens, RELEVANCE_BUDGET)
+    data = await call_slm(prompt, _STAGE1_SCHEMA, key)
+    relevant = _indices(data, "documents", len(items))
+    logger.info("stage1 items=%d relevant=%d", len(items), len(relevant))
+    return relevant
+
+
+async def call_level1_relevance(query: str, items: list[str], key: str) -> tuple[list[int], list[int]]:
+    prompt = _inventory_prompt("level1_relevance", query, items)
+    tokens = count_tokens(prompt)
+    if tokens > RELEVANCE_BUDGET:
+        logger.warning("level1 inventory does not fit one call tokens=%d budget=%d", tokens, RELEVANCE_BUDGET)
+    data = await call_slm(prompt, _LEVEL1_SCHEMA, key)
+    batches = _indices(data, "batches", len(items))
+    tables = _indices(data, "tables", len(items))
+    logger.info("level1 items=%d relevant_batches=%d relevant_tables=%d", len(items), len(batches), len(tables))
+    return batches, tables
+
+
+async def call_level2_relevance(query: str, excerpts: list[str], key: str) -> list[int]:
+    prompt = f"{load_prompt('level2_relevance')}\nquestion: {query}\nexcerpts:\n" + "\n\n".join(
+        f"[{index}] {excerpt}" for index, excerpt in enumerate(excerpts)
     )
-    if not doc_coverage and not table_coverage:
-        logger.warning("resolve covered nothing raw=%s", data)
-    return doc_coverage, table_coverage
+    data = await call_slm(prompt, _LEVEL2_SCHEMA, key)
+    return _indices(data, "relevant", len(excerpts))
 
 
 async def write_queries(query: str, tables: list[str], library: str = "") -> QueryPlan:
@@ -328,6 +322,29 @@ async def synthesize(query: str, passages: list[str], results: list[str]) -> Asy
         "stream": True,
     }
     key = _local_key("synthesize")
+    cap = get_interactive_capacity()
+    await cap.acquire(key)
+    try:
+        async for token in _stream_qwen(payload):
+            yield token
+    finally:
+        await cap.release(key)
+
+
+async def write_final_report(query: str, text_report: str, table_report: str) -> AsyncIterator[str]:
+    prompt = (
+        f"{load_prompt('final_report')}\nquestion: {query}\n"
+        f"document report:\n{text_report}\n\ntable report:\n{table_report}"
+    )
+    payload = {
+        "model": QWEN_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "max_tokens": SYNTH_MAX_TOKENS,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "stream": True,
+    }
+    key = _local_key("final_report")
     cap = get_interactive_capacity()
     await cap.acquire(key)
     try:
