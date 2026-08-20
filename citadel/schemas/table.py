@@ -28,7 +28,6 @@ class TableStructure(BaseModel):
     data_start: int
     data_end: int
     columns: list[str] | None = None
-    section_rows: list[int] | None = None
     title: str | None = None
     caption: str | None = None
     notes: list[str] | None = None

@@ -1,9 +1,10 @@
 import asyncio
+import json
 import logging
 from itertools import starmap
 from typing import Protocol
 
-from citadel.llm import call_structured, count_tokens, count_tokens_batch
+from citadel.llm import call_structured, call_text, count_tokens, count_tokens_batch, extract_json
 from citadel.prompts import load_prompt
 from citadel.schemas.table import TableStructure
 from citadel.services.capacity import get_text_capacity
@@ -32,7 +33,6 @@ _TABLE_ENTRY_SCHEMA = {
         "data_end": {"type": "integer"},
         "col_start": {"type": "integer"},
         "col_end": {"type": "integer"},
-        "section_rows": {"type": "array", "items": {"type": "integer"}},
         "columns": {"type": "array", "items": {"type": "string"}},
         "title": {"type": "string"},
         "notes": {"type": "array", "items": {"type": "string"}},
@@ -44,7 +44,6 @@ _TABLE_ENTRY_SCHEMA = {
         "data_end",
         "col_start",
         "col_end",
-        "section_rows",
         "columns",
         "title",
         "notes",
@@ -73,21 +72,16 @@ def _payload_text(grid: list[list[str]], indices: list[int], width: int, max_cel
     return "\n".join(_row_line(index, grid[index], width, max_cell) for index in indices)
 
 
-_SAMPLE_RUN = 3
+MAX_SAMPLE_ROWS = 50
 
 
-def _spread(rows: list[int], room: int) -> list[int]:
+def _stride(rows: list[int], room: int) -> list[int]:
     if room <= 0 or not rows:
         return []
     if room >= len(rows):
         return rows
-    runs = max(room // _SAMPLE_RUN, 1)
-    step = len(rows) / runs
-    selected: set[int] = set()
-    for index in range(runs):
-        start = int(index * step)
-        selected.update(rows[start : start + _SAMPLE_RUN])
-    return sorted(selected)
+    step = len(rows) / room
+    return sorted({rows[int(index * step)] for index in range(room)})
 
 
 def _budgeted_sample(grid: list[list[str]], width: int, budget: int) -> list[int]:
@@ -99,10 +93,10 @@ def _budgeted_sample(grid: list[list[str]], width: int, budget: int) -> list[int
     if sum(counts) <= budget:
         return rows
     avg = sum(counts) / len(counts)
-    room = max(int(budget / avg), SAMPLE_TOP + SAMPLE_BOTTOM)
+    room = min(max(int(budget / avg), SAMPLE_TOP + SAMPLE_BOTTOM), MAX_SAMPLE_ROWS)
     edges = set(rows[:SAMPLE_TOP]) | set(rows[len(rows) - SAMPLE_BOTTOM :])
     middle = [index for index in rows[SAMPLE_TOP : len(rows) - SAMPLE_BOTTOM] if index not in edges]
-    return sorted(edges | set(_spread(middle, max(room - len(edges), 0))))
+    return sorted(edges | set(_stride(middle, max(room - len(edges), 0))))
 
 
 def _candidate_text(grid: list[list[str]], *, full: bool, budget: int | None) -> str:
@@ -155,6 +149,123 @@ def _entry_col_range(entry: dict) -> tuple[int, int]:
     return int(entry["col_start"]), int(entry["col_end"])
 
 
+STAGE1_MAX_TOKENS = 2048
+STAGE2_MAX_TOKENS = 3072
+_INLINE_CELL_BUDGET = 400
+
+
+def _cell_count(grid: list[list[str]]) -> int:
+    return sum(1 for row in grid for cell in row if cell.strip())
+
+
+def _row_line_inline(index: int, row: list[str], width: int) -> str:
+    cells = [(row[col] if col < len(row) else "").strip() for col in range(width)]
+    return f"row {index}: " + " | ".join(f"col{col}: {cell}" for col, cell in enumerate(cells))
+
+
+def _render_inline(grid: list[list[str]]) -> str:
+    width = max((len(row) for row in grid), default=0)
+    rows = (
+        _budgeted_sample(grid, width, SINGLE_TABLE_BUDGET)
+        if _cell_count(grid) > _INLINE_CELL_BUDGET
+        else list(range(len(grid)))
+    )
+    lines = [_row_line_inline(index, grid[index], width) for index in rows]
+    return f"{len(grid)} rows, {width} cols\n" + "\n".join(lines)
+
+
+def _slice_grid(grid: list[list[str]], min_row: int, max_row: int, min_col: int, max_col: int) -> list[list[str]]:
+    return [row[min_col : max_col + 1] for row in grid[min_row : max_row + 1]]
+
+
+_STAGE1_EXTRACT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start_row": {"type": "integer"},
+                    "end_row": {"type": "integer"},
+                    "start_col": {"type": "integer"},
+                    "end_col": {"type": "integer"},
+                },
+                "required": ["start_row", "end_row", "start_col", "end_col"],
+            },
+        }
+    },
+    "required": ["tables"],
+}
+
+
+async def _detect_boundaries(grid: list[list[str]], *, key: str) -> list[tuple[int, int, int, int]]:
+    prompt = f"{load_prompt('table_structure_excel')}\n\n{_render_inline(grid)}"
+    reasoning = await call_text(prompt, max_tokens=STAGE1_MAX_TOKENS, key=key)
+    extract_prompt = f"{load_prompt('table_structure_extract')}\n\n{reasoning}"
+    cap = get_text_capacity()
+    await cap.acquire(f"{key}:extract")
+    try:
+        data = await call_structured(extract_prompt, _STAGE1_EXTRACT_SCHEMA)
+    finally:
+        await cap.release(f"{key}:extract")
+    boxes: list[tuple[int, int, int, int]] = []
+    for entry in data.get("tables") or []:
+        try:
+            box = (int(entry["start_row"]), int(entry["end_row"]), int(entry["start_col"]), int(entry["end_col"]))
+        except (KeyError, ValueError, TypeError):
+            logger.warning("stage1 dropped malformed entry=%r", entry)
+            continue
+        boxes.append(box)
+    return boxes
+
+
+def _stage2_structure(data: dict, width: int) -> TableStructure | None:
+    try:
+        data_start, data_end = int(data["start_row"]), int(data["end_row"])
+    except (KeyError, ValueError, TypeError):
+        return None
+    return TableStructure(
+        col_start=0,
+        col_end=max(width - 1, 0),
+        data_start=data_start,
+        data_end=data_end,
+    )
+
+
+async def _extract_fields(grid: list[list[str]], *, key: str) -> TableStructure | None:
+    prompt = f"{load_prompt('table_fields_excel')}\n\n{_render_inline(grid)}"
+    raw = await call_text(prompt, max_tokens=STAGE2_MAX_TOKENS, key=key)
+    try:
+        data = json.loads(extract_json(raw))
+    except json.JSONDecodeError:
+        logger.warning("stage2 field extraction got unparseable output key=%s raw=%r", key, raw)
+        return None
+    width = max((len(row) for row in grid), default=0)
+    return _stage2_structure(data, width)
+
+
+async def _structure_excel(
+    grid: list[list[str]], *, key: str, sheet_no: int, anchors: dict | None
+) -> list[MaterializedTable]:
+    width = max((len(row) for row in grid), default=0)
+    boxes = await _detect_boundaries(grid, key=f"{key}:stage1")
+    if not boxes:
+        boxes = [(0, len(grid) - 1, 0, max(width - 1, 0))]
+    subgrids = [_slice_grid(grid, *box) for box in boxes]
+    structures = await asyncio.gather(
+        *(_extract_fields(subgrid, key=f"{key}:stage2:{index}") for index, subgrid in enumerate(subgrids))
+    )
+    tables: list[MaterializedTable] = []
+    for subgrid, structure in zip(subgrids, structures, strict=True):
+        if structure is None:
+            continue
+        table = materialize(subgrid, structure, sheet_no=sheet_no, anchors=anchors)
+        if table.n_rows:
+            tables.append(table)
+    return tables
+
+
 def _structure(entry: dict) -> TableStructure:
     col_start, col_end = _entry_col_range(entry)
     return TableStructure(
@@ -164,7 +275,6 @@ def _structure(entry: dict) -> TableStructure:
         transposed=bool(entry.get("transposed")),
         data_start=int(entry["data_start"]),
         data_end=int(entry["data_end"]),
-        section_rows=list(entry.get("section_rows") or []) or None,
         columns=list(entry.get("columns") or []) or None,
         title=entry.get("title") or None,
         notes=list(entry.get("notes") or []) or None,
@@ -182,9 +292,10 @@ async def structure_candidate(
 ) -> list[MaterializedTable]:
     if not grid:
         return []
+    if not known_table:
+        return await _structure_excel(grid, key=key, sheet_no=sheet_no, anchors=anchors)
     text = _candidate_text(grid, full=full, budget=None if full else SINGLE_TABLE_BUDGET)
-    prompt_name = "table_structure_known" if known_table else "table_structure_excel"
-    prompt = f"{load_prompt(prompt_name)}\n{text}"
+    prompt = f"{load_prompt('table_structure_known')}\n{text}"
     cap = get_text_capacity()
     await cap.acquire(key)
     try:

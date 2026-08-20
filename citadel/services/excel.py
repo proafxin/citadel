@@ -195,15 +195,17 @@ def find_regions(sheet: SheetExtraction) -> list[Region]:
         band = [cell for row in range(row_start, row_end + 1) for cell in by_row.get(row, [])]
         for col_start, col_end in _runs(sorted({cell.col for cell in band})):
             cells = [cell for cell in band if col_start <= cell.col <= col_end]
-            regions.append(
-                Region(
-                    min_row=min(cell.row for cell in cells),
-                    min_col=col_start,
-                    max_row=max(cell.row for cell in cells),
-                    max_col=col_end,
-                    cells=cells,
+            for local_row_start, local_row_end in _runs(sorted({cell.row for cell in cells})):
+                local_cells = [cell for cell in cells if local_row_start <= cell.row <= local_row_end]
+                regions.append(
+                    Region(
+                        min_row=local_row_start,
+                        min_col=col_start,
+                        max_row=local_row_end,
+                        max_col=col_end,
+                        cells=local_cells,
+                    )
                 )
-            )
     return regions
 
 

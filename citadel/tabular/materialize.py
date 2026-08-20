@@ -131,48 +131,13 @@ def sample_rows(rows: list[list[CellValue]]) -> list[list[CellValue]]:
     return [rows[int(index * step)] for index in range(SAMPLE_TABLE_ROWS)]
 
 
-def _section_at(grid: list[list[str]], row: int, col_start: int, count: int) -> tuple[int, str] | None:
-    for offset in range(count):
-        value = _grid_cell(grid, row, col_start + offset).strip()
-        if value:
-            return offset, value
-    return None
-
-
-def _collect_sections(
-    grid: list[list[str]], data_start: int, data_end: int, col_start: int, count: int, section_rows: list[int]
-) -> tuple[list[list[str]], list[list[str | None]], list[str]]:
-    markers: dict[int, tuple[int, str]] = {}
-    for row in section_rows:
-        if data_start <= row <= data_end and (marker := _section_at(grid, row, col_start, count)) is not None:
-            markers[row] = marker
-    levels = sorted({level for level, _ in markers.values()})
-    level_index = {level: index for index, level in enumerate(levels)}
-    active: list[str | None] = [None] * len(levels)
+def _collect_rows(grid: list[list[str]], data_start: int, data_end: int, col_start: int, count: int) -> list[list[str]]:
     collected: list[list[str]] = []
-    sections: list[list[str | None]] = []
     for offset in range(data_start, data_end + 1):
-        if offset in markers:
-            level, label = markers[offset]
-            index = level_index[level]
-            active[index] = label
-            for deeper in range(index + 1, len(active)):
-                active[deeper] = None
-            continue
         raw = [_grid_cell(grid, offset, col_start + index) for index in range(count)]
-        if not any(raw):
-            continue
-        collected.append(raw)
-        sections.append(list(active))
-    names = ["section"] if len(levels) == 1 else [f"section_{index + 1}" for index in range(len(levels))]
-    return collected, sections, names
-
-
-def _section_columns(sections: list[list[str | None]], names: list[str]) -> list[Column]:
-    return [
-        Column(header=names[index], dtype=dtype_of([section[index] or "" for section in sections]))
-        for index in range(len(names))
-    ]
+        if any(raw):
+            collected.append(raw)
+    return collected
 
 
 def _materialize_relational(
@@ -185,9 +150,7 @@ def _materialize_relational(
 ) -> MaterializedTable:
     count = structure.col_end - structure.col_start + 1
     header_rows = structure.header_rows or []
-    collected, sections, section_names = _collect_sections(
-        grid, structure.data_start, structure.data_end, structure.col_start, count, structure.section_rows or []
-    )
+    collected = _collect_rows(grid, structure.data_start, structure.data_end, structure.col_start, count)
     dtypes = [dtype_of([raw[index] for raw in collected]) for index in range(count)]
     if header_rows:
         naming_rows = _naming_rows(grid, header_rows, structure.col_start, count)
@@ -202,23 +165,17 @@ def _materialize_relational(
     columns = [
         Column(header=_clean_name(headers[index]) or f"col{index}", dtype=dtypes[index]) for index in range(count)
     ]
-    section_columns = _section_columns(sections, section_names)
-    header_pad: list[CellValue] = [None] * len(section_names)
     header_cells = [
-        [*header_pad, *(cast_cell(_grid_cell(grid, row, structure.col_start + index)) for index in range(count))]
+        [cast_cell(_grid_cell(grid, row, structure.col_start + index)) for index in range(count)]
         for row in sorted(header_rows)
     ]
     data_rows = [
-        [
-            *(cast_cell(sections[position][index] or "") for index in range(len(section_names))),
-            *(cast_cell(collected[position][index]) for index in range(count)),
-        ]
-        for position in range(len(collected))
+        [cast_cell(collected[position][index]) for index in range(count)] for position in range(len(collected))
     ]
     header_indices = list(range(len(header_cells)))
     return MaterializedTable(
         sheet_no=sheet_no,
-        columns=[*section_columns, *columns],
+        columns=columns,
         rows=[*header_cells, *data_rows],
         sample_rows=sample_rows(data_rows),
         n_rows=len(data_rows),

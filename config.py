@@ -13,10 +13,10 @@ CPU_THIRD = max((os.cpu_count() or 3) // 3, 1)
 CPU_EIGHTH = max((os.cpu_count() or 8) // 8, 1)
 
 QWEN_MODEL = "qwen"
-QWEN_HF_REPO = "Qwen/Qwen3.5-9B"
+QWEN_HF_REPO = "Qwen/Qwen3-VL-8B-Instruct"
 QWEN_CACHE_DIR = Path.home() / ".cache" / "citadel-tokenizer"
-EMBED_MODEL = "BAAI/bge-m3"
-EMBED_SERVED_NAME = "bge"
+EMBED_MODEL = "microsoft/harrier-oss-v1-0.6b"
+EMBED_SERVED_NAME = "harrier"
 EMBED_MAX_TOKENS = 8192
 
 

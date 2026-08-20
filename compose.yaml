@@ -7,7 +7,7 @@ services:
     ipc: host
     command:
       - --model
-      - Qwen/Qwen3.5-9B
+      - Qwen/Qwen3-VL-8B-Instruct
       - --served-model-name
       - qwen
       - --host
@@ -17,9 +17,9 @@ services:
       - --kv-cache-dtype
       - auto
       - --gpu-memory-utilization
-      - "0.97"
+      - "0.98"
       - --max-model-len
-      - "32768"
+      - "22000"
       - --mm-processor-cache-gb
       - "0"
       - --max-num-seqs
@@ -37,6 +37,7 @@ services:
     volumes:
       - ${HOME}/.cache/citadel-qwen:/root/.cache/huggingface
       - qwen-vllm-cache:/root/.cache/vllm
+      - ./data/gguf_models:/models:ro
     deploy:
       resources:
         reservations:
@@ -45,26 +46,24 @@ services:
               count: all
               capabilities: [gpu]
 
-  # bge:
+  # embedding:
   #   image: vllm/vllm-openai:latest
-  #   container_name: citadel-bge
+  #   container_name: citadel-embedding
   #   restart: always
   #   ipc: host
   #   command:
   #     - --model
-  #     - BAAI/bge-m3
+  #     - microsoft/harrier-oss-v1-0.6b
   #     - --served-model-name
-  #     - bge
+  #     - harrier
   #     - --host
   #     - 0.0.0.0
   #     - --port
   #     - "8101"
-  #     - --hf-overrides
-  #     - '{"architectures": ["BgeM3EmbeddingModel"]}'
   #     - --pooler-config
-  #     - '{"task": "embed", "pooling_type": "CLS"}'
+  #     - '{"task": "embed", "pooling_type": "LAST"}'
   #     - --gpu-memory-utilization
-  #     - "0.06"
+  #     - "0.07"
   #     - --max-num-seqs
   #     - "256"
   #     - --max-model-len
@@ -79,15 +78,15 @@ services:
   #     memlock: -1
   #     stack: 67108864
   #   volumes:
-  #     - ${HOME}/.cache/citadel-bge:/root/.cache/huggingface
-  #     - bge-vllm-cache:/root/.cache/vllm
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: all
-  #             capabilities: [gpu]
+  #     - ${HOME}/.cache/citadel-embedding:/root/.cache/huggingface
+  #     - embedding-vllm-cache:/root/.cache/vllm
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 
   redis:
     image: redis:7-alpine
@@ -129,4 +128,4 @@ services:
 volumes:
   postgres-data:
   qwen-vllm-cache:
-  bge-vllm-cache:
+  embedding-vllm-cache:

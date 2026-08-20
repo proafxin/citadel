@@ -64,7 +64,7 @@ def count_tokens_batch(texts: list[str]) -> list[int]:
     return [len(encoding.ids) for encoding in get_tokenizer().encode_batch(texts, add_special_tokens=False)]
 
 
-def _extract_json(text: str) -> str:
+def extract_json(text: str) -> str:
     start, end = text.find("{"), text.rfind("}")
     return text[start : end + 1] if start != -1 and end != -1 else text
 
@@ -135,7 +135,7 @@ async def call_slm(prompt: str, schema: dict, key: str, max_tokens: int = STRUCT
         raw = await _post_qwen(_struct_payload(prompt, _inline_refs(schema), max_tokens))
     finally:
         await cap.release(key)
-    return json.loads(_extract_json(raw))
+    return json.loads(extract_json(raw))
 
 
 async def call_text(prompt: str, max_tokens: int, key: str) -> str:
@@ -195,7 +195,7 @@ async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -
 async def call_structured(prompt: str, schema: dict, max_tokens: int = STRUCTURE_MAX_TOKENS) -> dict:
     raw = await _post_qwen(_struct_payload(prompt, _inline_refs(schema), max_tokens))
     try:
-        return json.loads(_extract_json(raw))
+        return json.loads(extract_json(raw))
     except json.JSONDecodeError:
         logger.exception("call_structured got unparseable output max_tokens=%d raw=%r", max_tokens, raw)
         raise
