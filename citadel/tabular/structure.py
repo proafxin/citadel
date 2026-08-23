@@ -23,6 +23,7 @@ class Position(Protocol):
 
 _MAX_CELL = 40
 SINGLE_TABLE_BUDGET = 8192
+EXCEL_CHUNK_BUDGET = 16384
 
 _TABLE_ENTRY_SCHEMA = {
     "type": "object",
@@ -150,28 +151,44 @@ def _entry_col_range(entry: dict) -> tuple[int, int]:
 
 
 STAGE1_MAX_TOKENS = 2048
-STAGE2_MAX_TOKENS = 3072
-_INLINE_CELL_BUDGET = 400
+STAGE2_MAX_TOKENS = 4096
 
 
-def _cell_count(grid: list[list[str]]) -> int:
-    return sum(1 for row in grid for cell in row if cell.strip())
-
-
-def _row_line_inline(index: int, row: list[str], width: int) -> str:
+def _row_line_excel(index: int, row: list[str], width: int) -> str:
     cells = [(row[col] if col < len(row) else "").strip() for col in range(width)]
     return f"row {index}: " + " | ".join(f"col{col}: {cell}" for col, cell in enumerate(cells))
 
 
-def _render_inline(grid: list[list[str]]) -> str:
+def _render_excel(grid: list[list[str]], rows: list[int], width: int) -> str:
+    header = f"{len(grid)} rows, {width} cols"
+    lines = [_row_line_excel(index, grid[index], width) for index in rows]
+    return "\n".join([header, *lines])
+
+
+def _chunk_rows(grid: list[list[str]], width: int, budget: int) -> list[list[int]]:
+    rows = list(range(len(grid)))
+    if not rows:
+        return []
+    lines = [_row_line_excel(index, grid[index], width) for index in rows]
+    counts = count_tokens_batch(lines)
+    chunks: list[list[int]] = []
+    current: list[int] = []
+    current_tokens = 0
+    for index, tokens in zip(rows, counts, strict=True):
+        if current and current_tokens + tokens > budget:
+            chunks.append(current)
+            current, current_tokens = [], 0
+        current.append(index)
+        current_tokens += tokens
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _render_excel_chunks(grid: list[list[str]], *, budget: int) -> list[str]:
     width = max((len(row) for row in grid), default=0)
-    rows = (
-        _budgeted_sample(grid, width, SINGLE_TABLE_BUDGET)
-        if _cell_count(grid) > _INLINE_CELL_BUDGET
-        else list(range(len(grid)))
-    )
-    lines = [_row_line_inline(index, grid[index], width) for index in rows]
-    return f"{len(grid)} rows, {width} cols\n" + "\n".join(lines)
+    chunks = _chunk_rows(grid, width, budget)
+    return [_render_excel(grid, rows, width) for rows in chunks]
 
 
 def _slice_grid(grid: list[list[str]], min_row: int, max_row: int, min_col: int, max_col: int) -> list[list[str]]:
@@ -199,8 +216,8 @@ _STAGE1_EXTRACT_SCHEMA = {
 }
 
 
-async def _detect_boundaries(grid: list[list[str]], *, key: str) -> list[tuple[int, int, int, int]]:
-    prompt = f"{load_prompt('table_structure_excel')}\n\n{_render_inline(grid)}"
+async def _detect_boundaries_chunk(text: str, *, key: str) -> list[tuple[int, int, int, int]]:
+    prompt = f"{load_prompt('table_structure_excel')}\n\n{text}"
     reasoning = await call_text(prompt, max_tokens=STAGE1_MAX_TOKENS, key=key)
     extract_prompt = f"{load_prompt('table_structure_extract')}\n\n{reasoning}"
     cap = get_text_capacity()
@@ -220,28 +237,39 @@ async def _detect_boundaries(grid: list[list[str]], *, key: str) -> list[tuple[i
     return boxes
 
 
+async def _detect_boundaries(grid: list[list[str]], *, key: str) -> list[tuple[int, int, int, int]]:
+    chunks = _render_excel_chunks(grid, budget=EXCEL_CHUNK_BUDGET)
+    results = await asyncio.gather(
+        *(_detect_boundaries_chunk(text, key=f"{key}:chunk{index}") for index, text in enumerate(chunks))
+    )
+    return [box for boxes in results for box in boxes]
+
+
 def _stage2_structure(data: dict, width: int) -> TableStructure | None:
     try:
-        data_start, data_end = int(data["start_row"]), int(data["end_row"])
+        data_start, data_end = int(data["data_start"]), int(data["data_end"])
     except (KeyError, ValueError, TypeError):
         return None
+    header_rows = [int(row) for row in data.get("header_rows") or []]
     return TableStructure(
         col_start=0,
         col_end=max(width - 1, 0),
+        header_rows=header_rows or None,
         data_start=data_start,
         data_end=data_end,
     )
 
 
-async def _extract_fields(grid: list[list[str]], *, key: str) -> TableStructure | None:
-    prompt = f"{load_prompt('table_fields_excel')}\n\n{_render_inline(grid)}"
+async def _type_rows(grid: list[list[str]], *, key: str) -> TableStructure | None:
+    width = max((len(row) for row in grid), default=0)
+    text = _render_excel(grid, list(range(len(grid))), width)
+    prompt = f"{load_prompt('table_structure_typed')}\n\n{text}"
     raw = await call_text(prompt, max_tokens=STAGE2_MAX_TOKENS, key=key)
     try:
         data = json.loads(extract_json(raw))
     except json.JSONDecodeError:
-        logger.warning("stage2 field extraction got unparseable output key=%s raw=%r", key, raw)
+        logger.warning("stage2 row typing got unparseable output key=%s raw=%r", key, raw)
         return None
-    width = max((len(row) for row in grid), default=0)
     return _stage2_structure(data, width)
 
 
@@ -254,7 +282,7 @@ async def _structure_excel(
         boxes = [(0, len(grid) - 1, 0, max(width - 1, 0))]
     subgrids = [_slice_grid(grid, *box) for box in boxes]
     structures = await asyncio.gather(
-        *(_extract_fields(subgrid, key=f"{key}:stage2:{index}") for index, subgrid in enumerate(subgrids))
+        *(_type_rows(subgrid, key=f"{key}:stage2:{index}") for index, subgrid in enumerate(subgrids))
     )
     tables: list[MaterializedTable] = []
     for subgrid, structure in zip(subgrids, structures, strict=True):

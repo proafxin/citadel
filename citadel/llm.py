@@ -65,8 +65,25 @@ def count_tokens_batch(texts: list[str]) -> list[int]:
 
 
 def extract_json(text: str) -> str:
-    start, end = text.find("{"), text.rfind("}")
-    return text[start : end + 1] if start != -1 and end != -1 else text
+    spans: list[str] = []
+    depth = 0
+    start = -1
+    for index, char in enumerate(text):
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                spans.append(text[start : index + 1])
+    for span in reversed(spans):
+        try:
+            json.loads(span)
+        except json.JSONDecodeError:
+            continue
+        return span
+    return text
 
 
 def _resolve_ref(node: object, defs: dict) -> object:
