@@ -23,7 +23,7 @@ class Position(Protocol):
 
 _MAX_CELL = 40
 SINGLE_TABLE_BUDGET = 8192
-EXCEL_CHUNK_BUDGET = 16384
+EXCEL_CHUNK_BUDGET = 8192
 
 _TABLE_ENTRY_SCHEMA = {
     "type": "object",
@@ -165,6 +165,19 @@ def _render_excel(grid: list[list[str]], rows: list[int], width: int) -> str:
     return "\n".join([header, *lines])
 
 
+def _row_line_markdown(index: int, row: list[str], width: int) -> str:
+    cells = [(row[col] if col < len(row) else "").strip() for col in range(width)]
+    return f"| {index} | " + " | ".join(cells) + " |"
+
+
+def _render_markdown(grid: list[list[str]], rows: list[int], width: int) -> str:
+    header = f"{len(grid)} rows, {width} cols\n"
+    header += "| row | " + " | ".join(f"c{col}" for col in range(width)) + " |\n"
+    header += "|---" * (width + 1) + "|"
+    lines = [_row_line_markdown(index, grid[index], width) for index in rows]
+    return "\n".join([header, *lines])
+
+
 def _chunk_rows(grid: list[list[str]], width: int, budget: int) -> list[list[int]]:
     rows = list(range(len(grid)))
     if not rows:
@@ -262,7 +275,7 @@ def _stage2_structure(data: dict, width: int) -> TableStructure | None:
 
 async def _type_rows(grid: list[list[str]], *, key: str) -> TableStructure | None:
     width = max((len(row) for row in grid), default=0)
-    text = _render_excel(grid, list(range(len(grid))), width)
+    text = _render_markdown(grid, list(range(len(grid))), width)
     prompt = f"{load_prompt('table_structure_typed')}\n\n{text}"
     raw = await call_text(prompt, max_tokens=STAGE2_MAX_TOKENS, key=key)
     try:

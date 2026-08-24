@@ -13,7 +13,7 @@ CPU_THIRD = max((os.cpu_count() or 3) // 3, 1)
 CPU_EIGHTH = max((os.cpu_count() or 8) // 8, 1)
 
 QWEN_MODEL = "qwen"
-QWEN_HF_REPO = "Qwen/Qwen3-VL-8B-Instruct"
+QWEN_HF_REPO = "QuantTrio/Qwen3-VL-30B-A3B-Instruct-AWQ"
 QWEN_CACHE_DIR = Path.home() / ".cache" / "citadel-tokenizer"
 EMBED_MODEL = "microsoft/harrier-oss-v1-0.6b"
 EMBED_SERVED_NAME = "harrier"

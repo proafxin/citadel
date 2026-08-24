@@ -7,7 +7,7 @@ services:
     ipc: host
     command:
       - --model
-      - Qwen/Qwen3-VL-8B-Instruct
+      - QuantTrio/Qwen3-VL-30B-A3B-Instruct-AWQ
       - --served-model-name
       - qwen
       - --host
@@ -17,9 +17,9 @@ services:
       - --kv-cache-dtype
       - auto
       - --gpu-memory-utilization
-      - "0.95"
+      - "0.98"
       - --max-model-len
-      - "22000"
+      - "32768"
       - --mm-processor-cache-gb
       - "0"
       - --max-num-seqs
