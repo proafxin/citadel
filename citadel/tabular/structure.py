@@ -636,6 +636,7 @@ async def _resolve_group(
     finally:
         await cap.release(key)
     groups = data.get("groups") or []
+    logger.info("merge sheet%d groups=%s", sheet_no, groups)
     seen: set[int] = set()
     valid: list[list[int]] = []
     for chain in groups:
