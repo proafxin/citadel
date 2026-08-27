@@ -380,7 +380,15 @@ async def _anchor_boundaries(
     return _starts_to_boxes(starts, len(grid)), sorted(unexplained)
 
 
-def _stage2_structure(data: dict, width: int) -> TableStructure | None:
+def _title_from_row(grid: list[list[str]], data: dict, data_start: int) -> str | None:
+    row = data.get("title_row")
+    if not isinstance(row, int) or not 0 <= row < len(grid) or row >= data_start:
+        return None
+    parts = [cell.strip() for cell in grid[row] if cell.strip()]
+    return " ".join(dict.fromkeys(parts)) or None
+
+
+def _stage2_structure(data: dict, width: int, grid: list[list[str]]) -> TableStructure | None:
     try:
         data_start, data_end = int(data["data_start"]), int(data["data_end"])
     except (KeyError, ValueError, TypeError):
@@ -394,7 +402,7 @@ def _stage2_structure(data: dict, width: int) -> TableStructure | None:
         data_start=data_start,
         data_end=data_end,
         metadata_rows=metadata_rows or None,
-        title=(data.get("title") or "").strip() or None,
+        title=_title_from_row(grid, data, data_start),
     )
 
 
@@ -405,9 +413,9 @@ _TYPED_EXTRACT_SCHEMA = {
         "data_start": {"type": "integer"},
         "data_end": {"type": "integer"},
         "metadata_rows": {"type": "array", "items": {"type": "integer"}},
-        "title": {"type": "string"},
+        "title_row": {"type": ["integer", "null"]},
     },
-    "required": ["header_rows", "data_start", "data_end", "metadata_rows", "title"],
+    "required": ["header_rows", "data_start", "data_end", "metadata_rows", "title_row"],
 }
 
 
@@ -454,7 +462,7 @@ async def _type_rows(grid: list[list[str]], *, key: str, anomalies: list[int] | 
         data = await call_structured(extract_prompt, _TYPED_EXTRACT_SCHEMA)
     finally:
         await cap.release(f"{key}:extract")
-    return _stage2_structure(data, width)
+    return _stage2_structure(data, width, grid)
 
 
 def _scan_anomalies(values: list[list[object]], box: tuple[int, int, int, int]) -> list[int]:

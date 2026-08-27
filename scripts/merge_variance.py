@@ -3,6 +3,7 @@ import collections
 import logging
 import pathlib
 import sys
+from typing import TYPE_CHECKING
 
 from citadel.services.excel import (
     RawCellValue,
@@ -14,8 +15,10 @@ from citadel.services.excel import (
     region_values,
 )
 from citadel.services.grid import classify_grid
-from citadel.tabular.materialize import MaterializedTable
 from citadel.tabular.structure import merge_candidates, structure_candidate
+
+if TYPE_CHECKING:
+    from citadel.tabular.materialize import MaterializedTable
 
 logger = logging.getLogger("merge")
 SHEET_NO = 2

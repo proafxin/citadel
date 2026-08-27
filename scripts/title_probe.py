@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import pathlib
+from itertools import starmap
 
 from citadel.services.excel import find_regions, load_all_sheets, region_grid, region_values
 from citadel.tabular.structure import (
@@ -32,12 +33,14 @@ async def _probe(label: str, grid: list[list[str]], values: list[list[object]]) 
         windowed = len(_typing_rows(subgrid, sub_width)) < len(subgrid)
         typed = await _type_rows(subgrid, key=f"title:{label}:{box[0]}", anomalies=_scan_anomalies(values, box))
         logger.info(
-            "%-22s box=%-20s rows=%-5d path=%-6s windowed=%-5s title=%r",
+            "%-22s box=%-20s rows=%-5d path=%-6s windowed=%-5s headers=%-12s data_start=%-4s title=%r",
             label,
             str(box),
             len(subgrid),
             "large" if large else "small",
             windowed,
+            None if typed is None else typed.header_rows,
+            None if typed is None else typed.data_start,
             None if typed is None else typed.title,
         )
 
@@ -54,7 +57,7 @@ async def main() -> None:
                 continue
             targets.append((f"sheet{sheet.sheet_no}_region{index}", grid, region_values(sheet, region)))
 
-    await asyncio.gather(*(_probe(label, grid, values) for label, grid, values in targets))
+    await asyncio.gather(*starmap(_probe, targets))
 
 
 if __name__ == "__main__":

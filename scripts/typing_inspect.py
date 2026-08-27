@@ -8,8 +8,8 @@ from citadel.llm import call_structured, call_text
 from citadel.prompts import load_prompt
 from citadel.services.excel import find_regions, load_all_sheets, region_grid
 from citadel.tabular.structure import (
-    STAGE2_MAX_TOKENS,
     _TYPED_EXTRACT_SCHEMA,
+    STAGE2_MAX_TOKENS,
     _render_excel,
     _typing_rows,
 )
