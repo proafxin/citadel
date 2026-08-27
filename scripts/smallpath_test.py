@@ -1,9 +1,11 @@
 import asyncio
+import logging
 import pathlib
 
 from citadel.services.excel import find_regions, load_all_sheets, region_grid
 from citadel.tabular.structure import EXCEL_CHUNK_BUDGET, _chunk_rows, _detect_boundaries
 
+logger = logging.getLogger("small")
 REPEATS = 3
 
 
@@ -13,6 +15,7 @@ async def _probe(label: str, grid: list[list[str]], attempt: int) -> tuple[str, 
 
 
 async def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
     path = "/home/masterkenway/Downloads/ocr_input/test(1).xlsx"
     blob = pathlib.Path(path).read_bytes()
 
@@ -32,9 +35,10 @@ async def main() -> None:
     for label, attempt, boxes in results:
         grouped.setdefault(label, []).append((attempt, boxes))
 
-    for label, _rows, _grid in targets:
+    for label, rows, _grid in targets:
+        logger.info("%s rows=%d", label, rows)
         for attempt, boxes in sorted(grouped.get(label, [])):
-            pass
+            logger.info("      attempt=%d n=%d %s", attempt, len(boxes), boxes)
 
 
 if __name__ == "__main__":

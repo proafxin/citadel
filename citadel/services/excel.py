@@ -62,6 +62,14 @@ class Region:
 
 
 @dataclass
+class TableBounds:
+    min_row: int
+    min_col: int
+    max_row: int
+    max_col: int
+
+
+@dataclass
 class SheetText:
     sheet_no: int
     text: str
@@ -273,7 +281,16 @@ async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tup
         regions: list[Position] = []
         members: list[MaterializedTable] = []
         for (region, _grid, _values), tables in zip(candidates, resolved, strict=True):
-            regions.extend([region] * len(tables))
+            for table in tables:
+                anchors = table.anchors
+                regions.append(
+                    TableBounds(
+                        min_row=anchors.get("min_row", region.min_row),
+                        min_col=anchors.get("min_col", region.min_col),
+                        max_row=anchors.get("max_row", region.max_row),
+                        max_col=anchors.get("max_col", region.max_col),
+                    )
+                )
             members.extend(tables)
         items.extend(await merge_candidates(doc_id, sheet.sheet_no, regions, members))
     return list(enumerate(items, start=1))

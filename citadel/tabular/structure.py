@@ -233,8 +233,10 @@ _STAGE1_EXTRACT_SCHEMA = {
 }
 
 
-async def _detect_boundaries_chunk(text: str, *, key: str) -> list[tuple[int, int, int, int]]:
-    prompt = f"{load_prompt('table_structure_excel')}\n\n{text}"
+async def _detect_boundaries_chunk(
+    text: str, *, key: str, prompt_name: str = "table_structure_excel"
+) -> list[tuple[int, int, int, int]]:
+    prompt = f"{load_prompt(prompt_name)}\n\n{text}"
     reasoning = await call_text(prompt, max_tokens=STAGE1_MAX_TOKENS, key=key)
     extract_prompt = f"{load_prompt('table_structure_extract')}\n\n{reasoning}"
     cap = get_text_capacity()
@@ -297,6 +299,19 @@ def _scan_conforms(types: dict[int, str], extent: frozenset[int], row: dict[int,
     return all(types.get(col) in {None, cls} for col, cls in row.items())
 
 
+def _first_data_row(values: list[list[object]], start: int, last: int, extent: frozenset[int]) -> int:
+    if last <= start:
+        return start
+    midpoint = start + (last - start) // 2 + 1
+    seed = _scan_profile(values, midpoint, last)
+    if not seed:
+        return min(start + 1, last)
+    row = midpoint
+    while row > start and _scan_conforms(seed, extent, _row_types(values, row - 1)):
+        row -= 1
+    return row
+
+
 def _scan_window(grid: list[list[str]], start: int, width: int) -> tuple[str, int] | None:
     rows: list[int] = []
     used = 0
@@ -339,7 +354,10 @@ async def _anchor_boundaries(
         if not pending:
             break
         results = await asyncio.gather(
-            *(_detect_boundaries_chunk(text, key=f"{key}:at{claim}") for claim, (text, _last) in pending)
+            *(
+                _detect_boundaries_chunk(text, key=f"{key}:at{claim}", prompt_name="table_structure_anchor")
+                for claim, (text, _last) in pending
+            )
         )
         for (claim, (_text, last)), boxes in zip(pending, results, strict=True):
             accepted = False
@@ -349,7 +367,7 @@ async def _anchor_boundaries(
                 accepted = True
                 starts.append((start_row, col_start, col_end))
                 extent = frozenset(range(col_start, col_end + 1))
-                types = _scan_profile(values, min(start_row + 1, last), last)
+                types = _scan_profile(values, _first_data_row(values, start_row, last, extent), last)
                 breaks = [
                     index
                     for index in range(last + 1, len(grid))
@@ -376,6 +394,7 @@ def _stage2_structure(data: dict, width: int) -> TableStructure | None:
         data_start=data_start,
         data_end=data_end,
         metadata_rows=metadata_rows or None,
+        title=(data.get("title") or "").strip() or None,
     )
 
 
@@ -386,8 +405,9 @@ _TYPED_EXTRACT_SCHEMA = {
         "data_start": {"type": "integer"},
         "data_end": {"type": "integer"},
         "metadata_rows": {"type": "array", "items": {"type": "integer"}},
+        "title": {"type": "string"},
     },
-    "required": ["header_rows", "data_start", "data_end", "metadata_rows"],
+    "required": ["header_rows", "data_start", "data_end", "metadata_rows", "title"],
 }
 
 
@@ -416,9 +436,11 @@ def _typing_rows(grid: list[list[str]], width: int) -> list[int]:
     return head + sorted(tail)
 
 
-async def _type_rows(grid: list[list[str]], *, key: str) -> TableStructure | None:
+async def _type_rows(grid: list[list[str]], *, key: str, anomalies: list[int] | None = None) -> TableStructure | None:
     width = max((len(row) for row in grid), default=0)
     text = _render_excel(grid, _typing_rows(grid, width), width)
+    if anomalies:
+        text += f"\n\nrows whose values do not match the column types of the surrounding rows: {anomalies}"
     prompt = f"{load_prompt('table_structure_typed')}\n\n{text}"
     reasoning = await call_text(prompt, max_tokens=STAGE2_MAX_TOKENS, key=key)
     extract_prompt = f"{load_prompt('table_typed_extract')}\n\n{reasoning}"
@@ -429,6 +451,52 @@ async def _type_rows(grid: list[list[str]], *, key: str) -> TableStructure | Non
     finally:
         await cap.release(f"{key}:extract")
     return _stage2_structure(data, width)
+
+
+def _scan_anomalies(values: list[list[object]], box: tuple[int, int, int, int]) -> list[int]:
+    start_row, end_row, col_start, col_end = box
+    extent = frozenset(range(col_start, col_end + 1))
+    midpoint = start_row + (end_row - start_row) // 2
+    types = _scan_profile(values, midpoint, end_row)
+    if not types:
+        return []
+    return [
+        row - start_row
+        for row in range(start_row, end_row + 1)
+        if not _scan_conforms(types, extent, _row_types(values, row))
+    ]
+
+
+def _combine_structure(
+    grid: list[list[str]], box: tuple[int, int, int, int], typed: TableStructure | None, rows: int
+) -> TableStructure | None:
+    if typed is None:
+        return None
+    _start_row, _end_row, col_start, col_end = box
+    limit = max(rows - 1, 0)
+    headers = sorted({row for row in (typed.header_rows or []) if 0 <= row <= limit})
+    data_start = min(max(typed.data_start, 0), limit)
+    metadata = sorted({row for row in (typed.metadata_rows or []) if 0 <= row <= limit})
+    title = typed.title
+    return TableStructure(
+        col_start=0,
+        col_end=col_end - col_start,
+        header_rows=headers or None,
+        data_start=data_start,
+        data_end=limit,
+        metadata_rows=[row for row in metadata if row >= data_start] or None,
+        title=title or None,
+    )
+
+
+def _preamble_title(grid: list[list[str]], box: tuple[int, int, int, int], structure: TableStructure) -> str | None:
+    start_row = box[0]
+    headers = {start_row + row for row in (structure.header_rows or [])}
+    limit = min(start_row + structure.data_start, len(grid))
+    parts = [
+        cell.strip() for row in range(start_row, limit) if row not in headers for cell in grid[row] if cell.strip()
+    ]
+    return " ".join(dict.fromkeys(parts)) or None
 
 
 def _apply_scan(
@@ -462,16 +530,35 @@ async def _structure_excel(
     if not boxes:
         boxes = [(0, len(grid) - 1, 0, max(width - 1, 0))]
     subgrids = [_slice_grid(grid, *box) for box in boxes]
-    structures = await asyncio.gather(
-        *(_type_rows(subgrid, key=f"{key}:stage2:{index}") for index, subgrid in enumerate(subgrids))
+    anomalies = [_scan_anomalies(values, box) if values is not None else [] for box in boxes]
+    typed = list(
+        await asyncio.gather(
+            *(
+                _type_rows(subgrid, key=f"{key}:stage2:{index}", anomalies=found)
+                for index, (subgrid, found) in enumerate(zip(subgrids, anomalies, strict=True))
+            )
+        )
     )
+    structures: list[TableStructure | None] = [
+        _combine_structure(grid, box, entry, len(subgrid))
+        for box, subgrid, entry in zip(boxes, subgrids, typed, strict=True)
+    ]
     tables: list[MaterializedTable] = []
     for box, subgrid, structure in zip(boxes, subgrids, structures, strict=True):
         if structure is None:
             continue
         if scanned:
             structure = _apply_scan(structure, box, scanned, len(subgrid))
-        table = materialize(subgrid, structure, sheet_no=sheet_no, anchors=anchors)
+        base = anchors or {}
+        row0, col0 = base.get("min_row", 0), base.get("min_col", 0)
+        scoped = {
+            **base,
+            "min_row": row0 + box[0],
+            "max_row": row0 + box[1],
+            "min_col": col0 + box[2],
+            "max_col": col0 + box[3],
+        }
+        table = materialize(subgrid, structure, sheet_no=sheet_no, anchors=scoped)
         if table.n_rows:
             tables.append(table)
     return tables

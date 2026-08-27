@@ -1,5 +1,3 @@
-# Table Detection
+# Table Layout
 
-You are given a region of lines extracted from an excel sheet cell grid. Consider the whole region as one unit, and check contextually whether it contains one or more meaningful tables. Report how many tables there are, and for each one, its bounding box (start row, end row, start column, end column).
-
-Within each table's rows, also say which rows are header rows, which are data rows, and which are metadata.
+You are given a region of lines extracted from an excel sheet cell grid. Describe how the region is laid out: what each row is, and what the table or tables in it contain.
