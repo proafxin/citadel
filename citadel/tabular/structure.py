@@ -438,12 +438,16 @@ def _typing_rows(grid: list[list[str]], width: int) -> list[int]:
 
 async def _type_rows(grid: list[list[str]], *, key: str, anomalies: list[int] | None = None) -> TableStructure | None:
     width = max((len(row) for row in grid), default=0)
-    text = _render_excel(grid, _typing_rows(grid, width), width)
+    rows = _typing_rows(grid, width)
+    text = _render_excel(grid, rows, width)
     if anomalies:
         text += f"\n\nrows whose values do not match the column types of the surrounding rows: {anomalies}"
     prompt = f"{load_prompt('table_structure_typed')}\n\n{text}"
     reasoning = await call_text(prompt, max_tokens=STAGE2_MAX_TOKENS, key=key)
-    extract_prompt = f"{load_prompt('table_typed_extract')}\n\n{reasoning}"
+    if len(rows) < len(grid):
+        extract_prompt = f"{load_prompt('table_typed_extract')}\n\n{reasoning}"
+    else:
+        extract_prompt = f"{load_prompt('table_typed_extract_lines')}\n\n{text}\n\n{reasoning}"
     cap = get_text_capacity()
     await cap.acquire(f"{key}:extract")
     try:
@@ -477,15 +481,14 @@ def _combine_structure(
     headers = sorted({row for row in (typed.header_rows or []) if 0 <= row <= limit})
     data_start = min(max(typed.data_start, 0), limit)
     metadata = sorted({row for row in (typed.metadata_rows or []) if 0 <= row <= limit})
-    title = typed.title
     return TableStructure(
         col_start=0,
         col_end=col_end - col_start,
         header_rows=headers or None,
         data_start=data_start,
         data_end=limit,
-        metadata_rows=[row for row in metadata if row >= data_start] or None,
-        title=title or None,
+        metadata_rows=[row for row in metadata if row >= data_start and row not in set(headers)] or None,
+        title=typed.title or None,
     )
 
 
