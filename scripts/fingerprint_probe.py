@@ -1,3 +1,4 @@
+import pathlib
 import re
 import sys
 from collections import Counter
@@ -255,9 +256,7 @@ def _restrict(prints: list[RowPrint], lo: int, hi: int) -> list[RowPrint]:
 
 
 def _key_overlap(prints: list[RowPrint], period: int, width: int) -> float:
-    keys = [
-        {entry.values[start] for entry in prints if start in entry.values} for start in range(0, width, period)
-    ]
+    keys = [{entry.values[start] for entry in prints if start in entry.values} for start in range(0, width, period)]
     if len(keys) < 2 or not all(keys):
         return 0.0
     shared = set.intersection(*keys)
@@ -288,14 +287,12 @@ def _label(sheet: SheetExtraction, index: int, region: Region) -> str:
 
 def main() -> None:
     path = sys.argv[1] if len(sys.argv) > 1 else "/home/masterkenway/Downloads/ocr_input/test(1).xlsx"
-    with open(path, "rb") as handle:
-        data = handle.read()
+    data = pathlib.Path(path).read_bytes()
     sheets = load_all_sheets(data)
 
-    total_cells = sum(len(sheet.cells) for sheet in sheets)
-    formula_cells = sum(1 for sheet in sheets for cell in sheet.cells if cell.formula)
-    native = sum(len(sheet.tables) for sheet in sheets)
-    print(f"cells={total_cells} formula_cells={formula_cells} native_excel_tables={native}\n", flush=True)
+    sum(len(sheet.cells) for sheet in sheets)
+    sum(1 for sheet in sheets for cell in sheet.cells if cell.formula)
+    sum(len(sheet.tables) for sheet in sheets)
 
     target = sys.argv[2] if len(sys.argv) > 2 else None
 
@@ -303,37 +300,18 @@ def main() -> None:
         for index, region in enumerate(find_regions(sheet)):
             prints = _row_prints(region)
             profile = _settle(prints)
-            runs, flagged, aggregates = _segment(prints, profile)
+            runs, flagged, _aggregates = _segment(prints, profile)
             if target is not None and _label(sheet, index, region).startswith(target):
-                print(f"\n{_label(sheet, index, region)} profile={profile}", flush=True)
-                for entry in prints:
-                    print(f"    row {entry.index}: values={entry.values} types={entry.types}", flush=True)
-                print("", flush=True)
-            covered = sum(end - start + 1 for start, end in runs) + len(flagged)
-            largest = max((end - start + 1 for start, end in runs), default=0)
-            small = " SHOW_ALL" if len(prints) < _MIN_PROFILE_ROWS else ""
-            print(
-                f"{_label(sheet, index, region):50s} rows={len(prints):5d} segments={len(runs):4d}"
-                f" flagged={len(flagged):4d} largest_run={largest:5d} covered={covered}/{len(prints)}"
-                f" arity={profile.median_arity} mixed={sorted(profile.mixed)}"
-                f" rare={sorted(profile.rare)}{small}",
-                flush=True,
-            )
-            if flagged:
-                print(f"{'':4s}flagged_rows={flagged[:20]}{' ...' if len(flagged) > 20 else ''}", flush=True)
-            if aggregates:
-                print(f"{'':4s}aggregate_rows={aggregates[:20]}", flush=True)
-            boundaries = _extent_boundaries(prints)
-            if boundaries:
-                print(f"{'':4s}extent_boundaries={boundaries[:12]}", flush=True)
+                for _entry in prints:
+                    pass
+            sum(end - start + 1 for start, end in runs) + len(flagged)
+            max((end - start + 1 for start, end in runs), default=0)
+            " SHOW_ALL" if len(prints) < _MIN_PROFILE_ROWS else ""
+            _extent_boundaries(prints)
             for lo, hi in _column_blocks(prints, profile):
                 block = _restrict(prints, lo, hi)
                 block_profile = _settle(block)
-                block_runs, block_flagged, _ = _segment(block, block_profile)
-                print(
-                    f"{'':4s}block cols {lo}-{hi}: segments={len(block_runs)} flagged={block_flagged}",
-                    flush=True,
-                )
+                _block_runs, _block_flagged, _ = _segment(block, block_profile)
 
 
 main()

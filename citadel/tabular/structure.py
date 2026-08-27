@@ -1,10 +1,11 @@
 import asyncio
-import json
 import logging
+from collections import Counter
+from datetime import datetime
 from itertools import starmap
 from typing import Protocol
 
-from citadel.llm import call_structured, call_text, count_tokens, count_tokens_batch, extract_json
+from citadel.llm import call_structured, call_text, count_tokens, count_tokens_batch
 from citadel.prompts import load_prompt
 from citadel.schemas.table import TableStructure
 from citadel.services.capacity import get_text_capacity
@@ -261,6 +262,106 @@ async def _detect_boundaries(grid: list[list[str]], *, key: str) -> list[tuple[i
     return [box for boxes in results for box in boxes]
 
 
+SCAN_CONTEXT = 4
+
+
+def _value_class(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int | float):
+        return "number"
+    if isinstance(value, datetime):
+        return "temporal"
+    return "string" if str(value).strip() else None
+
+
+def _row_types(values: list[list[object]], index: int) -> dict[int, str]:
+    if not 0 <= index < len(values):
+        return {}
+    return {col: cls for col, value in enumerate(values[index]) if (cls := _value_class(value)) is not None}
+
+
+def _scan_profile(values: list[list[object]], lo: int, hi: int) -> dict[int, str]:
+    counts: dict[int, Counter[str]] = {}
+    for index in range(lo, min(hi + 1, len(values))):
+        for col, cls in _row_types(values, index).items():
+            counts.setdefault(col, Counter())[cls] += 1
+    return {col: counter.most_common(1)[0][0] for col, counter in counts.items()}
+
+
+def _scan_conforms(types: dict[int, str], extent: frozenset[int], row: dict[int, str]) -> bool:
+    if not row or not set(row) <= extent:
+        return False
+    return all(types.get(col) in {None, cls} for col, cls in row.items())
+
+
+def _scan_window(grid: list[list[str]], start: int, width: int) -> tuple[str, int] | None:
+    rows: list[int] = []
+    used = 0
+    for index in range(start, len(grid)):
+        cost = count_tokens(_row_line_excel(index, grid[index], width))
+        if used + cost > EXCEL_CHUNK_BUDGET and rows:
+            break
+        rows.append(index)
+        used += cost
+    if not rows:
+        return None
+    return _render_excel(grid, rows, width), rows[-1]
+
+
+def _starts_to_boxes(starts: list[tuple[int, int, int]], rows: int) -> list[tuple[int, int, int, int]]:
+    ordered = sorted(set(starts))
+    boxes: list[tuple[int, int, int, int]] = []
+    for position, (start, col_start, col_end) in enumerate(ordered):
+        later = [other for other, _a, _b in ordered[position + 1 :] if other > start]
+        end = min(later) - 1 if later else rows - 1
+        if end >= start:
+            boxes.append((start, end, col_start, col_end))
+    return boxes
+
+
+async def _anchor_boundaries(
+    grid: list[list[str]], values: list[list[object]], *, key: str
+) -> tuple[list[tuple[int, int, int, int]], list[int]]:
+    width = max((len(row) for row in grid), default=0)
+    queue: list[tuple[int, int]] = [(0, 0)]
+    seen: set[int] = set()
+    starts: list[tuple[int, int, int]] = []
+    unexplained: list[int] = []
+    while queue:
+        batch = [(window, claim) for window, claim in queue if claim not in seen]
+        seen.update(claim for _window, claim in batch)
+        queue = []
+        rendered = [(claim, _scan_window(grid, window, width)) for window, claim in batch]
+        pending = [(claim, window) for claim, window in rendered if window is not None]
+        if not pending:
+            break
+        results = await asyncio.gather(
+            *(_detect_boundaries_chunk(text, key=f"{key}:at{claim}") for claim, (text, _last) in pending)
+        )
+        for (claim, (_text, last)), boxes in zip(pending, results, strict=True):
+            accepted = False
+            for start_row, _end_row, col_start, col_end in boxes:
+                if start_row < claim or start_row >= len(grid):
+                    continue
+                accepted = True
+                starts.append((start_row, col_start, col_end))
+                extent = frozenset(range(col_start, col_end + 1))
+                types = _scan_profile(values, min(start_row + 1, last), last)
+                breaks = [
+                    index
+                    for index in range(last + 1, len(grid))
+                    if not _scan_conforms(types, extent, _row_types(values, index))
+                ]
+                if breaks:
+                    queue.append((max(breaks[0] - SCAN_CONTEXT, 0), breaks[0]))
+            if not accepted and claim > 0:
+                unexplained.append(claim)
+    return _starts_to_boxes(starts, len(grid)), sorted(unexplained)
+
+
 def _stage2_structure(data: dict, width: int) -> TableStructure | None:
     try:
         data_start, data_end = int(data["data_start"]), int(data["data_end"])
@@ -278,24 +379,86 @@ def _stage2_structure(data: dict, width: int) -> TableStructure | None:
     )
 
 
+_TYPED_EXTRACT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "header_rows": {"type": "array", "items": {"type": "integer"}},
+        "data_start": {"type": "integer"},
+        "data_end": {"type": "integer"},
+        "metadata_rows": {"type": "array", "items": {"type": "integer"}},
+    },
+    "required": ["header_rows", "data_start", "data_end", "metadata_rows"],
+}
+
+
+def _typing_rows(grid: list[list[str]], width: int) -> list[int]:
+    rows = list(range(len(grid)))
+    if not rows:
+        return rows
+    counts = count_tokens_batch([_row_line_excel(index, grid[index], width) for index in rows])
+    if sum(counts) <= EXCEL_CHUNK_BUDGET:
+        return rows
+    half = EXCEL_CHUNK_BUDGET // 2
+    head: list[int] = []
+    used = 0
+    for index, cost in zip(rows, counts, strict=True):
+        if used + cost > half:
+            break
+        head.append(index)
+        used += cost
+    tail: list[int] = []
+    used = 0
+    for index, cost in zip(reversed(rows), reversed(counts), strict=True):
+        if used + cost > half or index in set(head):
+            break
+        tail.append(index)
+        used += cost
+    return head + sorted(tail)
+
+
 async def _type_rows(grid: list[list[str]], *, key: str) -> TableStructure | None:
     width = max((len(row) for row in grid), default=0)
-    text = _render_excel(grid, list(range(len(grid))), width)
+    text = _render_excel(grid, _typing_rows(grid, width), width)
     prompt = f"{load_prompt('table_structure_typed')}\n\n{text}"
-    raw = await call_text(prompt, max_tokens=STAGE2_MAX_TOKENS, key=key)
+    reasoning = await call_text(prompt, max_tokens=STAGE2_MAX_TOKENS, key=key)
+    extract_prompt = f"{load_prompt('table_typed_extract')}\n\n{reasoning}"
+    cap = get_text_capacity()
+    await cap.acquire(f"{key}:extract")
     try:
-        data = json.loads(extract_json(raw))
-    except json.JSONDecodeError:
-        logger.warning("stage2 row typing got unparseable output key=%s raw=%r", key, raw)
-        return None
+        data = await call_structured(extract_prompt, _TYPED_EXTRACT_SCHEMA)
+    finally:
+        await cap.release(f"{key}:extract")
     return _stage2_structure(data, width)
 
 
+def _apply_scan(
+    structure: TableStructure, box: tuple[int, int, int, int], scanned: list[int], rows: int
+) -> TableStructure:
+    start_row, end_row, _col_start, _col_end = box
+    local = sorted({row - start_row for row in scanned if start_row <= row <= end_row})
+    merged = sorted(set(structure.metadata_rows or []) | set(local))
+    return structure.model_copy(
+        update={
+            "data_end": max(rows - 1, structure.data_start),
+            "metadata_rows": merged or None,
+        }
+    )
+
+
 async def _structure_excel(
-    grid: list[list[str]], *, key: str, sheet_no: int, anchors: dict | None
+    grid: list[list[str]],
+    values: list[list[object]] | None,
+    *,
+    key: str,
+    sheet_no: int,
+    anchors: dict | None,
 ) -> list[MaterializedTable]:
     width = max((len(row) for row in grid), default=0)
-    boxes = await _detect_boundaries(grid, key=f"{key}:stage1")
+    scanned: list[int] = []
+    if values is not None and len(_chunk_rows(grid, width, EXCEL_CHUNK_BUDGET)) > 1:
+        boxes, scanned = await _anchor_boundaries(grid, values, key=f"{key}:scan")
+    else:
+        boxes = await _detect_boundaries(grid, key=f"{key}:stage1")
     if not boxes:
         boxes = [(0, len(grid) - 1, 0, max(width - 1, 0))]
     subgrids = [_slice_grid(grid, *box) for box in boxes]
@@ -303,9 +466,11 @@ async def _structure_excel(
         *(_type_rows(subgrid, key=f"{key}:stage2:{index}") for index, subgrid in enumerate(subgrids))
     )
     tables: list[MaterializedTable] = []
-    for subgrid, structure in zip(subgrids, structures, strict=True):
+    for box, subgrid, structure in zip(boxes, subgrids, structures, strict=True):
         if structure is None:
             continue
+        if scanned:
+            structure = _apply_scan(structure, box, scanned, len(subgrid))
         table = materialize(subgrid, structure, sheet_no=sheet_no, anchors=anchors)
         if table.n_rows:
             tables.append(table)
@@ -335,11 +500,12 @@ async def structure_candidate(
     known_table: bool = True,
     sheet_no: int = 0,
     anchors: dict | None = None,
+    values: list[list[object]] | None = None,
 ) -> list[MaterializedTable]:
     if not grid:
         return []
     if not known_table:
-        return await _structure_excel(grid, key=key, sheet_no=sheet_no, anchors=anchors)
+        return await _structure_excel(grid, values, key=key, sheet_no=sheet_no, anchors=anchors)
     text = _candidate_text(grid, full=full, budget=None if full else SINGLE_TABLE_BUDGET)
     prompt = f"{load_prompt('table_structure_known')}\n{text}"
     cap = get_text_capacity()

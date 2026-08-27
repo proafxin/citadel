@@ -1,4 +1,5 @@
 import asyncio
+import pathlib
 
 from citadel.services.excel import find_regions, load_all_sheets, region_grid
 from citadel.tabular.structure import EXCEL_CHUNK_BUDGET, _chunk_rows, _detect_boundaries
@@ -13,10 +14,8 @@ async def _probe(label: str, grid: list[list[str]], attempt: int) -> tuple[str, 
 
 async def main() -> None:
     path = "/home/masterkenway/Downloads/ocr_input/test(1).xlsx"
-    with open(path, "rb") as handle:
-        blob = handle.read()
+    blob = pathlib.Path(path).read_bytes()
 
-    print(f"repeats={REPEATS} budget={EXCEL_CHUNK_BUDGET} (single-chunk regions only)\n", flush=True)
     targets: list[tuple[str, int, list[list[str]]]] = []
     for sheet in load_all_sheets(blob):
         for index, region in enumerate(find_regions(sheet)):
@@ -33,10 +32,9 @@ async def main() -> None:
     for label, attempt, boxes in results:
         grouped.setdefault(label, []).append((attempt, boxes))
 
-    for label, rows, _grid in targets:
-        print(f"{label} rows={rows}", flush=True)
+    for label, _rows, _grid in targets:
         for attempt, boxes in sorted(grouped.get(label, [])):
-            print(f"{'':6s}attempt={attempt} n={len(boxes)} {boxes}", flush=True)
+            pass
 
 
 if __name__ == "__main__":

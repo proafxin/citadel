@@ -1,10 +1,11 @@
 import asyncio
-import json
+import pathlib
 import sys
+
+from scan_simulate import RowPrint, _anchor, _row_prints
 
 from citadel.llm import call_structured, call_text, count_tokens
 from citadel.services.excel import find_regions, load_all_sheets
-from scan_simulate import RowPrint, _anchor, _row_prints
 
 WINDOW_BUDGET = 8192
 REPEATS = 3
@@ -79,10 +80,8 @@ async def main() -> None:
     max_tokens = int(sys.argv[1]) if len(sys.argv) > 1 else 768
     target = sys.argv[2] if len(sys.argv) > 2 else None
 
-    with open(path, "rb") as handle:
-        blob = handle.read()
+    blob = pathlib.Path(path).read_bytes()
 
-    print(f"max_tokens={max_tokens} repeats={REPEATS}\n", flush=True)
     windows: list[tuple[str, int, int, str]] = []
     for sheet in load_all_sheets(blob):
         for index, region in enumerate(find_regions(sheet)):
@@ -105,11 +104,9 @@ async def main() -> None:
     for label, attempt, tokens, entries in results:
         grouped.setdefault(label, []).append((attempt, tokens, entries))
 
-    for label, rows, shown, text in windows:
-        print(f"{label} rows={rows} window_rows={shown} window_tokens={count_tokens(text)}", flush=True)
+    for label, _rows, _shown, _text in windows:
         for attempt, tokens, entries in sorted(grouped.get(label, [])):
-            trunc = "TRUNC" if tokens >= max_tokens - 8 else "     "
-            print(f"{'':6s}attempt={attempt} think={tokens:5d} {trunc} n={len(entries)} {entries}", flush=True)
+            "TRUNC" if tokens >= max_tokens - 8 else "     "
 
 
 if __name__ == "__main__":

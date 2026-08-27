@@ -1,5 +1,5 @@
 import asyncio
-import os
+import pathlib
 import time
 
 from citadel.services.excel import find_regions, load_all_sheets, region_grid
@@ -13,18 +13,15 @@ async def run_case(label: str, grid: list[list[str]]) -> None:
     for attempt in range(REPEATS):
         start = time.monotonic()
         structure = await _type_rows(grid, key=f"typedtest:{label}:{attempt}")
-        elapsed = time.monotonic() - start
-        print(f"{label} attempt={attempt} elapsed={elapsed:6.2f}s structure={structure}", flush=True)
+        time.monotonic() - start
         out_path = f"{OUT_DIR}/{label}_attempt{attempt}.txt"
-        with open(out_path, "w") as f:
-            f.write(f"structure={structure}\n")
+        pathlib.Path(out_path).write_text(f"structure={structure}\n", encoding="utf-8")
 
 
 async def main() -> None:
-    os.makedirs(OUT_DIR, exist_ok=True)
+    pathlib.Path(OUT_DIR).mkdir(exist_ok=True, parents=True)
 
-    with open("/home/masterkenway/Downloads/ocr_input/test(1).xlsx", "rb") as f:
-        data = f.read()
+    data = pathlib.Path("/home/masterkenway/Downloads/ocr_input/test(1).xlsx").read_bytes()
     sheets = load_all_sheets(data)
 
     sheet1 = next(s for s in sheets if s.sheet_no == 1)

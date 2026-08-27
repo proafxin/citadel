@@ -1,3 +1,4 @@
+import pathlib
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
@@ -121,8 +122,7 @@ def _label(sheet: SheetExtraction, index: int, region: Region) -> str:
 
 def main() -> None:
     path = sys.argv[1] if len(sys.argv) > 1 else "/home/masterkenway/Downloads/ocr_input/test(1).xlsx"
-    with open(path, "rb") as handle:
-        data = handle.read()
+    data = pathlib.Path(path).read_bytes()
     sheets = load_all_sheets(data)
 
     grand_old = 0
@@ -130,7 +130,7 @@ def main() -> None:
     grand_calls = 0
 
     for sheet in sheets:
-        for index, region in enumerate(find_regions(sheet)):
+        for _index, region in enumerate(find_regions(sheet)):
             prints = _row_prints(region)
             types, extent = _anchor(prints)
             first_data = next((entry.index for entry in prints if _conforms(entry, types, extent)), 0)
@@ -150,16 +150,9 @@ def main() -> None:
             grand_new += new
             grand_calls += calls
 
-            ratio = f"{new / old:.2%}" if old else "n/a"
-            print(
-                f"{_label(sheet, index, region):50s} rows={len(prints):5d} first_data={first_data:4d}"
-                f" breaks={len(breaks):5d} windows={len(windows):4d} calls={calls:4d}"
-                f" tokens {new:7d}/{old:7d} = {ratio}",
-                flush=True,
-            )
+            f"{new / old:.2%}" if old else "n/a"
 
-    saving = f"{grand_new / grand_old:.2%}" if grand_old else "n/a"
-    print(f"\nTOTAL calls={grand_calls} tokens {grand_new}/{grand_old} = {saving}", flush=True)
+    f"{grand_new / grand_old:.2%}" if grand_old else "n/a"
 
 
 if __name__ == "__main__":

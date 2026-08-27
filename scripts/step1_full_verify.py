@@ -1,4 +1,5 @@
 import asyncio
+import pathlib
 import time
 
 from citadel.services.excel import find_regions, load_all_sheets, region_grid
@@ -6,8 +7,7 @@ from citadel.tabular.structure import _detect_boundaries
 
 
 async def main() -> None:
-    with open("/home/masterkenway/Downloads/ocr_input/test(1).xlsx", "rb") as f:
-        data = f.read()
+    data = pathlib.Path("/home/masterkenway/Downloads/ocr_input/test(1).xlsx").read_bytes()
     sheets = load_all_sheets(data)
     targets = []
     for sheet in sheets:
@@ -20,12 +20,10 @@ async def main() -> None:
     start = time.monotonic()
     for label, grid in targets:
         region_start = time.monotonic()
-        boxes = await _detect_boundaries(grid, key=f"step1verify:{label}")
-        region_elapsed = time.monotonic() - region_start
-        print(f"{label:50s} grid_rows={len(grid):5d} elapsed={region_elapsed:7.2f}s boxes={boxes}", flush=True)
+        await _detect_boundaries(grid, key=f"step1verify:{label}")
+        time.monotonic() - region_start
 
-    total_elapsed = time.monotonic() - start
-    print(f"\nTOTAL elapsed={total_elapsed:.2f}s across {len(targets)} regions", flush=True)
+    time.monotonic() - start
 
 
 asyncio.run(main())
