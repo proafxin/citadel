@@ -19,11 +19,11 @@ services:
       - --gpu-memory-utilization
       - "0.98"
       - --max-model-len
-      - "32768"
+      - "24576"
       - --mm-processor-cache-gb
       - "0"
       - --max-num-seqs
-      - "32"
+      - "16"
       - --uvicorn-log-level
       - info
     environment:

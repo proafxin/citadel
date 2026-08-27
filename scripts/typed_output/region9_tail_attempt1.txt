@@ -1,0 +1,1 @@
+structure=transposed=False col_start=0 col_end=13 header_rows=None data_start=0 data_end=28 metadata_rows=None columns=None title=None caption=None notes=None

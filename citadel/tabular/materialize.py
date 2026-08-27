@@ -131,9 +131,13 @@ def sample_rows(rows: list[list[CellValue]]) -> list[list[CellValue]]:
     return [rows[int(index * step)] for index in range(SAMPLE_TABLE_ROWS)]
 
 
-def _collect_rows(grid: list[list[str]], data_start: int, data_end: int, col_start: int, count: int) -> list[list[str]]:
+def _collect_rows(
+    grid: list[list[str]], data_start: int, data_end: int, col_start: int, count: int, skip: frozenset[int]
+) -> list[list[str]]:
     collected: list[list[str]] = []
     for offset in range(data_start, data_end + 1):
+        if offset in skip:
+            continue
         raw = [_grid_cell(grid, offset, col_start + index) for index in range(count)]
         if any(raw):
             collected.append(raw)
@@ -150,7 +154,8 @@ def _materialize_relational(
 ) -> MaterializedTable:
     count = structure.col_end - structure.col_start + 1
     header_rows = structure.header_rows or []
-    collected = _collect_rows(grid, structure.data_start, structure.data_end, structure.col_start, count)
+    skip = frozenset(structure.metadata_rows or ())
+    collected = _collect_rows(grid, structure.data_start, structure.data_end, structure.col_start, count, skip)
     dtypes = [dtype_of([raw[index] for raw in collected]) for index in range(count)]
     if header_rows:
         naming_rows = _naming_rows(grid, header_rows, structure.col_start, count)
@@ -182,7 +187,7 @@ def _materialize_relational(
         title=structure.title,
         caption=structure.caption,
         notes=[*(structure.notes or []), *(extra_notes or [])],
-        anchors={**(anchors or {}), "header_rows": header_indices},
+        anchors={**(anchors or {}), "header_rows": header_indices, **({"metadata_rows": sorted(skip)} if skip else {})},
         formulas=formulas,
         header_rows=header_indices,
     )
@@ -196,9 +201,11 @@ def _materialize_transposed(
     extra_notes: list[str] | None,
     anchors: dict | None,
 ) -> MaterializedTable:
+    skip = frozenset(structure.metadata_rows or ())
     span = [
         [_grid_cell(grid, row, col) for col in range(structure.col_start, structure.col_end + 1)]
         for row in range(structure.data_start, structure.data_end + 1)
+        if row not in skip
     ]
     flipped = transpose_grid(span)
     height = len(flipped)

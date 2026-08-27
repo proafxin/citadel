@@ -160,7 +160,10 @@ def _row_line_excel(index: int, row: list[str], width: int) -> str:
 
 
 def _render_excel(grid: list[list[str]], rows: list[int], width: int) -> str:
-    header = f"{len(grid)} rows, {width} cols"
+    if len(rows) < len(grid):
+        header = f"showing rows {rows[0]}-{rows[-1]} ({len(rows)} of {len(grid)} rows in the full sheet region), {width} cols"
+    else:
+        header = f"{len(grid)} rows, {width} cols"
     lines = [_row_line_excel(index, grid[index], width) for index in rows]
     return "\n".join([header, *lines])
 
@@ -264,18 +267,20 @@ def _stage2_structure(data: dict, width: int) -> TableStructure | None:
     except (KeyError, ValueError, TypeError):
         return None
     header_rows = [int(row) for row in data.get("header_rows") or []]
+    metadata_rows = [int(row) for row in data.get("metadata_rows") or [] if data_start <= int(row) <= data_end]
     return TableStructure(
         col_start=0,
         col_end=max(width - 1, 0),
         header_rows=header_rows or None,
         data_start=data_start,
         data_end=data_end,
+        metadata_rows=metadata_rows or None,
     )
 
 
 async def _type_rows(grid: list[list[str]], *, key: str) -> TableStructure | None:
     width = max((len(row) for row in grid), default=0)
-    text = _render_markdown(grid, list(range(len(grid))), width)
+    text = _render_excel(grid, list(range(len(grid))), width)
     prompt = f"{load_prompt('table_structure_typed')}\n\n{text}"
     raw = await call_text(prompt, max_tokens=STAGE2_MAX_TOKENS, key=key)
     try:
