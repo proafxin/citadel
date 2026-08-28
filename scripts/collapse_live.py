@@ -25,6 +25,7 @@ _TABLE = {
         "data_end": {"type": "integer"},
         "metadata_rows": {"type": "array", "items": {"type": "integer"}},
         "title_row": {"type": ["integer", "null"]},
+        "transposed": {"type": "boolean"},
     },
     "required": [
         "start_row",
@@ -36,6 +37,7 @@ _TABLE = {
         "data_end",
         "metadata_rows",
         "title_row",
+        "transposed",
     ],
 }
 _SCHEMA = {
@@ -91,7 +93,7 @@ async def main() -> None:
             logger.info("  attempt=%d n=%d", attempt, len(tables))
             for table in tables:
                 logger.info(
-                    "     box=(%s,%s,%s,%s) headers=%s data=%s..%s meta=%s title_row=%s",
+                    "     box=(%s,%s,%s,%s) headers=%s data=%s..%s meta=%s title_row=%s transposed=%s",
                     table.get("start_row"),
                     table.get("end_row"),
                     table.get("start_col"),
@@ -101,6 +103,7 @@ async def main() -> None:
                     table.get("data_end"),
                     table.get("metadata_rows"),
                     table.get("title_row"),
+                    table.get("transposed"),
                 )
         logger.info("  table-count distribution: %s", dict(sorted(counts.items())))
 

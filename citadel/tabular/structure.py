@@ -44,6 +44,7 @@ _EXTRACT_ALL_SCHEMA = {
                     "data_end": {"type": "integer"},
                     "metadata_rows": {"type": "array", "items": {"type": "integer"}},
                     "title_row": {"type": ["integer", "null"]},
+                    "transposed": {"type": "boolean"},
                 },
                 "required": [
                     "start_row",
@@ -55,6 +56,7 @@ _EXTRACT_ALL_SCHEMA = {
                     "data_end",
                     "metadata_rows",
                     "title_row",
+                    "transposed",
                 ],
             },
         }
