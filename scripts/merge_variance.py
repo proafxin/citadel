@@ -6,13 +6,11 @@ import sys
 from typing import TYPE_CHECKING
 
 from citadel.services.excel import (
-    RawCellValue,
     Region,
     TableBounds,
     find_regions,
     load_all_sheets,
     region_grid,
-    region_values,
 )
 from citadel.services.grid import classify_grid
 from citadel.tabular.structure import merge_candidates, structure_candidate
@@ -24,7 +22,7 @@ logger = logging.getLogger("merge")
 SHEET_NO = 2
 
 
-async def _run(sheet, candidates: list[tuple[Region, list[list[str]], list[list[RawCellValue]]]], attempt: int):
+async def _run(sheet, candidates: list[tuple[Region, list[list[str]]]], attempt: int):
     resolved = await asyncio.gather(
         *(
             structure_candidate(
@@ -38,14 +36,13 @@ async def _run(sheet, candidates: list[tuple[Region, list[list[str]], list[list[
                     "max_row": region.max_row,
                     "max_col": region.max_col,
                 },
-                values=values,
             )
-            for index, (region, grid, values) in enumerate(candidates)
+            for index, (region, grid) in enumerate(candidates)
         )
     )
     bounds: list[TableBounds] = []
     members: list[MaterializedTable] = []
-    for (region, _grid, _values), tables in zip(candidates, resolved, strict=True):
+    for (region, _grid), tables in zip(candidates, resolved, strict=True):
         for table in tables:
             anchors = table.anchors
             bounds.append(
@@ -72,7 +69,7 @@ async def main() -> None:
         grid = region_grid(sheet, region)
         if classify_grid(grid) != "table":
             continue
-        candidates.append((region, grid, region_values(sheet, region)))
+        candidates.append((region, grid))
     logger.info("sheet%d table-candidate regions=%d", SHEET_NO, len(candidates))
 
     counts: collections.Counter[int] = collections.Counter()

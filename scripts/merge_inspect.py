@@ -2,7 +2,7 @@ import asyncio
 import logging
 import pathlib
 
-from citadel.services.excel import find_regions, load_all_sheets, region_grid, region_values
+from citadel.services.excel import find_regions, load_all_sheets, region_grid
 from citadel.tabular.structure import _candidate_summary, structure_candidate
 
 logger = logging.getLogger("merge")
@@ -24,7 +24,6 @@ async def main() -> None:
                 known_table=False,
                 sheet_no=sheet.sheet_no,
                 anchors={},
-                values=region_values(sheet, region),
             )
             for position, table in enumerate(tables):
                 logger.info("    table[%d] title=%r n_rows=%d", position, table.title, table.n_rows)

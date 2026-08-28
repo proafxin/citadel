@@ -195,16 +195,23 @@ def _title_in_columns(grid: list[list[str]], row: object, data_start: int, col_s
     return " ".join(dict.fromkeys(parts)) or None
 
 
-def _structure_text(grid: list[list[str]]) -> str:
+def _structure_render(grid: list[list[str]]) -> tuple[str, frozenset[int]]:
     width = max((len(row) for row in grid), default=0)
     cells = sum(1 for row in grid for cell in row if cell.strip())
-    if cells > FULL_RENDER_CELLS:
-        return _candidate_text(grid, full=False, budget=SINGLE_TABLE_BUDGET)
-    lines = [_row_line(index, row, width, None) for index, row in enumerate(grid)]
-    return f"{len(grid)} rows, {width} cols\n" + "\n".join(lines)
+    if cells <= FULL_RENDER_CELLS:
+        rows = list(range(len(grid)))
+        body = "\n".join(_row_line(index, grid[index], width, None) for index in rows)
+        return f"{len(grid)} rows, {width} cols\n{body}", frozenset(rows)
+    kinds = column_kinds(grid)
+    hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))
+    header = f"{len(grid)} rows, {width} cols; column kinds: {hint}"
+    rows = _budgeted_sample(grid, width, max(SINGLE_TABLE_BUDGET - count_tokens(header), 0))
+    return f"{header}\n{_payload_text(grid, rows, width, _MAX_CELL)}", frozenset(rows)
 
 
-def _entry_structure(grid: list[list[str]], entry: dict, width: int, *, single: bool) -> TableStructure | None:
+def _entry_structure(
+    grid: list[list[str]], entry: dict, width: int, *, single: bool, rendered: frozenset[int]
+) -> TableStructure | None:
     try:
         data_start = int(entry["data_start"])
         data_end = int(entry["data_end"])
@@ -220,7 +227,9 @@ def _entry_structure(grid: list[list[str]], entry: dict, width: int, *, single: 
         col_start = min(max(int(entry.get("start_col") or 0), 0), last_col)
         col_end = min(max(int(entry.get("end_col") or last_col), col_start), last_col)
     headers = sorted({row for row in entry.get("header_rows") or [] if 0 <= row <= limit})
-    metadata = sorted({row for row in entry.get("metadata_rows") or [] if data_start <= row <= data_end})
+    metadata = sorted(
+        {row for row in entry.get("metadata_rows") or [] if data_start <= row <= data_end and row in rendered}
+    )
     return TableStructure(
         col_start=col_start,
         col_end=col_end,
@@ -250,14 +259,13 @@ def _entry_anchors(base: dict | None, entry: dict, structure: TableStructure) ->
 
 async def _structure_excel(
     grid: list[list[str]],
-    values: list[list[object]] | None,
     *,
     key: str,
     sheet_no: int,
     anchors: dict | None,
 ) -> list[MaterializedTable]:
     width = max((len(row) for row in grid), default=0)
-    text = _structure_text(grid)
+    text, rendered = _structure_render(grid)
     description = await call_text(
         f"{load_prompt('table_structure_typed')}\n\n{text}", max_tokens=STAGE2_MAX_TOKENS, key=f"{key}:describe"
     )
@@ -272,7 +280,7 @@ async def _structure_excel(
     single = len(entries) == 1
     tables: list[MaterializedTable] = []
     for entry in entries:
-        structure = _entry_structure(grid, entry, width, single=single)
+        structure = _entry_structure(grid, entry, width, single=single, rendered=rendered)
         if structure is None:
             continue
         table = materialize(grid, structure, sheet_no=sheet_no, anchors=_entry_anchors(anchors, entry, structure))
@@ -304,12 +312,11 @@ async def structure_candidate(
     known_table: bool = True,
     sheet_no: int = 0,
     anchors: dict | None = None,
-    values: list[list[object]] | None = None,
 ) -> list[MaterializedTable]:
     if not grid:
         return []
     if not known_table:
-        return await _structure_excel(grid, values, key=key, sheet_no=sheet_no, anchors=anchors)
+        return await _structure_excel(grid, key=key, sheet_no=sheet_no, anchors=anchors)
     text = _candidate_text(grid, full=full, budget=None if full else SINGLE_TABLE_BUDGET)
     prompt = f"{load_prompt('table_structure_known')}\n{text}"
     cap = get_text_capacity()
