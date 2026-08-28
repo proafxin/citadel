@@ -25,6 +25,42 @@ class Position(Protocol):
 _MAX_CELL = 40
 SINGLE_TABLE_BUDGET = 8192
 EXCEL_CHUNK_BUDGET = 8192
+FULL_RENDER_CELLS = 400
+
+_EXTRACT_ALL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start_row": {"type": "integer"},
+                    "end_row": {"type": "integer"},
+                    "start_col": {"type": "integer"},
+                    "end_col": {"type": "integer"},
+                    "header_rows": {"type": "array", "items": {"type": "integer"}},
+                    "data_start": {"type": "integer"},
+                    "data_end": {"type": "integer"},
+                    "metadata_rows": {"type": "array", "items": {"type": "integer"}},
+                    "title_row": {"type": ["integer", "null"]},
+                },
+                "required": [
+                    "start_row",
+                    "end_row",
+                    "start_col",
+                    "end_col",
+                    "header_rows",
+                    "data_start",
+                    "data_end",
+                    "metadata_rows",
+                    "title_row",
+                ],
+            },
+        }
+    },
+    "required": ["tables"],
+}
 
 _TABLE_ENTRY_SCHEMA = {
     "type": "object",
@@ -162,23 +198,13 @@ def _row_line_excel(index: int, row: list[str], width: int) -> str:
 
 def _render_excel(grid: list[list[str]], rows: list[int], width: int) -> str:
     if len(rows) < len(grid):
-        header = f"showing rows {rows[0]}-{rows[-1]} ({len(rows)} of {len(grid)} rows in the full sheet region), {width} cols"
+        header = (
+            f"showing rows {rows[0]}-{rows[-1]} "
+            f"({len(rows)} of {len(grid)} rows in the full sheet region), {width} cols"
+        )
     else:
         header = f"{len(grid)} rows, {width} cols"
     lines = [_row_line_excel(index, grid[index], width) for index in rows]
-    return "\n".join([header, *lines])
-
-
-def _row_line_markdown(index: int, row: list[str], width: int) -> str:
-    cells = [(row[col] if col < len(row) else "").strip() for col in range(width)]
-    return f"| {index} | " + " | ".join(cells) + " |"
-
-
-def _render_markdown(grid: list[list[str]], rows: list[int], width: int) -> str:
-    header = f"{len(grid)} rows, {width} cols\n"
-    header += "| row | " + " | ".join(f"c{col}" for col in range(width)) + " |\n"
-    header += "|---" * (width + 1) + "|"
-    lines = [_row_line_markdown(index, grid[index], width) for index in rows]
     return "\n".join([header, *lines])
 
 
@@ -388,6 +414,14 @@ def _title_from_row(grid: list[list[str]], data: dict, data_start: int) -> str |
     return " ".join(dict.fromkeys(parts)) or None
 
 
+def _title_in_columns(grid: list[list[str]], row: object, data_start: int, col_start: int, col_end: int) -> str | None:
+    if not isinstance(row, int) or not 0 <= row < len(grid) or row >= data_start:
+        return None
+    cells = grid[row][col_start : col_end + 1]
+    parts = [cell.strip() for cell in cells if cell.strip()]
+    return " ".join(dict.fromkeys(parts)) or None
+
+
 def _stage2_structure(data: dict, width: int, grid: list[list[str]]) -> TableStructure | None:
     try:
         data_start, data_end = int(data["data_start"]), int(data["data_end"])
@@ -500,16 +534,6 @@ def _combine_structure(
     )
 
 
-def _preamble_title(grid: list[list[str]], box: tuple[int, int, int, int], structure: TableStructure) -> str | None:
-    start_row = box[0]
-    headers = {start_row + row for row in (structure.header_rows or [])}
-    limit = min(start_row + structure.data_start, len(grid))
-    parts = [
-        cell.strip() for row in range(start_row, limit) if row not in headers for cell in grid[row] if cell.strip()
-    ]
-    return " ".join(dict.fromkeys(parts)) or None
-
-
 def _apply_scan(
     structure: TableStructure, box: tuple[int, int, int, int], scanned: list[int], rows: int
 ) -> TableStructure:
@@ -524,6 +548,59 @@ def _apply_scan(
     )
 
 
+def _structure_text(grid: list[list[str]]) -> str:
+    width = max((len(row) for row in grid), default=0)
+    cells = sum(1 for row in grid for cell in row if cell.strip())
+    if cells > FULL_RENDER_CELLS:
+        return _candidate_text(grid, full=False, budget=SINGLE_TABLE_BUDGET)
+    lines = [_row_line(index, row, width, None) for index, row in enumerate(grid)]
+    return f"{len(grid)} rows, {width} cols\n" + "\n".join(lines)
+
+
+def _entry_structure(grid: list[list[str]], entry: dict, width: int, *, single: bool) -> TableStructure | None:
+    try:
+        data_start = int(entry["data_start"])
+        data_end = int(entry["data_end"])
+    except (KeyError, ValueError, TypeError):
+        return None
+    limit = max(len(grid) - 1, 0)
+    last_col = max(width - 1, 0)
+    data_start = min(max(data_start, 0), limit)
+    data_end = min(max(data_end, data_start), limit)
+    if single:
+        col_start, col_end = 0, last_col
+    else:
+        col_start = min(max(int(entry.get("start_col") or 0), 0), last_col)
+        col_end = min(max(int(entry.get("end_col") or last_col), col_start), last_col)
+    headers = sorted({row for row in entry.get("header_rows") or [] if 0 <= row <= limit})
+    metadata = sorted({row for row in entry.get("metadata_rows") or [] if data_start <= row <= data_end})
+    return TableStructure(
+        col_start=col_start,
+        col_end=col_end,
+        header_rows=headers or None,
+        data_start=data_start,
+        data_end=data_end,
+        metadata_rows=metadata or None,
+        title=_title_in_columns(grid, entry.get("title_row"), data_start, col_start, col_end),
+    )
+
+
+def _entry_anchors(base: dict | None, entry: dict, structure: TableStructure) -> dict:
+    known = base or {}
+    row0, col0 = known.get("min_row", 0), known.get("min_col", 0)
+    rows = [structure.data_start, *(structure.header_rows or []), *(structure.metadata_rows or [])]
+    title_row = entry.get("title_row")
+    if isinstance(title_row, int) and title_row < structure.data_start:
+        rows.append(title_row)
+    return {
+        **known,
+        "min_row": row0 + min(rows),
+        "max_row": row0 + max(structure.data_end, *(structure.metadata_rows or [structure.data_end])),
+        "min_col": col0 + structure.col_start,
+        "max_col": col0 + structure.col_end,
+    }
+
+
 async def _structure_excel(
     grid: list[list[str]],
     values: list[list[object]] | None,
@@ -533,43 +610,25 @@ async def _structure_excel(
     anchors: dict | None,
 ) -> list[MaterializedTable]:
     width = max((len(row) for row in grid), default=0)
-    scanned: list[int] = []
-    if values is not None and len(_chunk_rows(grid, width, EXCEL_CHUNK_BUDGET)) > 1:
-        boxes, scanned = await _anchor_boundaries(grid, values, key=f"{key}:scan")
-    else:
-        boxes = await _detect_boundaries(grid, key=f"{key}:stage1")
-    if not boxes:
-        boxes = [(0, len(grid) - 1, 0, max(width - 1, 0))]
-    subgrids = [_slice_grid(grid, *box) for box in boxes]
-    anomalies = [_scan_anomalies(values, box) if values is not None else [] for box in boxes]
-    typed = list(
-        await asyncio.gather(
-            *(
-                _type_rows(subgrid, key=f"{key}:stage2:{index}", anomalies=found)
-                for index, (subgrid, found) in enumerate(zip(subgrids, anomalies, strict=True))
-            )
-        )
+    text = _structure_text(grid)
+    description = await call_text(
+        f"{load_prompt('table_structure_typed')}\n\n{text}", max_tokens=STAGE2_MAX_TOKENS, key=f"{key}:describe"
     )
-    structures: list[TableStructure | None] = [
-        _combine_structure(grid, box, entry, len(subgrid))
-        for box, subgrid, entry in zip(boxes, subgrids, typed, strict=True)
-    ]
+    extract_prompt = f"{load_prompt('table_extract_all')}\n\n{text}\n\n{description}"
+    cap = get_text_capacity()
+    await cap.acquire(f"{key}:extract")
+    try:
+        data = await call_structured(extract_prompt, _EXTRACT_ALL_SCHEMA)
+    finally:
+        await cap.release(f"{key}:extract")
+    entries = data.get("tables") or []
+    single = len(entries) == 1
     tables: list[MaterializedTable] = []
-    for box, subgrid, structure in zip(boxes, subgrids, structures, strict=True):
+    for entry in entries:
+        structure = _entry_structure(grid, entry, width, single=single)
         if structure is None:
             continue
-        if scanned:
-            structure = _apply_scan(structure, box, scanned, len(subgrid))
-        base = anchors or {}
-        row0, col0 = base.get("min_row", 0), base.get("min_col", 0)
-        scoped = {
-            **base,
-            "min_row": row0 + box[0],
-            "max_row": row0 + box[1],
-            "min_col": col0 + box[2],
-            "max_col": col0 + box[3],
-        }
-        table = materialize(subgrid, structure, sheet_no=sheet_no, anchors=scoped)
+        table = materialize(grid, structure, sheet_no=sheet_no, anchors=_entry_anchors(anchors, entry, structure))
         if table.n_rows:
             tables.append(table)
     return tables

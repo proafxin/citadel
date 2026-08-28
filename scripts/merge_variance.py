@@ -76,8 +76,8 @@ async def main() -> None:
     logger.info("sheet%d table-candidate regions=%d", SHEET_NO, len(candidates))
 
     counts: collections.Counter[int] = collections.Counter()
-    for attempt in range(runs):
-        bounds, members, merged = await _run(sheet, candidates, attempt)
+    attempts = await asyncio.gather(*(_run(sheet, candidates, attempt) for attempt in range(runs)))
+    for attempt, (bounds, members, merged) in enumerate(attempts):
         counts[len(merged)] += 1
         logger.info("--- run %d: candidates=%d merged=%d ---", attempt, len(members), len(merged))
         for index, (bound, member) in enumerate(zip(bounds, members, strict=True)):

@@ -1,42 +1,39 @@
 
 services:
   qwen:
-    image: vllm/vllm-openai:latest
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: citadel-qwen
     restart: always
     ipc: host
     command:
       - --model
-      - QuantTrio/Qwen3-VL-30B-A3B-Instruct-AWQ
-      - --served-model-name
-      - qwen
+      - /models/Qwen3.8-27B-Q4_K_M.gguf
+      - --mmproj
+      - /models/mmproj-Qwen3.8-27B-bf16.gguf
+      - -ngl
+      - "999"
       - --host
       - 0.0.0.0
       - --port
       - "8100"
-      - --kv-cache-dtype
-      - auto
-      - --gpu-memory-utilization
-      - "0.98"
-      - --max-model-len
-      - "24576"
-      - --mm-processor-cache-gb
-      - "0"
-      - --max-num-seqs
-      - "16"
-      - --uvicorn-log-level
-      - info
-    environment:
-      HF_TOKEN: ${HF_TOKEN:-}
-      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      - --ctx-size
+      - "65536"
+      - --parallel
+      - "4"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --alias
+      - qwen
+      - --chat-template-kwargs
+      - '{"enable_thinking": false}'
     ports:
       - "8100:8100"
     ulimits:
       memlock: -1
       stack: 67108864
     volumes:
-      - ${HOME}/.cache/citadel-qwen:/root/.cache/huggingface
-      - qwen-vllm-cache:/root/.cache/vllm
       - ./data/gguf_models:/models:ro
     deploy:
       resources:
@@ -46,47 +43,47 @@ services:
               count: all
               capabilities: [gpu]
 
-  # embedding:
-  #   image: vllm/vllm-openai:latest
-  #   container_name: citadel-embedding
-  #   restart: always
-  #   ipc: host
-  #   command:
-  #     - --model
-  #     - microsoft/harrier-oss-v1-0.6b
-  #     - --served-model-name
-  #     - harrier
-  #     - --host
-  #     - 0.0.0.0
-  #     - --port
-  #     - "8101"
-  #     - --pooler-config
-  #     - '{"task": "embed", "pooling_type": "LAST"}'
-  #     - --gpu-memory-utilization
-  #     - "0.07"
-  #     - --max-num-seqs
-  #     - "256"
-  #     - --max-model-len
-  #     - "8192"
-  #     - --uvicorn-log-level
-  #     - info
-  #   environment:
-  #     HF_TOKEN: ${HF_TOKEN:-}
-  #   ports:
-  #     - "8101:8101"
-  #   ulimits:
-  #     memlock: -1
-  #     stack: 67108864
-  #   volumes:
-  #     - ${HOME}/.cache/citadel-embedding:/root/.cache/huggingface
-  #     - embedding-vllm-cache:/root/.cache/vllm
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+  embedding:
+    image: vllm/vllm-openai:latest
+    container_name: citadel-embedding
+    restart: always
+    ipc: host
+    command:
+      - --model
+      - microsoft/harrier-oss-v1-0.6b
+      - --served-model-name
+      - harrier
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8101"
+      - --pooler-config
+      - '{"task": "embed", "pooling_type": "LAST"}'
+      - --gpu-memory-utilization
+      - "0.11"
+      - --max-num-seqs
+      - "256"
+      - --max-model-len
+      - "3072"
+      - --uvicorn-log-level
+      - info
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    ports:
+      - "8101:8101"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes:
+      - ${HOME}/.cache/citadel-embedding:/root/.cache/huggingface
+      - embedding-vllm-cache:/root/.cache/vllm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   redis:
     image: redis:7-alpine
@@ -127,5 +124,4 @@ services:
 
 volumes:
   postgres-data:
-  qwen-vllm-cache:
   embedding-vllm-cache:

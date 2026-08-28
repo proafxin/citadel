@@ -29,7 +29,7 @@ NO_TIMEOUT = httpx.Timeout(None)
 STRUCT_MAX_TOKENS = 4096
 STRUCTURE_MAX_TOKENS = 2048
 SYNTH_MAX_TOKENS = 8192
-SLM_MODEL_LEN = 32768
+SLM_MODEL_LEN = 16384
 PAGE_OCR_MAX_TOKENS = 3584
 RELEVANCE_BUDGET = SLM_MODEL_LEN - STRUCT_MAX_TOKENS - 2048
 
@@ -112,6 +112,7 @@ def _struct_payload(prompt: str, schema: dict, max_tokens: int = STRUCT_MAX_TOKE
         "max_tokens": max_tokens,
         "response_format": {"type": "json_schema", "json_schema": {"name": "output", "schema": schema}},
         "chat_template_kwargs": {"enable_thinking": False},
+        "reasoning_effort": "none",
     }
 
 
@@ -122,6 +123,7 @@ def _text_payload(prompt: str, max_tokens: int) -> dict:
         "temperature": 0,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
+        "reasoning_effort": "none",
     }
 
 
@@ -194,6 +196,7 @@ async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -
         "temperature": 0,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
+        "reasoning_effort": "none",
         "stream": True,
     }
     started = time.time()
@@ -336,6 +339,7 @@ async def synthesize(query: str, passages: list[str], results: list[str]) -> Asy
         "temperature": 0.3,
         "max_tokens": SYNTH_MAX_TOKENS,
         "chat_template_kwargs": {"enable_thinking": False},
+        "reasoning_effort": "none",
         "stream": True,
     }
     key = _local_key("synthesize")
@@ -359,6 +363,7 @@ async def write_final_report(query: str, text_report: str, table_report: str) ->
         "temperature": 0.3,
         "max_tokens": SYNTH_MAX_TOKENS,
         "chat_template_kwargs": {"enable_thinking": False},
+        "reasoning_effort": "none",
         "stream": True,
     }
     key = _local_key("final_report")
