@@ -1,7 +1,8 @@
-import asyncio
 import logging
+from collections.abc import Sequence
+from datetime import datetime
 
-from citadel.llm import call_structured, call_text, count_tokens, count_tokens_batch
+from citadel.llm import call_structured, count_tokens, count_tokens_batch
 from citadel.prompts import load_prompt
 from citadel.schemas.table import TableStructure
 from citadel.services.capacity import get_text_capacity
@@ -12,7 +13,8 @@ logger = logging.getLogger(__name__)
 
 _MAX_CELL = 40
 SINGLE_TABLE_BUDGET = 8192
-FULL_RENDER_CELLS = 400
+WINDOW_BUDGET = 2048
+_HEADER_ALLOWANCE = 64
 
 _EXTRACT_ALL_SCHEMA = {
     "type": "object",
@@ -180,23 +182,65 @@ def _title_in_columns(grid: list[list[str]], row: object, data_start: int, col_s
     return " ".join(dict.fromkeys(parts)) or None
 
 
-def _structure_render(grid: list[list[str]]) -> tuple[str, frozenset[int]]:
+def _structure_render(grid: list[list[str]], start: int) -> tuple[str, int]:
     width = max((len(row) for row in grid), default=0)
-    cells = sum(1 for row in grid for cell in row if cell.strip())
-    if cells <= FULL_RENDER_CELLS:
-        rows = list(range(len(grid)))
-        body = "\n".join(_row_line(index, grid[index], width, None) for index in rows)
-        return f"{len(grid)} rows, {width} cols\n{body}", frozenset(rows)
-    kinds = column_kinds(grid)
-    hint = ", ".join(f"col{col}:{kinds[col]}" for col in range(width))
-    header = f"{len(grid)} rows, {width} cols; column kinds: {hint}"
-    rows = _budgeted_sample(grid, width, max(SINGLE_TABLE_BUDGET - count_tokens(header), 0))
-    return f"{header}\n{_payload_text(grid, rows, width, _MAX_CELL)}", frozenset(rows)
+    lines = [_row_line(index, grid[index], width, None) for index in range(start, len(grid))]
+    budget = max(WINDOW_BUDGET - _HEADER_ALLOWANCE, 0)
+    used = 0
+    kept: list[str] = []
+    for line, cost in zip(lines, count_tokens_batch(lines), strict=True):
+        if kept and used + cost > budget:
+            break
+        kept.append(line)
+        used += cost
+    last = start + len(kept) - 1
+    if last < len(grid) - 1:
+        header = f"rows {start}-{last} of {len(grid)} rows in this region, {width} cols"
+    else:
+        header = f"{len(grid)} rows, {width} cols"
+    return f"{header}\n" + "\n".join(kept), last
 
 
-def _entry_structure(
-    grid: list[list[str]], entry: dict, width: int, *, single: bool, rendered: frozenset[int]
-) -> TableStructure | None:
+def _value_class(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int | float):
+        return "number"
+    if isinstance(value, datetime):
+        return "temporal"
+    return "string" if str(value).strip() else None
+
+
+def _row_types(values: Sequence[Sequence[object]], row: int) -> dict[int, str]:
+    if not 0 <= row < len(values):
+        return {}
+    return {col: kind for col, cell in enumerate(values[row]) if (kind := _value_class(cell)) is not None}
+
+
+def _schema(values: Sequence[Sequence[object]], first: int, last: int) -> dict[int, str]:
+    profile: dict[int, str] = {}
+    for row in range(first, min(last, len(values) - 1) + 1):
+        for col, kind in _row_types(values, row).items():
+            profile.setdefault(col, kind)
+    return profile
+
+
+def _conforms(schema: dict[int, str], row: dict[int, str]) -> bool:
+    if not row:
+        return False
+    return all(schema.get(col) in {None, kind} for col, kind in row.items())
+
+
+def _extend(values: Sequence[Sequence[object]], schema: dict[int, str], start: int) -> int:
+    row = start
+    while row < len(values) and _conforms(schema, _row_types(values, row)):
+        row += 1
+    return row - 1
+
+
+def _entry_structure(grid: list[list[str]], entry: dict, width: int, *, single: bool) -> TableStructure | None:
     try:
         data_start = int(entry["data_start"])
         data_end = int(entry["data_end"])
@@ -212,9 +256,7 @@ def _entry_structure(
         col_start = min(max(int(entry.get("start_col") or 0), 0), last_col)
         col_end = min(max(int(entry.get("end_col") or last_col), col_start), last_col)
     headers = sorted({row for row in entry.get("header_rows") or [] if 0 <= row <= limit})
-    metadata = sorted(
-        {row for row in entry.get("metadata_rows") or [] if data_start <= row <= data_end and row in rendered}
-    )
+    metadata = sorted({row for row in entry.get("metadata_rows") or [] if data_start <= row <= data_end})
     return TableStructure(
         col_start=col_start,
         col_end=col_end,
@@ -242,30 +284,50 @@ def _entry_anchors(base: dict | None, entry: dict, structure: TableStructure) ->
     }
 
 
+async def _window_entries(grid: list[list[str]], start: int, key: str) -> tuple[list[dict], int]:
+    text, last = _structure_render(grid, start)
+    cap = get_text_capacity()
+    await cap.acquire(key)
+    try:
+        data = await call_structured(f"{load_prompt('table_extract_all')}\n\n{text}", _EXTRACT_ALL_SCHEMA)
+    finally:
+        await cap.release(key)
+    return data.get("tables") or [], last
+
+
 async def _structure_excel(
     grid: list[list[str]],
+    values: Sequence[Sequence[object]] | None,
     *,
     key: str,
     sheet_no: int,
     anchors: dict | None,
 ) -> list[MaterializedTable]:
     width = max((len(row) for row in grid), default=0)
-    text, rendered = _structure_render(grid)
-    description = await call_text(
-        f"{load_prompt('table_structure_typed')}\n\n{text}", max_tokens=STAGE2_MAX_TOKENS, key=f"{key}:describe"
-    )
-    extract_prompt = f"{load_prompt('table_extract_all')}\n\n{text}\n\n{description}"
-    cap = get_text_capacity()
-    await cap.acquire(f"{key}:extract")
-    try:
-        data = await call_structured(extract_prompt, _EXTRACT_ALL_SCHEMA)
-    finally:
-        await cap.release(f"{key}:extract")
-    entries = data.get("tables") or []
-    single = len(entries) == 1
+    collected: list[dict] = []
+    start = 0
+    window = 0
+    while start < len(grid):
+        entries, last = await _window_entries(grid, start, f"{key}:w{window}")
+        window += 1
+        if not entries:
+            break
+        collected.extend(entries)
+        if last >= len(grid) - 1:
+            break
+        tail = max((int(entry.get("data_end") or 0) for entry in entries), default=last)
+        if values is None:
+            start = last + 1
+            continue
+        schema = _schema(values, max(int(entries[-1].get("data_start") or 0), 0), tail)
+        reach = _extend(values, schema, last + 1)
+        entries[-1]["data_end"] = max(tail, reach)
+        start = reach + 1
+
+    single = len(collected) == 1
     tables: list[MaterializedTable] = []
-    for entry in entries:
-        structure = _entry_structure(grid, entry, width, single=single, rendered=rendered)
+    for entry in collected:
+        structure = _entry_structure(grid, entry, width, single=single)
         if structure is None:
             continue
         table = materialize(grid, structure, sheet_no=sheet_no, anchors=_entry_anchors(anchors, entry, structure))
@@ -297,11 +359,12 @@ async def structure_candidate(
     known_table: bool = True,
     sheet_no: int = 0,
     anchors: dict | None = None,
+    values: Sequence[Sequence[object]] | None = None,
 ) -> list[MaterializedTable]:
     if not grid:
         return []
     if not known_table:
-        return await _structure_excel(grid, key=key, sheet_no=sheet_no, anchors=anchors)
+        return await _structure_excel(grid, values, key=key, sheet_no=sheet_no, anchors=anchors)
     text = _candidate_text(grid, full=full, budget=None if full else SINGLE_TABLE_BUDGET)
     prompt = f"{load_prompt('table_structure_known')}\n{text}"
     cap = get_text_capacity()
@@ -321,5 +384,3 @@ async def structure_candidate(
         if table.n_rows:
             tables.append(table)
     return tables
-
-

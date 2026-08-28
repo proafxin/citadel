@@ -13,4 +13,4 @@ until curl -sf "http://localhost:${CITADEL_QWEN_PORT:-8100}/v1/models" >/dev/nul
     sleep 2
 done
 
-echo "infra up — qwen, redis ready. now run: bash scripts/run.sh"
+echo "infra up — qwen, redis ready (embedding disabled). now run: bash scripts/run.sh"

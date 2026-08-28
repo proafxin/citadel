@@ -3,7 +3,21 @@ import sys
 
 from citadel.services.excel import find_regions, load_all_sheets, region_grid
 from citadel.services.grid import classify_grid, grid_text
-from citadel.tabular.structure import _structure_render
+from citadel.tabular.structure import _row_line
+
+HEAD_ROWS = 40
+TAIL_ROWS = 15
+
+
+def _full(grid: list[list[str]]) -> str:
+    width = max((len(row) for row in grid), default=0)
+    lines = [_row_line(index, row, width, None) for index, row in enumerate(grid)]
+    if len(lines) <= HEAD_ROWS + TAIL_ROWS:
+        body = "\n".join(lines)
+    else:
+        skipped = len(lines) - HEAD_ROWS - TAIL_ROWS
+        body = "\n".join([*lines[:HEAD_ROWS], f"... {skipped} rows omitted ...", *lines[-TAIL_ROWS:]])
+    return f"{len(grid)} rows, {width} cols\n{body}"
 
 
 def main() -> None:
@@ -18,11 +32,15 @@ def main() -> None:
                 grid = region_grid(sheet, region)
                 kind = classify_grid(grid)
                 if kind != "table":
-                    parts.append(f"\n### region{index} — {kind}, not structured\n\n```\n{grid_text(grid)}\n```")
+                    parts.append(
+                        f"\n### region{index} — sheet rows {region.min_row}-{region.max_row}, "
+                        f"cols {region.min_col}-{region.max_col} — {kind}, not structured"
+                        f"\n\n```\n{grid_text(grid)}\n```"
+                    )
                     continue
-                text, rendered = _structure_render(grid)
                 parts.append(
-                    f"\n### region{index} — rows {len(grid)}, rendered {len(rendered)}\n\n```\n{text}\n```"
+                    f"\n### region{index} — sheet rows {region.min_row}-{region.max_row}, "
+                    f"cols {region.min_col}-{region.max_col}\n\n```\n{_full(grid)}\n```"
                 )
         (out_dir / f"{path.stem.replace(' ', '_')}.md").write_text("\n".join(parts) + "\n")
 

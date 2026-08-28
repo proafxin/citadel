@@ -23,9 +23,7 @@ async def _region_structure(key: str, grid: list[list[str]]) -> list[dict]:
     description = await call_text(
         f"{load_prompt('table_structure_typed')}\n\n{text}", max_tokens=STAGE2_MAX_TOKENS, key=key
     )
-    data = await call_structured(
-        f"{load_prompt('table_extract_all')}\n\n{text}\n\n{description}", _EXTRACT_ALL_SCHEMA
-    )
+    data = await call_structured(f"{load_prompt('table_extract_all')}\n\n{text}\n\n{description}", _EXTRACT_ALL_SCHEMA)
     return data.get("tables") or []
 
 

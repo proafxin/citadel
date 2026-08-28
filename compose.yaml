@@ -7,9 +7,9 @@ services:
     ipc: host
     command:
       - --model
-      - /models/Qwen3.8-27B-UD-Q4_K_M.gguf
+      - /models/Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf
       - --mmproj
-      - /models/mmproj-BF16.gguf
+      - /models/mmproj-Qwen3.8-27B-BF16.gguf
       - -ngl
       - "999"
       - --host
@@ -19,15 +19,11 @@ services:
       - --ctx-size
       - "131072"
       - --parallel
-      - "16"
+      - "8"
       - --cache-type-k
       - q8_0
       - --cache-type-v
       - q8_0
-      - --batch-size
-      - "512"
-      - --ubatch-size
-      - "512"
       - --alias
       - qwen
       - --chat-template-kwargs
@@ -64,7 +60,7 @@ services:
   #     - --pooler-config
   #     - '{"task": "embed", "pooling_type": "LAST"}'
   #     - --gpu-memory-utilization
-  #     - "0.08"
+  #     - "0.11"
   #     - --max-num-seqs
   #     - "256"
   #     - --max-model-len
@@ -128,3 +124,4 @@ services:
 
 volumes:
   postgres-data:
+  embedding-vllm-cache:

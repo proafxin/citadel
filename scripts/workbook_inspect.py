@@ -7,7 +7,7 @@ import openpyxl
 
 from citadel.services.excel import find_regions, load_all_sheets, region_grid
 from citadel.services.grid import classify_grid
-from citadel.tabular.structure import FULL_RENDER_CELLS
+from citadel.tabular.structure import _structure_render
 
 logger = logging.getLogger("workbook")
 
@@ -93,14 +93,15 @@ def main() -> None:
                 grid = region_grid(sheet, region)
                 width = max((len(row) for row in grid), default=0)
                 populated = sum(1 for row in grid for cell in row if cell.strip())
+                _text, last = _structure_render(grid, 0)
                 logger.info(
-                    "    -- region%d rows=%d width=%d cells=%d kind=%s render=%s",
+                    "    -- region%d rows=%d width=%d cells=%d kind=%s first_window=0-%d",
                     index,
                     len(grid),
                     width,
                     populated,
                     classify_grid(grid),
-                    "sampled" if populated > FULL_RENDER_CELLS else "full",
+                    last,
                 )
                 head = list(range(min(PREVIEW_ROWS, len(grid))))
                 _preview(grid, head)

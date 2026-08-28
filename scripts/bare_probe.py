@@ -2,6 +2,7 @@ import asyncio
 import logging
 import pathlib
 import sys
+from itertools import starmap
 
 from citadel.llm import call_text
 from citadel.services.excel import find_regions, load_all_sheets, region_grid
@@ -35,7 +36,7 @@ async def main() -> None:
                 continue
             selected.append((label, region_grid(sheet, region)))
 
-    results = await asyncio.gather(*(_probe(label, grid) for label, grid in selected))
+    results = await asyncio.gather(*starmap(_probe, selected))
     for label, total, shown, answer in results:
         logger.info("=== %s (%d rows, showing %d) ===\n%s\n", label, total, shown, answer)
 

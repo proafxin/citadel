@@ -48,7 +48,7 @@ _SCHEMA = {
 
 
 def _split(path: pathlib.Path) -> tuple[str, str]:
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     body = text.split("## input\n```\n", 1)[1]
     grid_text, rest = body.split("\n```\n\n## model output\n", 1)
     return grid_text, rest.strip()

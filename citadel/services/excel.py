@@ -230,13 +230,21 @@ def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
     ]
 
 
+def region_values(sheet: SheetExtraction, region: Region) -> list[list[RawCellValue]]:
+    values = {(cell.row, cell.col): cell.value for cell in region.cells}
+    return [
+        [values.get((row, col)) for col in range(region.min_col, region.max_col + 1)]
+        for row in range(region.min_row, region.max_row + 1)
+    ]
+
+
 def _region_anchors(region: Region) -> dict:
     return {"min_row": region.min_row, "min_col": region.min_col, "max_row": region.max_row, "max_col": region.max_col}
 
 
 async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tuple[int, SheetItem]]:
     text: list[SheetItem] = []
-    candidates: list[tuple[Region, list[list[str]]]] = []
+    candidates: list[tuple[Region, list[list[str]], list[list[RawCellValue]]]] = []
     for region in find_regions(sheet):
         grid = region_grid(sheet, region)
         kind = classify_grid(grid)
@@ -246,7 +254,7 @@ async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tup
             body = " ".join([grid_text(grid), *region_comments(region)]).strip()
             text.append(SheetText(sheet_no=sheet.sheet_no, text=body))
             continue
-        candidates.append((region, grid))
+        candidates.append((region, grid, region_values(sheet, region)))
     items: list[SheetItem] = list(text)
     if candidates:
         resolved = await asyncio.gather(
@@ -257,8 +265,9 @@ async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tup
                     known_table=False,
                     sheet_no=sheet.sheet_no,
                     anchors=_region_anchors(region),
+                    values=values,
                 )
-                for index, (region, grid) in enumerate(candidates)
+                for index, (region, grid, values) in enumerate(candidates)
             )
         )
         for tables in resolved:
