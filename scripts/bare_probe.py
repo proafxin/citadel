@@ -5,7 +5,7 @@ import sys
 
 from citadel.llm import call_text
 from citadel.services.excel import find_regions, load_all_sheets, region_grid
-from citadel.tabular.structure import _render_excel
+from citadel.tabular.structure import _row_line
 
 logger = logging.getLogger("bare")
 
@@ -16,7 +16,8 @@ SHOW_ROWS = 40
 async def _probe(label: str, grid: list[list[str]]) -> tuple[str, int, int, str]:
     width = max((len(row) for row in grid), default=0)
     rows = list(range(min(len(grid), SHOW_ROWS)))
-    text = _render_excel(grid, rows, width)
+    header = f"{len(grid)} rows, {width} cols"
+    text = "\n".join([header, *(_row_line(index, grid[index], width, None) for index in rows)])
     answer = await call_text(text, max_tokens=MAX_TOKENS, key=f"bare:{label}")
     return label, len(grid), len(rows), answer
 

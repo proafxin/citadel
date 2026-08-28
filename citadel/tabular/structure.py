@@ -1,7 +1,5 @@
 import asyncio
 import logging
-from collections import Counter
-from datetime import datetime
 from itertools import starmap
 from typing import Protocol
 
@@ -24,7 +22,6 @@ class Position(Protocol):
 
 _MAX_CELL = 40
 SINGLE_TABLE_BUDGET = 8192
-EXCEL_CHUNK_BUDGET = 8192
 FULL_RENDER_CELLS = 400
 
 _EXTRACT_ALL_SCHEMA = {
@@ -44,7 +41,6 @@ _EXTRACT_ALL_SCHEMA = {
                     "data_end": {"type": "integer"},
                     "metadata_rows": {"type": "array", "items": {"type": "integer"}},
                     "title_row": {"type": ["integer", "null"]},
-                    "transposed": {"type": "boolean"},
                 },
                 "required": [
                     "start_row",
@@ -56,7 +52,6 @@ _EXTRACT_ALL_SCHEMA = {
                     "data_end",
                     "metadata_rows",
                     "title_row",
-                    "transposed",
                 ],
             },
         }
@@ -189,231 +184,7 @@ def _entry_col_range(entry: dict) -> tuple[int, int]:
     return int(entry["col_start"]), int(entry["col_end"])
 
 
-STAGE1_MAX_TOKENS = 2048
 STAGE2_MAX_TOKENS = 4096
-
-
-def _row_line_excel(index: int, row: list[str], width: int) -> str:
-    cells = [(row[col] if col < len(row) else "").strip() for col in range(width)]
-    return f"row {index}: " + " | ".join(f"col{col}: {cell}" for col, cell in enumerate(cells))
-
-
-def _render_excel(grid: list[list[str]], rows: list[int], width: int) -> str:
-    if len(rows) < len(grid):
-        header = (
-            f"showing rows {rows[0]}-{rows[-1]} "
-            f"({len(rows)} of {len(grid)} rows in the full sheet region), {width} cols"
-        )
-    else:
-        header = f"{len(grid)} rows, {width} cols"
-    lines = [_row_line_excel(index, grid[index], width) for index in rows]
-    return "\n".join([header, *lines])
-
-
-def _chunk_rows(grid: list[list[str]], width: int, budget: int) -> list[list[int]]:
-    rows = list(range(len(grid)))
-    if not rows:
-        return []
-    lines = [_row_line_excel(index, grid[index], width) for index in rows]
-    counts = count_tokens_batch(lines)
-    chunks: list[list[int]] = []
-    current: list[int] = []
-    current_tokens = 0
-    for index, tokens in zip(rows, counts, strict=True):
-        if current and current_tokens + tokens > budget:
-            chunks.append(current)
-            current, current_tokens = [], 0
-        current.append(index)
-        current_tokens += tokens
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def _render_excel_chunks(grid: list[list[str]], *, budget: int) -> list[str]:
-    width = max((len(row) for row in grid), default=0)
-    chunks = _chunk_rows(grid, width, budget)
-    return [_render_excel(grid, rows, width) for rows in chunks]
-
-
-def _slice_grid(grid: list[list[str]], min_row: int, max_row: int, min_col: int, max_col: int) -> list[list[str]]:
-    return [row[min_col : max_col + 1] for row in grid[min_row : max_row + 1]]
-
-
-_STAGE1_EXTRACT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "tables": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "start_row": {"type": "integer"},
-                    "end_row": {"type": "integer"},
-                    "start_col": {"type": "integer"},
-                    "end_col": {"type": "integer"},
-                },
-                "required": ["start_row", "end_row", "start_col", "end_col"],
-            },
-        }
-    },
-    "required": ["tables"],
-}
-
-
-async def _detect_boundaries_chunk(
-    text: str, *, key: str, prompt_name: str = "table_structure_excel"
-) -> list[tuple[int, int, int, int]]:
-    prompt = f"{load_prompt(prompt_name)}\n\n{text}"
-    reasoning = await call_text(prompt, max_tokens=STAGE1_MAX_TOKENS, key=key)
-    extract_prompt = f"{load_prompt('table_structure_extract')}\n\n{reasoning}"
-    cap = get_text_capacity()
-    await cap.acquire(f"{key}:extract")
-    try:
-        data = await call_structured(extract_prompt, _STAGE1_EXTRACT_SCHEMA)
-    finally:
-        await cap.release(f"{key}:extract")
-    boxes: list[tuple[int, int, int, int]] = []
-    for entry in data.get("tables") or []:
-        try:
-            box = (int(entry["start_row"]), int(entry["end_row"]), int(entry["start_col"]), int(entry["end_col"]))
-        except (KeyError, ValueError, TypeError):
-            logger.warning("stage1 dropped malformed entry=%r", entry)
-            continue
-        boxes.append(box)
-    return boxes
-
-
-async def _detect_boundaries(grid: list[list[str]], *, key: str) -> list[tuple[int, int, int, int]]:
-    chunks = _render_excel_chunks(grid, budget=EXCEL_CHUNK_BUDGET)
-    results = await asyncio.gather(
-        *(_detect_boundaries_chunk(text, key=f"{key}:chunk{index}") for index, text in enumerate(chunks))
-    )
-    return [box for boxes in results for box in boxes]
-
-
-SCAN_CONTEXT = 4
-
-
-def _value_class(value: object) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return "boolean"
-    if isinstance(value, int | float):
-        return "number"
-    if isinstance(value, datetime):
-        return "temporal"
-    return "string" if str(value).strip() else None
-
-
-def _row_types(values: list[list[object]], index: int) -> dict[int, str]:
-    if not 0 <= index < len(values):
-        return {}
-    return {col: cls for col, value in enumerate(values[index]) if (cls := _value_class(value)) is not None}
-
-
-def _scan_profile(values: list[list[object]], lo: int, hi: int) -> dict[int, str]:
-    counts: dict[int, Counter[str]] = {}
-    for index in range(lo, min(hi + 1, len(values))):
-        for col, cls in _row_types(values, index).items():
-            counts.setdefault(col, Counter())[cls] += 1
-    return {col: counter.most_common(1)[0][0] for col, counter in counts.items()}
-
-
-def _scan_conforms(types: dict[int, str], extent: frozenset[int], row: dict[int, str]) -> bool:
-    if not row or not set(row) <= extent:
-        return False
-    return all(types.get(col) in {None, cls} for col, cls in row.items())
-
-
-def _first_data_row(values: list[list[object]], start: int, last: int, extent: frozenset[int]) -> int:
-    if last <= start:
-        return start
-    midpoint = start + (last - start) // 2 + 1
-    seed = _scan_profile(values, midpoint, last)
-    if not seed:
-        return min(start + 1, last)
-    row = midpoint
-    while row > start and _scan_conforms(seed, extent, _row_types(values, row - 1)):
-        row -= 1
-    return row
-
-
-def _scan_window(grid: list[list[str]], start: int, width: int) -> tuple[str, int] | None:
-    rows: list[int] = []
-    used = 0
-    for index in range(start, len(grid)):
-        cost = count_tokens(_row_line_excel(index, grid[index], width))
-        if used + cost > EXCEL_CHUNK_BUDGET and rows:
-            break
-        rows.append(index)
-        used += cost
-    if not rows:
-        return None
-    return _render_excel(grid, rows, width), rows[-1]
-
-
-def _starts_to_boxes(starts: list[tuple[int, int, int]], rows: int) -> list[tuple[int, int, int, int]]:
-    ordered = sorted(set(starts))
-    boxes: list[tuple[int, int, int, int]] = []
-    for position, (start, col_start, col_end) in enumerate(ordered):
-        later = [other for other, _a, _b in ordered[position + 1 :] if other > start]
-        end = min(later) - 1 if later else rows - 1
-        if end >= start:
-            boxes.append((start, end, col_start, col_end))
-    return boxes
-
-
-async def _anchor_boundaries(
-    grid: list[list[str]], values: list[list[object]], *, key: str
-) -> tuple[list[tuple[int, int, int, int]], list[int]]:
-    width = max((len(row) for row in grid), default=0)
-    queue: list[tuple[int, int]] = [(0, 0)]
-    seen: set[int] = set()
-    starts: list[tuple[int, int, int]] = []
-    unexplained: list[int] = []
-    while queue:
-        batch = [(window, claim) for window, claim in queue if claim not in seen]
-        seen.update(claim for _window, claim in batch)
-        queue = []
-        rendered = [(claim, _scan_window(grid, window, width)) for window, claim in batch]
-        pending = [(claim, window) for claim, window in rendered if window is not None]
-        if not pending:
-            break
-        results = await asyncio.gather(
-            *(
-                _detect_boundaries_chunk(text, key=f"{key}:at{claim}", prompt_name="table_structure_anchor")
-                for claim, (text, _last) in pending
-            )
-        )
-        for (claim, (_text, last)), boxes in zip(pending, results, strict=True):
-            accepted = False
-            for start_row, _end_row, col_start, col_end in boxes:
-                if start_row < claim or start_row >= len(grid):
-                    continue
-                accepted = True
-                starts.append((start_row, col_start, col_end))
-                extent = frozenset(range(col_start, col_end + 1))
-                types = _scan_profile(values, _first_data_row(values, start_row, last, extent), last)
-                breaks = [
-                    index
-                    for index in range(last + 1, len(grid))
-                    if not _scan_conforms(types, extent, _row_types(values, index))
-                ]
-                if breaks:
-                    queue.append((max(breaks[0] - SCAN_CONTEXT, 0), breaks[0]))
-            if not accepted and claim > 0:
-                unexplained.append(claim)
-    return _starts_to_boxes(starts, len(grid)), sorted(unexplained)
-
-
-def _title_from_row(grid: list[list[str]], data: dict, data_start: int) -> str | None:
-    row = data.get("title_row")
-    if not isinstance(row, int) or not 0 <= row < len(grid) or row >= data_start:
-        return None
-    parts = [cell.strip() for cell in grid[row] if cell.strip()]
-    return " ".join(dict.fromkeys(parts)) or None
 
 
 def _title_in_columns(grid: list[list[str]], row: object, data_start: int, col_start: int, col_end: int) -> str | None:
@@ -422,132 +193,6 @@ def _title_in_columns(grid: list[list[str]], row: object, data_start: int, col_s
     cells = grid[row][col_start : col_end + 1]
     parts = [cell.strip() for cell in cells if cell.strip()]
     return " ".join(dict.fromkeys(parts)) or None
-
-
-def _stage2_structure(data: dict, width: int, grid: list[list[str]]) -> TableStructure | None:
-    try:
-        data_start, data_end = int(data["data_start"]), int(data["data_end"])
-    except (KeyError, ValueError, TypeError):
-        return None
-    header_rows = [int(row) for row in data.get("header_rows") or []]
-    metadata_rows = [int(row) for row in data.get("metadata_rows") or [] if data_start <= int(row) <= data_end]
-    return TableStructure(
-        col_start=0,
-        col_end=max(width - 1, 0),
-        header_rows=header_rows or None,
-        data_start=data_start,
-        data_end=data_end,
-        metadata_rows=metadata_rows or None,
-        title=_title_from_row(grid, data, data_start),
-    )
-
-
-_TYPED_EXTRACT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "header_rows": {"type": "array", "items": {"type": "integer"}},
-        "data_start": {"type": "integer"},
-        "data_end": {"type": "integer"},
-        "metadata_rows": {"type": "array", "items": {"type": "integer"}},
-        "title_row": {"type": ["integer", "null"]},
-    },
-    "required": ["header_rows", "data_start", "data_end", "metadata_rows", "title_row"],
-}
-
-
-def _typing_rows(grid: list[list[str]], width: int) -> list[int]:
-    rows = list(range(len(grid)))
-    if not rows:
-        return rows
-    counts = count_tokens_batch([_row_line_excel(index, grid[index], width) for index in rows])
-    if sum(counts) <= EXCEL_CHUNK_BUDGET:
-        return rows
-    half = EXCEL_CHUNK_BUDGET // 2
-    head: list[int] = []
-    used = 0
-    for index, cost in zip(rows, counts, strict=True):
-        if used + cost > half:
-            break
-        head.append(index)
-        used += cost
-    tail: list[int] = []
-    used = 0
-    for index, cost in zip(reversed(rows), reversed(counts), strict=True):
-        if used + cost > half or index in set(head):
-            break
-        tail.append(index)
-        used += cost
-    return head + sorted(tail)
-
-
-async def _type_rows(grid: list[list[str]], *, key: str, anomalies: list[int] | None = None) -> TableStructure | None:
-    width = max((len(row) for row in grid), default=0)
-    rows = _typing_rows(grid, width)
-    text = _render_excel(grid, rows, width)
-    if anomalies:
-        text += f"\n\nrows whose values do not match the column types of the surrounding rows: {anomalies}"
-    prompt = f"{load_prompt('table_structure_typed')}\n\n{text}"
-    reasoning = await call_text(prompt, max_tokens=STAGE2_MAX_TOKENS, key=key)
-    if len(rows) < len(grid):
-        extract_prompt = f"{load_prompt('table_typed_extract')}\n\n{reasoning}"
-    else:
-        extract_prompt = f"{load_prompt('table_typed_extract_lines')}\n\n{text}\n\n{reasoning}"
-    cap = get_text_capacity()
-    await cap.acquire(f"{key}:extract")
-    try:
-        data = await call_structured(extract_prompt, _TYPED_EXTRACT_SCHEMA)
-    finally:
-        await cap.release(f"{key}:extract")
-    return _stage2_structure(data, width, grid)
-
-
-def _scan_anomalies(values: list[list[object]], box: tuple[int, int, int, int]) -> list[int]:
-    start_row, end_row, col_start, col_end = box
-    extent = frozenset(range(col_start, col_end + 1))
-    midpoint = start_row + (end_row - start_row) // 2
-    types = _scan_profile(values, midpoint, end_row)
-    if not types:
-        return []
-    return [
-        row - start_row
-        for row in range(start_row, end_row + 1)
-        if not _scan_conforms(types, extent, _row_types(values, row))
-    ]
-
-
-def _combine_structure(
-    grid: list[list[str]], box: tuple[int, int, int, int], typed: TableStructure | None, rows: int
-) -> TableStructure | None:
-    if typed is None:
-        return None
-    _start_row, _end_row, col_start, col_end = box
-    limit = max(rows - 1, 0)
-    headers = sorted({row for row in (typed.header_rows or []) if 0 <= row <= limit})
-    data_start = min(max(typed.data_start, 0), limit)
-    metadata = sorted({row for row in (typed.metadata_rows or []) if 0 <= row <= limit})
-    return TableStructure(
-        col_start=0,
-        col_end=col_end - col_start,
-        header_rows=headers or None,
-        data_start=data_start,
-        data_end=limit,
-        metadata_rows=[row for row in metadata if row >= data_start and row not in set(headers)] or None,
-        title=typed.title or None,
-    )
-
-
-def _apply_scan(
-    structure: TableStructure, box: tuple[int, int, int, int], scanned: list[int], rows: int
-) -> TableStructure:
-    start_row, end_row, _col_start, _col_end = box
-    local = sorted({row - start_row for row in scanned if start_row <= row <= end_row})
-    merged = sorted(set(structure.metadata_rows or []) | set(local))
-    return structure.model_copy(
-        update={
-            "data_end": max(rows - 1, structure.data_start),
-            "metadata_rows": merged or None,
-        }
-    )
 
 
 def _structure_text(grid: list[list[str]]) -> str:
