@@ -1,24 +1,14 @@
 import asyncio
 import logging
-from itertools import starmap
-from typing import Protocol
 
 from citadel.llm import call_structured, call_text, count_tokens, count_tokens_batch
 from citadel.prompts import load_prompt
 from citadel.schemas.table import TableStructure
 from citadel.services.capacity import get_text_capacity
 from citadel.tabular.flag import SAMPLE_BOTTOM, SAMPLE_TOP, column_kinds, payload_rows
-from citadel.tabular.materialize import MaterializedTable, materialize, sample_rows
+from citadel.tabular.materialize import MaterializedTable, materialize
 
 logger = logging.getLogger(__name__)
-
-
-class Position(Protocol):
-    min_row: int
-    max_row: int
-    min_col: int
-    max_col: int
-
 
 _MAX_CELL = 40
 SINGLE_TABLE_BUDGET = 8192
@@ -88,11 +78,6 @@ _TABLE_STRUCTURE_SCHEMA = {
     "type": "object",
     "properties": {"tables": {"type": "array", "items": _TABLE_ENTRY_SCHEMA}},
     "required": ["tables"],
-}
-_MERGE_SCHEMA = {
-    "type": "object",
-    "properties": {"groups": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}}},
-    "required": ["groups"],
 }
 
 
@@ -338,107 +323,3 @@ async def structure_candidate(
     return tables
 
 
-def _candidate_summary(index: int, table: MaterializedTable) -> str:
-    columns = ", ".join(f"{column.header}:{column.dtype}" for column in table.columns)
-    title = f"; title: {table.title}" if table.title else ""
-    return f"{index}: {table.n_rows} rows; columns: {columns}{title}"
-
-
-async def _resolve_group(
-    doc_id: str, sheet_no: int, group_no: int, members: list[MaterializedTable]
-) -> list[list[int]]:
-    listing = "\n".join(starmap(_candidate_summary, enumerate(members)))
-    prompt = f"{load_prompt('table_merge_candidates')}\n{listing}"
-    key = f"merge:{doc_id}:sheet{sheet_no}:{group_no}"
-    cap = get_text_capacity()
-    await cap.acquire(key)
-    try:
-        data = await call_structured(prompt, _MERGE_SCHEMA)
-    finally:
-        await cap.release(key)
-    groups = data.get("groups") or []
-    logger.info("merge sheet%d groups=%s", sheet_no, groups)
-    seen: set[int] = set()
-    valid: list[list[int]] = []
-    for chain in groups:
-        indices = [
-            index for index in chain if isinstance(index, int) and 0 <= index < len(members) and index not in seen
-        ]
-        if not indices:
-            continue
-        seen.update(indices)
-        valid.append(indices)
-    valid.extend([index] for index in range(len(members)) if index not in seen)
-    return valid
-
-
-def _combine(members: list[MaterializedTable], chain: list[int]) -> MaterializedTable:
-    leader = members[chain[0]]
-    rows = list(leader.rows)
-    for index in chain[1:]:
-        table = members[index]
-        rows.extend(table.rows[len(table.header_rows) :])
-    data_rows = rows[len(leader.header_rows) :]
-    return MaterializedTable(
-        sheet_no=leader.sheet_no,
-        columns=leader.columns,
-        rows=rows,
-        sample_rows=sample_rows(data_rows),
-        n_rows=len(data_rows),
-        title=leader.title,
-        caption=leader.caption,
-        notes=leader.notes,
-        anchors=leader.anchors,
-        formulas=leader.formulas,
-        header_rows=leader.header_rows,
-    )
-
-
-_MIN_CHAIN = 2
-
-
-def _adjacency_groups(regions: list[Position]) -> list[list[int]]:
-    row_order = sorted(range(len(regions)), key=lambda i: regions[i].min_row)
-    rank = {index: position for position, index in enumerate(row_order)}
-    by_columns: dict[tuple[int, int], list[int]] = {}
-    for index, region in enumerate(regions):
-        by_columns.setdefault((region.min_col, region.max_col), []).append(index)
-    groups: list[list[int]] = []
-    for indices in by_columns.values():
-        if len(indices) < _MIN_CHAIN:
-            continue
-        ordered = sorted(indices, key=lambda i: regions[i].min_row)
-        chain = [ordered[0]]
-        for index in ordered[1:]:
-            if rank[index] == rank[chain[-1]] + 1:
-                chain.append(index)
-                continue
-            if len(chain) >= _MIN_CHAIN:
-                groups.append(chain)
-            chain = [index]
-        if len(chain) >= _MIN_CHAIN:
-            groups.append(chain)
-    return groups
-
-
-async def merge_candidates(
-    doc_id: str, sheet_no: int, regions: list[Position], members: list[MaterializedTable]
-) -> list[MaterializedTable]:
-    if len(regions) != len(members):
-        msg = f"regions/members length mismatch: {len(regions)} vs {len(members)}"
-        raise ValueError(msg)
-    if not members:
-        return []
-    groups = _adjacency_groups(regions)
-    grouped_indices: set[int] = {index for group in groups for index in group}
-    out: list[MaterializedTable] = [table for index, table in enumerate(members) if index not in grouped_indices]
-    group_members_list = [[members[index] for index in group] for group in groups]
-    resolved = await asyncio.gather(
-        *(
-            _resolve_group(doc_id, sheet_no, group_no, group_members)
-            for group_no, group_members in enumerate(group_members_list)
-        )
-    )
-    for group_members, chains in zip(group_members_list, resolved, strict=True):
-        out.extend(group_members[chain[0]] if len(chain) == 1 else _combine(group_members, chain) for chain in chains)
-    return out

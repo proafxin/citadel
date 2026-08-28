@@ -2,14 +2,14 @@
 services:
   qwen:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
-    container_name: citadel-qwen
+    container_name: qwen
     restart: always
     ipc: host
     command:
       - --model
-      - /models/Qwen3.8-27B-Q4_K_M.gguf
+      - /models/Qwen3.8-27B-UD-Q4_K_M.gguf
       - --mmproj
-      - /models/mmproj-Qwen3.8-27B-bf16.gguf
+      - /models/mmproj-BF16.gguf
       - -ngl
       - "999"
       - --host
@@ -17,13 +17,17 @@ services:
       - --port
       - "8100"
       - --ctx-size
-      - "65536"
+      - "131072"
       - --parallel
-      - "4"
+      - "16"
       - --cache-type-k
       - q8_0
       - --cache-type-v
       - q8_0
+      - --batch-size
+      - "512"
+      - --ubatch-size
+      - "512"
       - --alias
       - qwen
       - --chat-template-kwargs
@@ -43,47 +47,47 @@ services:
               count: all
               capabilities: [gpu]
 
-  embedding:
-    image: vllm/vllm-openai:latest
-    container_name: citadel-embedding
-    restart: always
-    ipc: host
-    command:
-      - --model
-      - microsoft/harrier-oss-v1-0.6b
-      - --served-model-name
-      - harrier
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8101"
-      - --pooler-config
-      - '{"task": "embed", "pooling_type": "LAST"}'
-      - --gpu-memory-utilization
-      - "0.11"
-      - --max-num-seqs
-      - "256"
-      - --max-model-len
-      - "3072"
-      - --uvicorn-log-level
-      - info
-    environment:
-      HF_TOKEN: ${HF_TOKEN:-}
-    ports:
-      - "8101:8101"
-    ulimits:
-      memlock: -1
-      stack: 67108864
-    volumes:
-      - ${HOME}/.cache/citadel-embedding:/root/.cache/huggingface
-      - embedding-vllm-cache:/root/.cache/vllm
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+  # embedding:
+  #   image: vllm/vllm-openai:latest
+  #   container_name: embedding
+  #   restart: always
+  #   ipc: host
+  #   command:
+  #     - --model
+  #     - microsoft/harrier-oss-v1-0.6b
+  #     - --served-model-name
+  #     - harrier
+  #     - --host
+  #     - 0.0.0.0
+  #     - --port
+  #     - "8101"
+  #     - --pooler-config
+  #     - '{"task": "embed", "pooling_type": "LAST"}'
+  #     - --gpu-memory-utilization
+  #     - "0.08"
+  #     - --max-num-seqs
+  #     - "256"
+  #     - --max-model-len
+  #     - "8192"
+  #     - --uvicorn-log-level
+  #     - info
+  #   environment:
+  #     HF_TOKEN: ${HF_TOKEN:-}
+  #   ports:
+  #     - "8101:8101"
+  #   ulimits:
+  #     memlock: -1
+  #     stack: 67108864
+  #   volumes:
+  #     - ${HOME}/.cache/citadel-embedding:/root/.cache/huggingface
+  #     - embedding-vllm-cache:/root/.cache/vllm
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
 
   redis:
     image: redis:7-alpine
@@ -124,4 +128,3 @@ services:
 
 volumes:
   postgres-data:
-  embedding-vllm-cache:

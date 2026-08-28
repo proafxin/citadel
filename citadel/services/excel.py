@@ -10,7 +10,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from citadel.services.grid import classify_grid, grid_text
 from citadel.tabular.materialize import MaterializedTable
-from citadel.tabular.structure import Position, merge_candidates, structure_candidate
+from citadel.tabular.structure import structure_candidate
 
 type RawCellValue = str | int | float | bool | datetime | None
 
@@ -59,14 +59,6 @@ class Region:
     max_row: int
     max_col: int
     cells: list[Cell]
-
-
-@dataclass
-class TableBounds:
-    min_row: int
-    min_col: int
-    max_row: int
-    max_col: int
 
 
 @dataclass
@@ -269,19 +261,6 @@ async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tup
                 for index, (region, grid) in enumerate(candidates)
             )
         )
-        regions: list[Position] = []
-        members: list[MaterializedTable] = []
-        for (region, _grid), tables in zip(candidates, resolved, strict=True):
-            for table in tables:
-                anchors = table.anchors
-                regions.append(
-                    TableBounds(
-                        min_row=anchors.get("min_row", region.min_row),
-                        min_col=anchors.get("min_col", region.min_col),
-                        max_row=anchors.get("max_row", region.max_row),
-                        max_col=anchors.get("max_col", region.max_col),
-                    )
-                )
-            members.extend(tables)
-        items.extend(await merge_candidates(doc_id, sheet.sheet_no, regions, members))
+        for tables in resolved:
+            items.extend(tables)
     return list(enumerate(items, start=1))
