@@ -8,12 +8,13 @@ from citadel.services.excel import (
     SheetExtraction,
     find_regions,
     load_all_sheets,
+    region_bold,
     region_grid,
     region_values,
 )
 from citadel.services.grid import classify_grid
 from citadel.tabular.materialize import MaterializedTable
-from citadel.tabular.structure import structure_candidate
+from citadel.tabular.structure import reconcile_sheet, structure_candidate
 
 logger = logging.getLogger("score")
 
@@ -35,7 +36,7 @@ def _score_pair(expected: dict, table: MaterializedTable) -> int:
     return _overlap(rows, tuple(expected["row_span"])) * _overlap(cols, tuple(expected["col_span"]))
 
 
-async def _sheet_tables(sheet: SheetExtraction) -> list[MaterializedTable]:
+async def _sheet_tables(sheet: SheetExtraction, *, merge: bool) -> list[MaterializedTable]:
     jobs = []
     for index, region in enumerate(find_regions(sheet)):
         grid = region_grid(sheet, region)
@@ -54,9 +55,13 @@ async def _sheet_tables(sheet: SheetExtraction) -> list[MaterializedTable]:
                     "max_col": region.max_col,
                 },
                 values=region_values(sheet, region),
+                bold=region_bold(sheet, region),
             )
         )
-    return [table for tables in await asyncio.gather(*jobs) for table in tables]
+    produced = [table for tables in await asyncio.gather(*jobs) for table in tables]
+    if not merge:
+        return produced
+    return await reconcile_sheet(produced, key=f"score:reconcile:sheet{sheet.sheet_no}")
 
 
 def _report(expected: list[dict], produced: list[MaterializedTable]) -> tuple[int, int, int, int]:
@@ -105,14 +110,16 @@ def _report(expected: list[dict], produced: list[MaterializedTable]) -> tuple[in
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
     truth = json.loads(TRUTH.read_text(encoding="utf-8"))
-    books = sys.argv[1:] or list(SOURCES)
+    args = sys.argv[1:]
+    merge = "--no-reconcile" not in args
+    books = [arg for arg in args if not arg.startswith("--")] or list(SOURCES)
     totals = [0, 0, 0, 0]
     for book in books:
         blob = pathlib.Path(SOURCES[book]).read_bytes()
         logger.info("########## %s ##########", book)
         for sheet in load_all_sheets(blob):
             expected = truth[book].get(str(sheet.sheet_no), [])
-            produced = await _sheet_tables(sheet)
+            produced = await _sheet_tables(sheet, merge=merge)
             if not expected and not produced:
                 continue
             logger.info("  sheet%d — expected %d, produced %d", sheet.sheet_no, len(expected), len(produced))

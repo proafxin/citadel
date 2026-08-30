@@ -10,7 +10,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from citadel.services.grid import classify_grid, grid_text
 from citadel.tabular.materialize import MaterializedTable
-from citadel.tabular.structure import structure_candidate
+from citadel.tabular.structure import reconcile_sheet, structure_candidate
 
 type RawCellValue = str | int | float | bool | datetime | None
 
@@ -50,6 +50,7 @@ class SheetExtraction:
     cells: list[Cell]
     tables: list[SheetTable]
     images: list[bytes]
+    merges: list[tuple[int, int, int, int]]
 
 
 @dataclass
@@ -138,6 +139,12 @@ def _capture_images(worksheet: Worksheet) -> list[bytes]:
     return [image._data() for image in worksheet._images]
 
 
+def _capture_merges(worksheet: Worksheet) -> list[tuple[int, int, int, int]]:
+    return sorted(
+        (cells.min_row, cells.min_col, cells.max_row, cells.max_col) for cells in worksheet.merged_cells.ranges
+    )
+
+
 def extract_sheet(values_sheet: Worksheet, formulas_sheet: Worksheet, sheet_no: int) -> SheetExtraction:
     return SheetExtraction(
         sheet_no=sheet_no,
@@ -147,6 +154,7 @@ def extract_sheet(values_sheet: Worksheet, formulas_sheet: Worksheet, sheet_no: 
         cells=_capture_cells(values_sheet, formulas_sheet),
         tables=_capture_tables(formulas_sheet),
         images=_capture_images(formulas_sheet),
+        merges=_capture_merges(formulas_sheet),
     )
 
 
@@ -230,6 +238,14 @@ def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
     ]
 
 
+def region_bold(sheet: SheetExtraction, region: Region) -> list[list[bool]]:
+    bold = {(cell.row, cell.col) for cell in region.cells if cell.bold}
+    return [
+        [(row, col) in bold for col in range(region.min_col, region.max_col + 1)]
+        for row in range(region.min_row, region.max_row + 1)
+    ]
+
+
 def region_values(sheet: SheetExtraction, region: Region) -> list[list[RawCellValue]]:
     values = {(cell.row, cell.col): cell.value for cell in region.cells}
     return [
@@ -244,7 +260,7 @@ def _region_anchors(region: Region) -> dict:
 
 async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tuple[int, SheetItem]]:
     text: list[SheetItem] = []
-    candidates: list[tuple[Region, list[list[str]], list[list[RawCellValue]]]] = []
+    candidates: list[tuple[Region, list[list[str]], list[list[RawCellValue]], list[list[bool]]]] = []
     for region in find_regions(sheet):
         grid = region_grid(sheet, region)
         kind = classify_grid(grid)
@@ -254,7 +270,7 @@ async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tup
             body = " ".join([grid_text(grid), *region_comments(region)]).strip()
             text.append(SheetText(sheet_no=sheet.sheet_no, text=body))
             continue
-        candidates.append((region, grid, region_values(sheet, region)))
+        candidates.append((region, grid, region_values(sheet, region), region_bold(sheet, region)))
     items: list[SheetItem] = list(text)
     if candidates:
         resolved = await asyncio.gather(
@@ -266,10 +282,11 @@ async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tup
                     sheet_no=sheet.sheet_no,
                     anchors=_region_anchors(region),
                     values=values,
+                    bold=bold,
                 )
-                for index, (region, grid, values) in enumerate(candidates)
+                for index, (region, grid, values, bold) in enumerate(candidates)
             )
         )
-        for tables in resolved:
-            items.extend(tables)
+        produced = [table for tables in resolved for table in tables]
+        items.extend(await reconcile_sheet(produced, key=f"reconcile:{doc_id}:sheet{sheet.sheet_no}"))
     return list(enumerate(items, start=1))

@@ -1,13 +1,14 @@
 import logging
 from collections.abc import Sequence
 from datetime import datetime
+from itertools import starmap
 
 from citadel.llm import call_structured, count_tokens, count_tokens_batch
 from citadel.prompts import load_prompt
 from citadel.schemas.table import TableStructure
 from citadel.services.capacity import get_text_capacity
 from citadel.tabular.flag import SAMPLE_BOTTOM, SAMPLE_TOP, column_kinds, payload_rows
-from citadel.tabular.materialize import MaterializedTable, materialize
+from citadel.tabular.materialize import MaterializedTable, materialize, sample_rows
 
 logger = logging.getLogger(__name__)
 
@@ -83,11 +84,11 @@ _TABLE_STRUCTURE_SCHEMA = {
 }
 
 
-def _row_line(index: int, row: list[str], width: int, max_cell: int | None) -> str:
+def _row_line(index: int, row: list[str], width: int, max_cell: int | None, note: str = "") -> str:
     cells = [(row[col] if col < len(row) else "").strip() for col in range(width)]
     if max_cell is not None:
         cells = [cell[:max_cell] for cell in cells]
-    return f"{index}: " + " | ".join(cells)
+    return f"{index}{note}: " + " | ".join(cells)
 
 
 def _payload_text(grid: list[list[str]], indices: list[int], width: int, max_cell: int | None) -> str:
@@ -182,9 +183,18 @@ def _title_in_columns(grid: list[list[str]], row: object, data_start: int, col_s
     return " ".join(dict.fromkeys(parts)) or None
 
 
-def _structure_render(grid: list[list[str]], start: int) -> tuple[str, int]:
+def _bold_note(bold: Sequence[Sequence[bool]] | None, index: int) -> str:
+    if bold is None or not 0 <= index < len(bold):
+        return ""
+    marked = [str(col) for col, flag in enumerate(bold[index]) if flag]
+    return f" [bold {','.join(marked)}]" if marked else ""
+
+
+def _structure_render(
+    grid: list[list[str]], start: int, bold: Sequence[Sequence[bool]] | None = None
+) -> tuple[str, int]:
     width = max((len(row) for row in grid), default=0)
-    lines = [_row_line(index, grid[index], width, None) for index in range(start, len(grid))]
+    lines = [_row_line(index, grid[index], width, None, _bold_note(bold, index)) for index in range(start, len(grid))]
     budget = max(WINDOW_BUDGET - _HEADER_ALLOWANCE, 0)
     used = 0
     kept: list[str] = []
@@ -284,8 +294,10 @@ def _entry_anchors(base: dict | None, entry: dict, structure: TableStructure) ->
     }
 
 
-async def _window_entries(grid: list[list[str]], start: int, key: str) -> tuple[list[dict], int]:
-    text, last = _structure_render(grid, start)
+async def _window_entries(
+    grid: list[list[str]], start: int, key: str, bold: Sequence[Sequence[bool]] | None
+) -> tuple[list[dict], int]:
+    text, last = _structure_render(grid, start, bold)
     cap = get_text_capacity()
     await cap.acquire(key)
     try:
@@ -302,13 +314,14 @@ async def _structure_excel(
     key: str,
     sheet_no: int,
     anchors: dict | None,
+    bold: Sequence[Sequence[bool]] | None,
 ) -> list[MaterializedTable]:
     width = max((len(row) for row in grid), default=0)
     collected: list[dict] = []
     start = 0
     window = 0
     while start < len(grid):
-        entries, last = await _window_entries(grid, start, f"{key}:w{window}")
+        entries, last = await _window_entries(grid, start, f"{key}:w{window}", bold)
         window += 1
         if not entries:
             break
@@ -336,6 +349,102 @@ async def _structure_excel(
     return tables
 
 
+_RECONCILE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "members": {"type": "array", "items": {"type": "integer"}},
+                    "header_from": {"type": ["integer", "null"]},
+                    "title": {"type": ["string", "null"]},
+                },
+                "required": ["members", "header_from", "title"],
+            },
+        }
+    },
+    "required": ["tables"],
+}
+
+_MIN_RECONCILE_TABLES = 2
+
+
+def _reconcile_entry(index: int, table: MaterializedTable) -> str:
+    anchors = table.anchors
+    columns = ", ".join(f"{column.header}:{column.dtype}" for column in table.columns)
+    lines = [
+        (
+            f"[{index}] sheet rows {anchors.get('min_row')}-{anchors.get('max_row')}, "
+            f"cols {anchors.get('min_col')}-{anchors.get('max_col')}; {table.n_rows} rows; title={table.title!r}"
+        ),
+        f"    columns: {columns}",
+    ]
+    if table.sample_rows:
+        lines.append("    row: " + " | ".join(str(cell) for cell in table.sample_rows[0]))
+    return "\n".join(lines)
+
+
+def _join(members: list[MaterializedTable], header: MaterializedTable, title: str | None) -> MaterializedTable:
+    lead = members[0]
+    data = [row for table in members for row in table.rows[len(table.header_rows) :]]
+    header_cells = header.rows[: len(header.header_rows)]
+    return MaterializedTable(
+        sheet_no=lead.sheet_no,
+        columns=header.columns,
+        rows=[*header_cells, *data],
+        sample_rows=sample_rows(data),
+        n_rows=len(data),
+        title=title or lead.title,
+        caption=lead.caption,
+        notes=lead.notes,
+        anchors={
+            **lead.anchors,
+            "min_row": min(table.anchors.get("min_row", 0) for table in members),
+            "max_row": max(table.anchors.get("max_row", 0) for table in members),
+            "min_col": min(table.anchors.get("min_col", 0) for table in members),
+            "max_col": max(table.anchors.get("max_col", 0) for table in members),
+        },
+        formulas=lead.formulas,
+        header_rows=list(range(len(header_cells))),
+    )
+
+
+async def reconcile_sheet(tables: list[MaterializedTable], *, key: str) -> list[MaterializedTable]:
+    if len(tables) < _MIN_RECONCILE_TABLES:
+        return tables
+    listing = "\n".join(starmap(_reconcile_entry, enumerate(tables)))
+    cap = get_text_capacity()
+    await cap.acquire(key)
+    try:
+        data = await call_structured(f"{load_prompt('table_sheet_reconcile')}\n\n{listing}", _RECONCILE_SCHEMA)
+    finally:
+        await cap.release(key)
+    groups = data.get("tables") or []
+    logger.info("reconcile %s: %d in -> %d out", key, len(tables), len(groups))
+    seen: set[int] = set()
+    out: list[MaterializedTable] = []
+    for group in groups:
+        members = [
+            index
+            for index in group.get("members") or []
+            if isinstance(index, int) and 0 <= index < len(tables) and index not in seen
+        ]
+        if not members:
+            continue
+        seen.update(members)
+        chosen = group.get("header_from")
+        header = tables[chosen] if isinstance(chosen, int) and 0 <= chosen < len(tables) else tables[members[0]]
+        title = group.get("title")
+        out.append(
+            tables[members[0]]
+            if len(members) == 1 and header is tables[members[0]] and not title
+            else _join([tables[index] for index in members], header, title)
+        )
+    return out
+
+
 def _structure(entry: dict) -> TableStructure:
     col_start, col_end = _entry_col_range(entry)
     return TableStructure(
@@ -360,11 +469,12 @@ async def structure_candidate(
     sheet_no: int = 0,
     anchors: dict | None = None,
     values: Sequence[Sequence[object]] | None = None,
+    bold: Sequence[Sequence[bool]] | None = None,
 ) -> list[MaterializedTable]:
     if not grid:
         return []
     if not known_table:
-        return await _structure_excel(grid, values, key=key, sheet_no=sheet_no, anchors=anchors)
+        return await _structure_excel(grid, values, key=key, sheet_no=sheet_no, anchors=anchors, bold=bold)
     text = _candidate_text(grid, full=full, budget=None if full else SINGLE_TABLE_BUDGET)
     prompt = f"{load_prompt('table_structure_known')}\n{text}"
     cap = get_text_capacity()

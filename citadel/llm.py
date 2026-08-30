@@ -26,11 +26,14 @@ _call_no = itertools.count()
 
 NO_TIMEOUT = httpx.Timeout(None)
 
+MODEL_CTX = 65536
+OCR_CTX = 16384
 STRUCT_MAX_TOKENS = 4096
 STRUCTURE_MAX_TOKENS = 2048
 SYNTH_MAX_TOKENS = 8192
-SLM_MODEL_LEN = 16384
-PAGE_OCR_MAX_TOKENS = 3584
+SLM_MODEL_LEN = MODEL_CTX
+PAGE_OCR_MAX_TOKENS = 8192
+OCR_CEILING_MARGIN = 16
 RELEVANCE_BUDGET = SLM_MODEL_LEN - STRUCT_MAX_TOKENS - 2048
 
 
@@ -50,7 +53,7 @@ def _local_key(label: str) -> str:
 
 @functools.lru_cache
 def get_tokenizer() -> Tokenizer:
-    path = hf_hub_download(QWEN_HF_REPO, "tokenizer.json", cache_dir=str(QWEN_CACHE_DIR))
+    path = hf_hub_download(QWEN_HF_REPO, "tokenizer.json", cache_dir=str(QWEN_CACHE_DIR), local_files_only=True)
     return Tokenizer.from_file(path)
 
 
@@ -209,7 +212,11 @@ async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -
     done = time.time()
     wait_s = (first_token or done) - started
     gpu_s = done - (first_token or done)
-    return "".join(parts).strip(), wait_s, gpu_s
+    text = "".join(parts).strip()
+    produced = count_tokens(text)
+    if produced >= max_tokens - OCR_CEILING_MARGIN:
+        logger.warning("page ocr hit token ceiling key=%s produced=%d max=%d", image_key, produced, max_tokens)
+    return text, wait_s, gpu_s
 
 
 async def call_structured(prompt: str, schema: dict, max_tokens: int = STRUCTURE_MAX_TOKENS) -> dict:
