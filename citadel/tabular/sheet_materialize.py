@@ -1,6 +1,8 @@
 import logging
 import time
 
+from openpyxl.utils import get_column_letter
+
 from citadel.schemas.table import TableStructure as GridStructure
 from citadel.services.excel import Cell, SheetExtraction, SheetItem, SheetText, cell_value, render_sheet_dump
 from citadel.tabular.materialize import MaterializedTable, materialize
@@ -72,6 +74,14 @@ def anchors(table: TableStructure, box: tuple[int, int, int, int]) -> dict:
     }
 
 
+def apply_groups(built: MaterializedTable, table: TableStructure, box: tuple[int, int, int, int]) -> None:
+    by_index = {column.index: column.group for column in table.columns if column.group}
+    by_letter = {column.letter.strip().upper(): column.group for column in table.columns if column.group}
+    for offset, column in enumerate(built.columns):
+        letter = get_column_letter(box[1] + offset)
+        column.group = by_index.get(box[1] + offset) or by_letter.get(letter)
+
+
 def materialize_sheet(
     sheet: SheetExtraction, dump: SheetDump, tables: SheetTables
 ) -> list[tuple[int, MaterializedTable]]:
@@ -99,24 +109,21 @@ def materialize_sheet(
                 if (cell := index.get((row, col))) is not None and cell.formula is not None
             }
         )
-        produced.append(
-            (
-                order,
-                materialize(
-                    grid,
-                    structure,
-                    sheet_no=sheet.sheet_no,
-                    formulas=formulas or None,
-                    extra_notes=[block.summary for block in tables.blocks] or None,
-                    anchors=anchors(table, box),
-                ),
-            )
+        built = materialize(
+            grid,
+            structure,
+            sheet_no=sheet.sheet_no,
+            formulas=formulas or None,
+            extra_notes=[block.summary for block in tables.blocks] or None,
+            anchors=anchors(table, box),
         )
+        apply_groups(built, table, box)
+        produced.append((order, built))
     return produced
 
 
 async def structure_sheet(sheet: SheetExtraction, workbook: str) -> list[tuple[int, SheetItem]]:
-    started = time.time()
+    queued = time.time()
     text = render_sheet_dump(sheet, workbook)
     dump = parse_dump(text)
     if not dump.last_row:
@@ -140,17 +147,20 @@ async def structure_sheet(sheet: SheetExtraction, workbook: str) -> list[tuple[i
             allowed,
         )
         return []
+    started = time.time()
     tables = await extract_sheet(dump, text)
+    elapsed = time.time() - started
     materialized = materialize_sheet(sheet, dump, tables)
     items: list[tuple[int, SheetItem]] = list(materialized)
     notes = "\n".join(f"{block.extent} {block.kind.value}: {block.summary}" for block in tables.blocks)
     if notes:
         items.append((len(items) + 1, SheetText(sheet_no=sheet.sheet_no, text=notes)))
     logger.info(
-        "structured %s/%s in %.1fs: %d tables reported, %d materialized, %d rows, %d blocks",
+        "structured %s/%s in %.1fs (queued %.1fs): %d tables reported, %d materialized, %d rows, %d blocks",
         workbook,
         sheet.sheet_name,
-        time.time() - started,
+        elapsed,
+        started - queued,
         len(tables.tables),
         len(materialized),
         sum(table.n_rows for _, table in materialized),

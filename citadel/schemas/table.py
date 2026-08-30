@@ -18,6 +18,7 @@ class ColumnDType(StrEnum):
 class Column(BaseModel):
     header: str | None = None
     dtype: ColumnDType = ColumnDType.STRING
+    group: str | None = None
 
 
 class TableStructure(BaseModel):

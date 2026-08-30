@@ -19,4 +19,6 @@ Every row in the extent must be covered by exactly one `row_roles` span, and tho
 - `repeated_groups` — the same set of columns repeats across the sheet, one repeat per entity.
 - `matrix` — both axes are dimensions and the cells hold a single measure.
 
+`group_name` names what a table's column groups are instances of, as a column name would read, or is null when its columns are not grouped.
+
 `blocks` carries every region that is not a table, each with its extent and a one-line summary. A sheet with no tables still has blocks.

@@ -57,6 +57,7 @@ class TableStructure(BaseModel):
     totals_rows: list[int] = Field(default_factory=list)
     band_label_rows: list[int] = Field(default_factory=list)
     columns: list[ColumnDef] = Field(default_factory=list)
+    group_name: str | None = None
     orientation: Orientation = Orientation.ROW_RECORDS
     evidence: list[str] = Field(default_factory=list)
     confidence: Confidence = Confidence.INFERRED
@@ -303,8 +304,8 @@ def prune(node: dict, names: tuple[str, ...]) -> None:
 
 REQUIRED_FIELDS = {
     "SheetTables": ("tables", "blocks", "row_roles"),
-    "TableStructure": ("table_id", "extent", "header_rows", "body_rows", "columns", "orientation"),
-    "ColumnDef": ("letter", "name"),
+    "TableStructure": ("table_id", "extent", "header_rows", "body_rows", "columns", "orientation", "group_name"),
+    "ColumnDef": ("letter", "name", "group", "header_parts"),
 }
 
 
