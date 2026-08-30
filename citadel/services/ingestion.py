@@ -51,7 +51,6 @@ from citadel.services.excel import (
     SheetExtraction,
     SheetItem,
     SheetText,
-    extract_sheet_content,
     load_all_sheets,
     sheet_names,
 )
@@ -66,6 +65,7 @@ from citadel.services.tabular import (
     structure_csv_tables,
 )
 from citadel.tabular.materialize import MaterializedTable, materialize
+from citadel.tabular.sheet_materialize import structure_sheet
 from citadel.tabular.structure import structure_candidate
 from citadel.utils import normalize_file
 from config import CPU_EIGHTH, CPU_THIRD
@@ -525,7 +525,11 @@ async def handle_tabular(fields: dict[str, str]) -> None:
         return
     if kind == "xlsx":
         sheet = await _get_sheet(doc_id, sheet_no)
-        items = await extract_sheet_content(doc_id, sheet)
+        workbook = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode() or f"doc{doc_id}"
+        items = await structure_sheet(sheet, workbook)
+        logger.info(
+            "doc %s sheet %d (%s) produced %d items", doc_id, sheet_no, sheet.sheet_name, len(items)
+        )
         image_items = await resolve_sheet_images(doc_id, f"sheet{sheet_no}", sheet_no, sheet.images)
         if image_items:
             start = (items[-1][0] + 1) if items else 1

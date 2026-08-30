@@ -75,7 +75,7 @@ class RowSpan(BaseModel):
     role: RowRole
 
 
-class SheetExtraction(BaseModel):
+class SheetTables(BaseModel):
     workbook: str = ""
     sheet: str = ""
     tables: list[TableStructure] = Field(default_factory=list)
@@ -84,7 +84,7 @@ class SheetExtraction(BaseModel):
     unresolved: list[str] = Field(default_factory=list)
 
 
-def assigned_rows(extraction: SheetExtraction) -> dict[int, RowRole]:
+def assigned_rows(extraction: SheetTables) -> dict[int, RowRole]:
     out: dict[int, RowRole] = {}
     for span in extraction.row_roles:
         for row in range(min(span.from_row, span.to_row), max(span.from_row, span.to_row) + 1):
@@ -115,7 +115,7 @@ def boxes_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) ->
     return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
 
 
-def coverage(dump: SheetDump, extraction: SheetExtraction) -> float:
+def coverage(dump: SheetDump, extraction: SheetTables) -> float:
     total = dump.last_row - dump.first_row + 1
     if total <= 0:
         return 1.0
@@ -138,7 +138,7 @@ def spans(rows: list[int]) -> list[str]:
     return [str(a) if a == b else f"{a}-{b}" for a, b in out]
 
 
-def validate_roles(dump: SheetDump, extraction: SheetExtraction) -> list[str]:
+def validate_roles(dump: SheetDump, extraction: SheetTables) -> list[str]:
     problems: list[str] = [
         f"row span {span.from_row}-{span.to_row} is inverted"
         for span in extraction.row_roles
@@ -188,7 +188,7 @@ def validate_table(dump: SheetDump, table: TableStructure) -> list[str]:
     return problems
 
 
-def validate_overlaps(extraction: SheetExtraction) -> list[str]:
+def validate_overlaps(extraction: SheetTables) -> list[str]:
     boxed = [(table.table_id, extent_box(table.extent)) for table in extraction.tables]
     known = [(name, box) for name, box in boxed if box is not None]
     return [
@@ -199,8 +199,33 @@ def validate_overlaps(extraction: SheetExtraction) -> list[str]:
     ]
 
 
-def validate_extraction(dump: SheetDump, extraction: SheetExtraction) -> list[str]:
+TABLE_ROLES = frozenset({RowRole.BODY})
+
+
+def validate_responsive(extraction: SheetTables) -> list[str]:
+    roles = assigned_rows(extraction)
+    tabular = sorted(row for row, role in roles.items() if role in TABLE_ROLES)
+    if not tabular:
+        return []
+    if not extraction.tables:
+        listed = ", ".join(spans(tabular)[:PREVIEW])
+        return [f"row_roles marks rows {listed} as body rows but no tables were reported"]
+    covered = {
+        row
+        for table in extraction.tables
+        if (box := extent_box(table.extent)) is not None
+        for row in range(box[0], box[2] + 1)
+    }
+    orphans = [row for row in tabular if row not in covered]
+    if orphans:
+        listed = ", ".join(spans(orphans)[:PREVIEW])
+        return [f"rows {listed} are marked as body rows but fall inside no table extent"]
+    return []
+
+
+def validate_extraction(dump: SheetDump, extraction: SheetTables) -> list[str]:
     problems = validate_roles(dump, extraction)
+    problems.extend(validate_responsive(extraction))
     for table in extraction.tables:
         problems.extend(validate_table(dump, table))
     problems.extend(validate_overlaps(extraction))
@@ -252,7 +277,7 @@ def corroboration(dump: SheetDump, table: TableStructure) -> tuple[Confidence, l
     return Confidence.INFERRED, []
 
 
-def score_extraction(dump: SheetDump, extraction: SheetExtraction) -> dict[str, int]:
+def score_extraction(dump: SheetDump, extraction: SheetTables) -> dict[str, int]:
     tally: dict[str, int] = {}
     for table in extraction.tables:
         level, support = corroboration(dump, table)
@@ -263,7 +288,7 @@ def score_extraction(dump: SheetDump, extraction: SheetExtraction) -> dict[str, 
 
 
 COMPUTED_FIELDS = {
-    "SheetExtraction": ("workbook", "sheet"),
+    "SheetTables": ("workbook", "sheet"),
     "TableStructure": ("confidence", "support"),
     "ColumnDef": ("index",),
 }
@@ -277,10 +302,24 @@ def prune(node: dict, names: tuple[str, ...]) -> None:
 
 
 REQUIRED_FIELDS = {
-    "SheetExtraction": ("tables", "blocks", "row_roles"),
+    "SheetTables": ("tables", "blocks", "row_roles"),
     "TableStructure": ("table_id", "extent", "header_rows", "body_rows", "columns", "orientation"),
     "ColumnDef": ("letter", "name"),
 }
+
+
+MIN_ITEMS = {
+    "SheetTables": {"row_roles": 1},
+    "TableStructure": {"body_rows": 1, "columns": 1},
+}
+
+
+def set_min_items(node: dict, limits: dict[str, int]) -> None:
+    properties = node.get("properties", {})
+    for name, minimum in limits.items():
+        field = properties.get(name)
+        if isinstance(field, dict) and field.get("type") == "array":
+            field["minItems"] = minimum
 
 
 def require(node: dict, names: tuple[str, ...]) -> None:
@@ -292,9 +331,9 @@ def require(node: dict, names: tuple[str, ...]) -> None:
 
 
 def request_schema() -> dict:
-    schema = SheetExtraction.model_json_schema()
-    prune(schema, COMPUTED_FIELDS["SheetExtraction"])
-    require(schema, REQUIRED_FIELDS["SheetExtraction"])
+    schema = SheetTables.model_json_schema()
+    prune(schema, COMPUTED_FIELDS["SheetTables"])
+    require(schema, REQUIRED_FIELDS["SheetTables"])
     for name, fields in COMPUTED_FIELDS.items():
         target = schema.get("$defs", {}).get(name)
         if target is not None:
@@ -303,10 +342,15 @@ def request_schema() -> dict:
         target = schema.get("$defs", {}).get(name)
         if target is not None:
             require(target, fields)
+    set_min_items(schema, MIN_ITEMS["SheetTables"])
+    for name, limits in MIN_ITEMS.items():
+        target = schema.get("$defs", {}).get(name)
+        if target is not None:
+            set_min_items(target, limits)
     return schema
 
 
-def fill_computed(dump: SheetDump, extraction: SheetExtraction) -> SheetExtraction:
+def fill_computed(dump: SheetDump, extraction: SheetTables) -> SheetTables:
     extraction.workbook = dump.workbook
     extraction.sheet = dump.sheet
     for table in extraction.tables:

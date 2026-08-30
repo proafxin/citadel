@@ -1,0 +1,161 @@
+import logging
+import time
+
+from citadel.schemas.table import TableStructure as GridStructure
+from citadel.services.excel import Cell, SheetExtraction, SheetItem, SheetText, cell_value, render_sheet_dump
+from citadel.tabular.materialize import MaterializedTable, materialize
+from citadel.tabular.sheet_agent import extract_sheet, fits_context
+from citadel.tabular.sheet_dump import SheetDump, parse_dump
+from citadel.tabular.sheet_structure import (
+    Orientation,
+    SheetTables,
+    TableStructure,
+    body_row_numbers,
+    extent_box,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def cell_index(cells: list[Cell]) -> dict[tuple[int, int], Cell]:
+    return {(cell.row, cell.col): cell for cell in cells}
+
+
+def render(cell: Cell | None) -> str:
+    if cell is None:
+        return ""
+    value = cell_value(cell)
+    return "" if value is None else str(value)
+
+
+def table_rows(table: TableStructure, box: tuple[int, int, int, int]) -> list[int]:
+    body = body_row_numbers(table)
+    ordered = sorted({*table.header_rows, *body, *table.totals_rows, *table.band_label_rows})
+    return [row for row in ordered if box[0] <= row <= box[2]]
+
+
+def build_grid(index: dict[tuple[int, int], Cell], rows: list[int], first_col: int, last_col: int) -> list[list[str]]:
+    return [[render(index.get((row, col))) for col in range(first_col, last_col + 1)] for row in rows]
+
+
+def grid_structure(table: TableStructure, rows: list[int], width: int) -> GridStructure | None:
+    positions = {row: offset for offset, row in enumerate(rows)}
+    header = [positions[row] for row in table.header_rows if row in positions]
+    body = [positions[row] for row in body_row_numbers(table) if row in positions]
+    if not body:
+        return None
+    extra = [positions[row] for row in (*table.totals_rows, *table.band_label_rows) if row in positions]
+    return GridStructure(
+        transposed=table.orientation == Orientation.MATRIX,
+        col_start=0,
+        col_end=width - 1,
+        header_rows=header or None,
+        data_start=min(body),
+        data_end=max(body),
+        metadata_rows=sorted(extra) or None,
+        columns=[column.name for column in table.columns] or None,
+        title=table.caption,
+        caption=table.caption,
+        notes=table.support or None,
+    )
+
+
+def anchors(table: TableStructure, box: tuple[int, int, int, int]) -> dict:
+    return {
+        "extent": table.extent,
+        "min_row": box[0],
+        "min_col": box[1],
+        "max_row": box[2],
+        "max_col": box[3],
+        "orientation": table.orientation.value,
+        "confidence": table.confidence.value,
+    }
+
+
+def materialize_sheet(
+    sheet: SheetExtraction, dump: SheetDump, tables: SheetTables
+) -> list[tuple[int, MaterializedTable]]:
+    index = cell_index(sheet.cells)
+    produced: list[tuple[int, MaterializedTable]] = []
+    for order, table in enumerate(tables.tables, start=1):
+        box = extent_box(table.extent)
+        if box is None:
+            logger.warning("skipping %s: unparseable extent %r", table.table_id, table.extent)
+            continue
+        rows = table_rows(table, box)
+        if not rows:
+            logger.warning("skipping %s: no rows inside extent %s", table.table_id, table.extent)
+            continue
+        grid = build_grid(index, rows, box[1], box[3])
+        structure = grid_structure(table, rows, box[3] - box[1] + 1)
+        if structure is None:
+            logger.warning("skipping %s: no body rows inside extent %s", table.table_id, table.extent)
+            continue
+        formulas = sorted(
+            {
+                cell.formula
+                for row in rows
+                for col in range(box[1], box[3] + 1)
+                if (cell := index.get((row, col))) is not None and cell.formula is not None
+            }
+        )
+        produced.append(
+            (
+                order,
+                materialize(
+                    grid,
+                    structure,
+                    sheet_no=sheet.sheet_no,
+                    formulas=formulas or None,
+                    extra_notes=[block.summary for block in tables.blocks] or None,
+                    anchors=anchors(table, box),
+                ),
+            )
+        )
+    return produced
+
+
+async def structure_sheet(sheet: SheetExtraction, workbook: str) -> list[tuple[int, SheetItem]]:
+    started = time.time()
+    text = render_sheet_dump(sheet, workbook)
+    dump = parse_dump(text)
+    if not dump.last_row:
+        logger.info("%s/%s has no populated cells, nothing to structure", workbook, sheet.sheet_name)
+        return []
+    logger.info(
+        "structuring %s/%s extent=%s cells=%d dump_chars=%d",
+        workbook,
+        sheet.sheet_name,
+        dump.extent,
+        len(sheet.cells),
+        len(text),
+    )
+    fits, needed, allowed = fits_context(dump, text)
+    if not fits:
+        logger.warning(
+            "skipping oversized sheet %s/%s: %d input tokens exceeds %d",
+            workbook,
+            sheet.sheet_name,
+            needed,
+            allowed,
+        )
+        return []
+    tables = await extract_sheet(dump, text)
+    materialized = materialize_sheet(sheet, dump, tables)
+    items: list[tuple[int, SheetItem]] = list(materialized)
+    notes = "\n".join(f"{block.extent} {block.kind.value}: {block.summary}" for block in tables.blocks)
+    if notes:
+        items.append((len(items) + 1, SheetText(sheet_no=sheet.sheet_no, text=notes)))
+    logger.info(
+        "structured %s/%s in %.1fs: %d tables reported, %d materialized, %d rows, %d blocks",
+        workbook,
+        sheet.sheet_name,
+        time.time() - started,
+        len(tables.tables),
+        len(materialized),
+        sum(table.n_rows for _, table in materialized),
+        len(tables.blocks),
+    )
+    if tables.unresolved:
+        logger.warning("%s/%s left unresolved: %s", workbook, sheet.sheet_name, ", ".join(tables.unresolved[:5]))
+    return items

@@ -1,7 +1,6 @@
 import logging
 from collections.abc import Sequence
 from datetime import datetime
-from itertools import starmap
 
 from citadel.llm import call_structured, count_tokens, count_tokens_batch
 from citadel.prompts import load_prompt
@@ -409,40 +408,6 @@ def _join(members: list[MaterializedTable], header: MaterializedTable, title: st
         formulas=lead.formulas,
         header_rows=list(range(len(header_cells))),
     )
-
-
-async def reconcile_sheet(tables: list[MaterializedTable], *, key: str) -> list[MaterializedTable]:
-    if len(tables) < _MIN_RECONCILE_TABLES:
-        return tables
-    listing = "\n".join(starmap(_reconcile_entry, enumerate(tables)))
-    cap = get_text_capacity()
-    await cap.acquire(key)
-    try:
-        data = await call_structured(f"{load_prompt('table_sheet_reconcile')}\n\n{listing}", _RECONCILE_SCHEMA)
-    finally:
-        await cap.release(key)
-    groups = data.get("tables") or []
-    logger.info("reconcile %s: %d in -> %d out", key, len(tables), len(groups))
-    seen: set[int] = set()
-    out: list[MaterializedTable] = []
-    for group in groups:
-        members = [
-            index
-            for index in group.get("members") or []
-            if isinstance(index, int) and 0 <= index < len(tables) and index not in seen
-        ]
-        if not members:
-            continue
-        seen.update(members)
-        chosen = group.get("header_from")
-        header = tables[chosen] if isinstance(chosen, int) and 0 <= chosen < len(tables) else tables[members[0]]
-        title = group.get("title")
-        out.append(
-            tables[members[0]]
-            if len(members) == 1 and header is tables[members[0]] and not title
-            else _join([tables[index] for index in members], header, title)
-        )
-    return out
 
 
 def _structure(entry: dict) -> TableStructure:

@@ -67,9 +67,7 @@ def find(dump: SheetDump, pattern: str, from_row: int | None = None, to_row: int
         for row in range(start, end + 1)
         if row in dump.lines and matcher.search(dump.lines[row])
     ]
-    return FindResult(
-        pattern=pattern, count=len(hits), truncated=len(hits) > MAX_HITS, rows=hits[:MAX_HITS]
-    )
+    return FindResult(pattern=pattern, count=len(hits), truncated=len(hits) > MAX_HITS, rows=hits[:MAX_HITS])
 
 
 def column_values(
@@ -117,9 +115,7 @@ def read_range(dump: SheetDump, ref: str) -> RangeResult:
         for column in range(col_start, col_end + 1)
         if (cell := dump.cell(row, column)) is not None
     ]
-    normalised = (
-        f"{get_column_letter(col_start)}{row_start}:{get_column_letter(col_end)}{row_end}"
-    )
+    normalised = f"{get_column_letter(col_start)}{row_start}:{get_column_letter(col_end)}{row_end}"
     return RangeResult(
         ref=normalised,
         rows=row_end - row_start + 1,

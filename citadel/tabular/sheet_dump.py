@@ -1,8 +1,11 @@
+import logging
 import re
 from pathlib import Path
 
 from openpyxl.utils import column_index_from_string, get_column_letter
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 FENCE = "````"
 GRID_HEADING = "## GRID"
@@ -198,6 +201,8 @@ def parse_dump(text: str) -> SheetDump:
     lines = text.splitlines()
     workbook, sheet, box = parse_header(lines)
     grid_start = next((i for i, line in enumerate(lines) if line.strip() == GRID_HEADING), -1)
+    if not sheet:
+        logger.warning("dump has no source header, sheet identity unknown")
     meta_start = next((i for i, line in enumerate(lines) if line.strip() == META_HEADING), len(lines))
     dump = SheetDump(
         workbook=workbook,
@@ -209,9 +214,11 @@ def parse_dump(text: str) -> SheetDump:
         meta=parse_meta(lines[meta_start:]),
     )
     if grid_start < 0:
+        logger.warning("no GRID section in dump for %s/%s", workbook, sheet)
         return dump
     fences = [i for i, line in enumerate(lines[grid_start:meta_start], grid_start) if line.strip() == FENCE]
     if len(fences) < MIN_FENCES:
+        logger.warning("unterminated grid fence in dump for %s/%s", workbook, sheet)
         return dump
     body = lines[fences[0] + 1 : fences[1]]
     if not body:

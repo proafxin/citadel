@@ -1,16 +1,16 @@
-import asyncio
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime
 from io import BytesIO
 
 import openpyxl
 from openpyxl.cell.cell import Cell as OpenpyxlCell
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.utils.cell import range_boundaries
+from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from citadel.services.grid import classify_grid, grid_text
 from citadel.tabular.materialize import MaterializedTable
-from citadel.tabular.structure import reconcile_sheet, structure_candidate
 
 type RawCellValue = str | int | float | bool | datetime | None
 
@@ -42,6 +42,18 @@ class SheetTable:
 
 
 @dataclass
+class SheetMetadata:
+    defined_names: dict[str, str] = field(default_factory=dict)
+    hidden_rows: list[int] = field(default_factory=list)
+    hidden_cols: list[str] = field(default_factory=list)
+    freeze: str | None = None
+    autofilter: str | None = None
+    validation: list[str] = field(default_factory=list)
+    cond_format: list[str] = field(default_factory=list)
+    hyperlinks: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class SheetExtraction:
     sheet_no: int
     sheet_name: str
@@ -51,6 +63,8 @@ class SheetExtraction:
     tables: list[SheetTable]
     images: list[bytes]
     merges: list[tuple[int, int, int, int]]
+    state: str = "visible"
+    metadata: SheetMetadata = field(default_factory=SheetMetadata)
 
 
 @dataclass
@@ -145,8 +159,49 @@ def _capture_merges(worksheet: Worksheet) -> list[tuple[int, int, int, int]]:
     )
 
 
-def extract_sheet(values_sheet: Worksheet, formulas_sheet: Worksheet, sheet_no: int) -> SheetExtraction:
+def _capture_metadata(worksheet: Worksheet, defined_names: dict[str, str]) -> SheetMetadata:
+    rows = [index for index, dimension in worksheet.row_dimensions.items() if dimension.hidden]
+    cols = [name for name, dimension in worksheet.column_dimensions.items() if dimension.hidden]
+    return SheetMetadata(
+        defined_names=defined_names,
+        hidden_rows=sorted(rows),
+        hidden_cols=sorted(cols, key=column_index_from_string),
+        freeze=worksheet.freeze_panes,
+        autofilter=worksheet.auto_filter.ref,
+        validation=[str(rule.sqref) for rule in worksheet.data_validations.dataValidation],
+        cond_format=[str(rule.sqref) for rule in worksheet.conditional_formatting],
+        hyperlinks={
+            cell.coordinate: str(cell.hyperlink.target)
+            for row in worksheet.iter_rows()
+            for cell in row
+            if cell.hyperlink is not None
+        },
+    )
+
+
+def _sheet_defined_names(workbook: Workbook, worksheet: Worksheet) -> dict[str, str]:
+    quoted = f"'{worksheet.title}'!"
+    plain = f"{worksheet.title}!"
+    found: dict[str, str] = {}
+    for scope, items in [("", workbook.defined_names.items())] + [
+        (f"[{sheet.title}]", sheet.defined_names.items()) for sheet in workbook.worksheets
+    ]:
+        for name, entry in items:
+            value = str(entry.value)
+            if value.startswith((quoted, plain)) or scope == f"[{worksheet.title}]":
+                found[f"{scope}{name}"] = value
+    return found
+
+
+def extract_sheet(
+    values_sheet: Worksheet,
+    formulas_sheet: Worksheet,
+    sheet_no: int,
+    metadata: SheetMetadata | None = None,
+) -> SheetExtraction:
     return SheetExtraction(
+        state=formulas_sheet.sheet_state,
+        metadata=metadata or SheetMetadata(),
         sheet_no=sheet_no,
         sheet_name=formulas_sheet.title,
         max_row=formulas_sheet.max_row or 0,
@@ -171,7 +226,12 @@ def load_all_sheets(data: bytes) -> list[SheetExtraction]:
     formulas_workbook = openpyxl.load_workbook(BytesIO(data), data_only=False)
     try:
         return [
-            extract_sheet(values_workbook.worksheets[index], formulas_sheet, index + 1)
+            extract_sheet(
+                values_workbook.worksheets[index],
+                formulas_sheet,
+                index + 1,
+                _capture_metadata(formulas_sheet, _sheet_defined_names(formulas_workbook, formulas_sheet)),
+            )
             for index, formulas_sheet in enumerate(formulas_workbook.worksheets)
         ]
     finally:
@@ -179,114 +239,179 @@ def load_all_sheets(data: bytes) -> list[SheetExtraction]:
         formulas_workbook.close()
 
 
-def _runs(indices: list[int]) -> list[tuple[int, int]]:
-    runs: list[tuple[int, int]] = []
-    start = prev = indices[0]
-    for index in indices[1:]:
-        if index == prev + 1:
-            prev = index
-        else:
-            runs.append((start, prev))
-            start = prev = index
-    runs.append((start, prev))
-    return runs
+FENCE = "````"
+FORMULA_OPEN = "\u2039"
+FORMULA_CLOSE = "\u203a"
 
 
-def find_regions(sheet: SheetExtraction) -> list[Region]:
-    if not sheet.cells:
-        return []
-    by_row: dict[int, list[Cell]] = {}
-    for cell in sheet.cells:
-        by_row.setdefault(cell.row, []).append(cell)
-    regions: list[Region] = []
-    for row_start, row_end in _runs(sorted(by_row)):
-        band = [cell for row in range(row_start, row_end + 1) for cell in by_row.get(row, [])]
-        for col_start, col_end in _runs(sorted({cell.col for cell in band})):
-            cells = [cell for cell in band if col_start <= cell.col <= col_end]
-            for local_row_start, local_row_end in _runs(sorted({cell.row for cell in cells})):
-                local_cells = [cell for cell in cells if local_row_start <= cell.row <= local_row_end]
-                regions.append(
-                    Region(
-                        min_row=local_row_start,
-                        min_col=col_start,
-                        max_row=local_row_end,
-                        max_col=col_end,
-                        cells=local_cells,
-                    )
-                )
-    return regions
+def _dump_text(value: str) -> str:
+    if not value.strip():
+        return ""
+    escaped = value.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n")
+    return escaped.replace("\t", " ").replace("|", "\\|")
 
 
-def region_comments(region: Region) -> list[str]:
-    ordered = sorted(region.cells, key=lambda cell: (cell.row, cell.col))
-    return [cell.comment for cell in ordered if cell.comment]
-
-
-def _render_cell(value: RawCellValue) -> str:
+def _dump_value(value: RawCellValue) -> str:
     if value is None:
         return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
     if isinstance(value, datetime):
-        return value.isoformat()
-    return str(value)
+        empty_time = (value.hour, value.minute, value.second, value.microsecond) == (0, 0, 0, 0)
+        return value.date().isoformat() if empty_time else value.isoformat(sep=" ")
+    if isinstance(value, float):
+        return f"{value:.10g}"
+    if isinstance(value, int):
+        return str(value)
+    return _dump_text(str(value))
 
 
-def region_grid(sheet: SheetExtraction, region: Region) -> list[list[str]]:
-    values = {(cell.row, cell.col): cell_value(cell) for cell in region.cells}
-    return [
-        [_render_cell(values.get((row, col))) for col in range(region.min_col, region.max_col + 1)]
-        for row in range(region.min_row, region.max_row + 1)
+def _dump_cell(cell: Cell) -> str:
+    rendered = _dump_value(cell.value)
+    if cell.formula is None:
+        return rendered
+    formula = cell.formula.replace("\n", " ").replace("|", "\\|")
+    marked = f"{FORMULA_OPEN}{formula}{FORMULA_CLOSE}"
+    return f"{rendered} {marked}" if rendered else marked
+
+
+def _column_runs(items: list[tuple[int, str]]) -> list[tuple[int, int, str]]:
+    runs: list[list] = []
+    for index, key in items:
+        if runs and runs[-1][2] == key and index == runs[-1][1] + 1:
+            runs[-1][1] = index
+        else:
+            runs.append([index, index, key])
+    return [(a, b, key) for a, b, key in runs]
+
+
+def _span_label(first: int, last: int) -> str:
+    return get_column_letter(first) if first == last else f"{get_column_letter(first)}-{get_column_letter(last)}"
+
+
+def _kind(cell: Cell) -> str:
+    if cell.formula is not None:
+        return "formula"
+    value = cell.value
+    if isinstance(value, datetime):
+        return "date"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    return "text"
+
+
+def render_sheet_dump(sheet: SheetExtraction, workbook: str) -> str:
+    grid = {(cell.row, cell.col): cell for cell in sheet.cells if _dump_cell(cell)}
+    lines = [f"# {workbook} / {sheet.sheet_name}", ""]
+    if not grid:
+        lines += ["Empty sheet: no populated cells.", ""]
+        return "\n".join(lines)
+    rows = [key[0] for key in grid]
+    cols = [key[1] for key in grid]
+    first_row, last_row, first_col, last_col = min(rows), max(rows), min(cols), max(cols)
+    extent = f"{get_column_letter(first_col)}{first_row}:{get_column_letter(last_col)}{last_row}"
+    formulas = sum(1 for cell in grid.values() if cell.formula is not None)
+    lines += [
+        f"- source: `{workbook}` sheet `{sheet.sheet_name}` (state: {sheet.state})",
+        (
+            f"- extent: `{extent}`  rows {first_row}-{last_row} ({last_row - first_row + 1})  "
+            f"cols {_span_label(first_col, last_col)} ({first_col}-{last_col}, {last_col - first_col + 1})"
+        ),
+        f"- populated cells: {len(grid)}  formula cells: {formulas}",
+        "",
+        "## GRID",
+        "",
+        FENCE,
+        "|".join(["#"] + [f"{get_column_letter(col)}({col})" for col in range(first_col, last_col + 1)]),
     ]
+    for row in range(first_row, last_row + 1):
+        values = [_dump_cell(grid[row, col]) if (row, col) in grid else "" for col in range(first_col, last_col + 1)]
+        while values and not values[-1]:
+            values.pop()
+        lines.append("|".join([str(row), *values]))
+    lines += [FENCE, "", "## METADATA", ""]
+
+    lines.extend(_dump_metadata(sheet, grid, first_row, last_row, first_col, last_col))
+    lines.append("")
+    return "\n".join(lines)
 
 
-def region_bold(sheet: SheetExtraction, region: Region) -> list[list[bool]]:
-    bold = {(cell.row, cell.col) for cell in region.cells if cell.bold}
-    return [
-        [(row, col) in bold for col in range(region.min_col, region.max_col + 1)]
-        for row in range(region.min_row, region.max_row + 1)
-    ]
-
-
-def region_values(sheet: SheetExtraction, region: Region) -> list[list[RawCellValue]]:
-    values = {(cell.row, cell.col): cell.value for cell in region.cells}
-    return [
-        [values.get((row, col)) for col in range(region.min_col, region.max_col + 1)]
-        for row in range(region.min_row, region.max_row + 1)
-    ]
-
-
-def _region_anchors(region: Region) -> dict:
-    return {"min_row": region.min_row, "min_col": region.min_col, "max_row": region.max_row, "max_col": region.max_col}
-
-
-async def extract_sheet_content(doc_id: str, sheet: SheetExtraction) -> list[tuple[int, SheetItem]]:
-    text: list[SheetItem] = []
-    candidates: list[tuple[Region, list[list[str]], list[list[RawCellValue]], list[list[bool]]]] = []
-    for region in find_regions(sheet):
-        grid = region_grid(sheet, region)
-        kind = classify_grid(grid)
-        if kind == "empty":
+def _column_summaries(
+    grid: dict[tuple[int, int], Cell], first_row: int, last_row: int, first_col: int, last_col: int
+) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
+    types: list[tuple[int, str]] = []
+    formats: list[tuple[int, str]] = []
+    for col in range(first_col, last_col + 1):
+        column = [grid[row, col] for row in range(first_row, last_row + 1) if (row, col) in grid]
+        if not column:
             continue
-        if kind != "table":
-            body = " ".join([grid_text(grid), *region_comments(region)]).strip()
-            text.append(SheetText(sheet_no=sheet.sheet_no, text=body))
-            continue
-        candidates.append((region, grid, region_values(sheet, region), region_bold(sheet, region)))
-    items: list[SheetItem] = list(text)
-    if candidates:
-        resolved = await asyncio.gather(
-            *(
-                structure_candidate(
-                    grid,
-                    key=f"structure:{doc_id}:sheet{sheet.sheet_no}:{index}",
-                    known_table=False,
-                    sheet_no=sheet.sheet_no,
-                    anchors=_region_anchors(region),
-                    values=values,
-                    bold=bold,
-                )
-                for index, (region, grid, values, bold) in enumerate(candidates)
-            )
-        )
-        produced = [table for tables in resolved for table in tables]
-        items.extend(await reconcile_sheet(produced, key=f"reconcile:{doc_id}:sheet{sheet.sheet_no}"))
-    return list(enumerate(items, start=1))
+        counts = Counter(_kind(cell) for cell in column)
+        types.append((col, "/".join(f"{name}:{n}" for name, n in counts.most_common())))
+        seen = sorted({cell.number_format for cell in column} - {"General"})
+        if seen:
+            formats.append((col, ",".join(seen[:3])))
+    return types, formats
+
+
+def _dump_metadata(
+    sheet: SheetExtraction,
+    grid: dict[tuple[int, int], Cell],
+    first_row: int,
+    last_row: int,
+    first_col: int,
+    last_col: int,
+) -> list[str]:
+    lines: list[str] = []
+    merged = [
+        f"{get_column_letter(c0)}{r0}:{get_column_letter(c1)}{r1}"
+        for r0, c0, r1, c1 in sorted(sheet.merges, key=lambda box: (box[0], -box[1]))
+    ]
+    lines.append(f"- MERGED: {' | '.join(merged) or '-'}")
+    types, formats = _column_summaries(grid, first_row, last_row, first_col, last_col)
+    spans = "  ".join(f"{_span_label(a, b)} {k}" for a, b, k in _column_runs(types))
+    lines.append(f"- TYPES: {spans or '-'}")
+    spans = "  ".join(f"{_span_label(a, b)} {k}" for a, b, k in _column_runs(formats))
+    lines.append(f"- FORMATS: {spans or '-'}")
+    meta = sheet.metadata
+    lines.extend(
+        [
+            f"- HIDDEN: rows {meta.hidden_rows or '-'}  cols {meta.hidden_cols or '-'}",
+            f"- FREEZE: {meta.freeze or '-'}",
+            f"- AUTOFILTER: {meta.autofilter or '-'}",
+        ]
+    )
+    listobjects = [
+        f"{get_column_letter(item.min_col)}{item.min_row}:{get_column_letter(item.max_col)}{item.max_row}"
+        for item in sheet.tables
+    ]
+    lines.append(f"- LISTOBJECTS: {listobjects or '-'}")
+    names = " | ".join(f"{name}={value}" for name, value in meta.defined_names.items())
+    lines.extend(
+        [
+            f"- DEFINED NAMES: {names or '-'}",
+            f"- VALIDATION: {' | '.join(meta.validation) or '-'}",
+            f"- CONDFMT: {' | '.join(meta.cond_format) or '-'}",
+        ]
+    )
+    comments = " | ".join(
+        f"{get_column_letter(cell.col)}{cell.row}={_dump_text(cell.comment)[:80]}"
+        for cell in sheet.cells
+        if cell.comment
+    )
+    lines.append(f"- COMMENTS: {comments or '-'}")
+    links = " | ".join(f"{ref}={target}" for ref, target in meta.hyperlinks.items())
+    lines.append(f"- HYPERLINKS: {links or '-'}")
+    by_row: dict[int, list[int]] = {}
+    for cell in sheet.cells:
+        if cell.bold and (cell.row, cell.col) in grid:
+            by_row.setdefault(cell.row, []).append(cell.col)
+    signature = [
+        (row, ",".join(get_column_letter(col) for col in sorted(cols))) for row, cols in sorted(by_row.items())
+    ]
+    bold_text = "  ".join(f"rows {a}-{b} cols {key}" for a, b, key in _column_runs(signature))
+    lines.append(f"- BOLD: {bold_text or '-'}")
+    return lines

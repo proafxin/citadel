@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from citadel.llm import MODEL_CTX, call_structured, count_tokens
 from citadel.tabular.sheet_dump import SheetDump
 from citadel.tabular.sheet_structure import (
-    SheetExtraction,
+    SheetTables,
     coverage,
     fill_computed,
     request_schema,
@@ -47,7 +47,7 @@ def build_prompt(dump_text: str, attempt: str | None, problems: list[str]) -> st
                 "## Your previous answer\n\n" + attempt,
                 "## Validation failures\n\n"
                 + "\n".join(f"- {problem}" for problem in problems)
-                + "\n\nReturn a corrected SheetExtraction. Every row in the extent must be covered exactly once.",
+                + "\n\nReturn a corrected SheetTables. Every row in the extent must be covered exactly once.",
             ]
         )
     return "\n\n".join(parts)
@@ -59,7 +59,7 @@ def fits_context(dump: SheetDump, dump_text: str) -> tuple[bool, int, int]:
     return needed <= allowed, needed, allowed
 
 
-async def extract_sheet(dump: SheetDump, dump_text: str, max_rounds: int = MAX_ROUNDS) -> SheetExtraction:
+async def extract_sheet(dump: SheetDump, dump_text: str, max_rounds: int = MAX_ROUNDS) -> SheetTables:
     fits, needed, allowed = fits_context(dump, dump_text)
     if not fits:
         message = f"{dump.workbook}/{dump.sheet} needs {needed} input tokens, budget is {allowed}"
@@ -72,7 +72,7 @@ async def extract_sheet(dump: SheetDump, dump_text: str, max_rounds: int = MAX_R
         prompt = build_prompt(dump_text, attempt, problems)
         try:
             raw = await call_structured(prompt, schema, max_tokens=budget)
-            extraction = fill_computed(dump, SheetExtraction.model_validate(raw))
+            extraction = fill_computed(dump, SheetTables.model_validate(raw))
         except json.JSONDecodeError:
             attempt = None
             problems = [f"the response was not valid JSON, most likely truncated at {budget} tokens"]
@@ -97,8 +97,16 @@ async def extract_sheet(dump: SheetDump, dump_text: str, max_rounds: int = MAX_R
             )
             return extraction
         attempt = extraction.model_dump_json()
-        logger.info(
-            "round %d rejected %s/%s: %s", round_index, dump.workbook, dump.sheet, "; ".join(problems[:3])
-        )
-    message = f"no valid extraction for {dump.workbook}/{dump.sheet} after {max_rounds} rounds"
-    raise RuntimeError(message)
+        logger.info("round %d rejected %s/%s: %s", round_index, dump.workbook, dump.sheet, "; ".join(problems[:3]))
+    logger.warning(
+        "no valid extraction for %s/%s after %d rounds, reporting sheet as unresolved: %s",
+        dump.workbook,
+        dump.sheet,
+        max_rounds,
+        "; ".join(problems[:3]),
+    )
+    return SheetTables(
+        workbook=dump.workbook,
+        sheet=dump.sheet,
+        unresolved=[f"{dump.extent} could not be structured: {problem}" for problem in problems[:5]],
+    )
