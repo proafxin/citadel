@@ -239,6 +239,7 @@ def load_all_sheets(data: bytes) -> list[SheetExtraction]:
         formulas_workbook.close()
 
 
+DUMP_VERSION = 1
 FENCE = "````"
 FORMULA_OPEN = "\u2039"
 FORMULA_CLOSE = "\u203a"

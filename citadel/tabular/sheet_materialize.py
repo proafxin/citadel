@@ -4,7 +4,15 @@ import time
 from openpyxl.utils import get_column_letter
 
 from citadel.schemas.table import TableStructure as GridStructure
-from citadel.services.excel import Cell, SheetExtraction, SheetItem, SheetText, cell_value, render_sheet_dump
+from citadel.services.excel import (
+    DUMP_VERSION,
+    Cell,
+    SheetExtraction,
+    SheetItem,
+    SheetText,
+    cell_value,
+    render_sheet_dump,
+)
 from citadel.tabular.materialize import MaterializedTable, materialize
 from citadel.tabular.sheet_agent import extract_sheet, fits_context
 from citadel.tabular.sheet_dump import SheetDump, parse_dump
@@ -62,8 +70,9 @@ def grid_structure(table: TableStructure, rows: list[int], width: int) -> GridSt
     )
 
 
-def anchors(table: TableStructure, box: tuple[int, int, int, int]) -> dict:
+def anchors(table: TableStructure, box: tuple[int, int, int, int], tables: SheetTables) -> dict:
     return {
+        "table_id": table.table_id,
         "extent": table.extent,
         "min_row": box[0],
         "min_col": box[1],
@@ -71,6 +80,17 @@ def anchors(table: TableStructure, box: tuple[int, int, int, int]) -> dict:
         "max_col": box[3],
         "orientation": table.orientation.value,
         "confidence": table.confidence.value,
+        "support": table.support,
+        "sheet_rows": {
+            "header": table.header_rows,
+            "body": [[span.from_row, span.to_row] for span in table.body_rows],
+            "totals": table.totals_rows,
+            "band_label": table.band_label_rows,
+        },
+        "group_name": table.group_name,
+        "rounds": tables.rounds,
+        "unresolved": tables.unresolved,
+        "dump_version": DUMP_VERSION,
     }
 
 
@@ -115,7 +135,7 @@ def materialize_sheet(
             sheet_no=sheet.sheet_no,
             formulas=formulas or None,
             extra_notes=[block.summary for block in tables.blocks] or None,
-            anchors=anchors(table, box),
+            anchors=anchors(table, box, tables),
         )
         apply_groups(built, table, box)
         produced.append((order, built))

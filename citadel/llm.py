@@ -26,6 +26,15 @@ _call_no = itertools.count()
 
 NO_TIMEOUT = httpx.Timeout(None)
 
+SAMPLING = {
+    "temperature": 0.7,
+    "top_p": 0.80,
+    "top_k": 20,
+    "min_p": 0.0,
+    "presence_penalty": 1.1,
+    "repetition_penalty": 1.0,
+}
+STRUCTURED_SAMPLING = {**SAMPLING, "temperature": 0.0}
 MODEL_CTX = 65536
 OCR_CTX = 16384
 STRUCT_MAX_TOKENS = 4096
@@ -111,7 +120,7 @@ def _struct_payload(prompt: str, schema: dict, max_tokens: int = STRUCT_MAX_TOKE
     return {
         "model": QWEN_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
+        **STRUCTURED_SAMPLING,
         "max_tokens": max_tokens,
         "response_format": {"type": "json_schema", "json_schema": {"name": "output", "schema": schema}},
         "chat_template_kwargs": {"enable_thinking": False},
@@ -123,7 +132,7 @@ def _text_payload(prompt: str, max_tokens: int) -> dict:
     return {
         "model": QWEN_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
+        **SAMPLING,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
         "reasoning_effort": "none",
@@ -196,7 +205,7 @@ async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -
                 ],
             }
         ],
-        "temperature": 0,
+        **STRUCTURED_SAMPLING,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
         "reasoning_effort": "none",
@@ -220,7 +229,13 @@ async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -
 
 
 async def call_structured(prompt: str, schema: dict, max_tokens: int = STRUCTURE_MAX_TOKENS) -> dict:
-    raw = await _post_qwen(_struct_payload(prompt, _inline_refs(schema), max_tokens))
+    cap = get_interactive_capacity()
+    key = _local_key("structured")
+    await cap.acquire(key)
+    try:
+        raw = await _post_qwen(_struct_payload(prompt, _inline_refs(schema), max_tokens))
+    finally:
+        await cap.release(key)
     try:
         return json.loads(extract_json(raw))
     except json.JSONDecodeError:
@@ -343,12 +358,7 @@ async def synthesize(query: str, passages: list[str], results: list[str]) -> Asy
     payload = {
         "model": QWEN_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
-        "top_p": 0.80,
-        "top_k": 20,
-        "min_p": 0.0,
-        "presence_penalty": 1.5,
-        "repetition_penalty": 1.0,
+        **SAMPLING,
         "max_tokens": SYNTH_MAX_TOKENS,
         "chat_template_kwargs": {"enable_thinking": False},
         "reasoning_effort": "none",
@@ -372,12 +382,7 @@ async def write_final_report(query: str, text_report: str, table_report: str) ->
     payload = {
         "model": QWEN_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
-        "top_p": 0.80,
-        "top_k": 20,
-        "min_p": 0.0,
-        "presence_penalty": 1.5,
-        "repetition_penalty": 1.0,
+        **SAMPLING,
         "max_tokens": SYNTH_MAX_TOKENS,
         "chat_template_kwargs": {"enable_thinking": False},
         "reasoning_effort": "none",

@@ -83,6 +83,7 @@ class SheetTables(BaseModel):
     blocks: list[NonTableBlock] = Field(default_factory=list)
     row_roles: list[RowSpan] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
+    rounds: int = 0
 
 
 def assigned_rows(extraction: SheetTables) -> dict[int, RowRole]:
@@ -224,13 +225,47 @@ def validate_responsive(extraction: SheetTables) -> list[str]:
     return []
 
 
+def validate_groups(table: TableStructure) -> list[str]:
+    grouped = [column for column in table.columns if column.group]
+    if not grouped:
+        if table.orientation == Orientation.REPEATED_GROUPS:
+            message = (
+                f"table {table.table_id} is {Orientation.REPEATED_GROUPS.value} but no column carries a group; "
+                "each repeat needs a group label that identifies it the way a primary key would"
+            )
+            return [message]
+        return []
+    sizes: dict[str, int] = {}
+    for column in grouped:
+        sizes[column.group or ""] = sizes.get(column.group or "", 0) + 1
+    problems: list[str] = []
+    repeats = len(sizes)
+    if repeats > 1 and len({*sizes.values()}) > 1:
+        shape = ", ".join(f"{name}={count}" for name, count in sorted(sizes.items()))
+        problems.append(
+            f"table {table.table_id} repeats are uneven ({shape}); every repeat of a group must span the same columns"
+        )
+    if repeats == 1 and len(grouped) > 1 and table.orientation == Orientation.REPEATED_GROUPS:
+        problems.append(
+            f"table {table.table_id} gives every column the same group {next(iter(sizes))!r}; "
+            "a label shared by all repeats cannot identify them, choose the header row whose value differs per repeat"
+        )
+    return problems
+
+
 def validate_extraction(dump: SheetDump, extraction: SheetTables) -> list[str]:
     problems = validate_roles(dump, extraction)
-    problems.extend(validate_responsive(extraction))
     for table in extraction.tables:
         problems.extend(validate_table(dump, table))
     problems.extend(validate_overlaps(extraction))
     return problems
+
+
+def review_extraction(extraction: SheetTables) -> list[str]:
+    notes = validate_responsive(extraction)
+    for table in extraction.tables:
+        notes.extend(validate_groups(table))
+    return notes
 
 
 def normalise_ref(ref: str) -> str:
@@ -289,7 +324,7 @@ def score_extraction(dump: SheetDump, extraction: SheetTables) -> dict[str, int]
 
 
 COMPUTED_FIELDS = {
-    "SheetTables": ("workbook", "sheet"),
+    "SheetTables": ("workbook", "sheet", "rounds"),
     "TableStructure": ("confidence", "support"),
     "ColumnDef": ("index",),
 }
