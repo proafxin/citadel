@@ -527,9 +527,7 @@ async def handle_tabular(fields: dict[str, str]) -> None:
         sheet = await _get_sheet(doc_id, sheet_no)
         workbook = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode() or f"doc{doc_id}"
         items = await structure_sheet(sheet, workbook)
-        logger.info(
-            "doc %s sheet %d (%s) produced %d items", doc_id, sheet_no, sheet.sheet_name, len(items)
-        )
+        logger.info("doc %s sheet %d (%s) produced %d items", doc_id, sheet_no, sheet.sheet_name, len(items))
         image_items = await resolve_sheet_images(doc_id, f"sheet{sheet_no}", sheet_no, sheet.images)
         if image_items:
             start = (items[-1][0] + 1) if items else 1
