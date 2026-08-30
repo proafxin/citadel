@@ -40,6 +40,12 @@ class RowRange(BaseModel):
     to_row: int
 
 
+class Band(BaseModel):
+    label: str
+    from_row: int
+    to_row: int
+
+
 class ColumnDef(BaseModel):
     letter: str
     name: str
@@ -58,6 +64,8 @@ class TableStructure(BaseModel):
     band_label_rows: list[int] = Field(default_factory=list)
     columns: list[ColumnDef] = Field(default_factory=list)
     group_name: str | None = None
+    band_name: str | None = None
+    bands: list[Band] = Field(default_factory=list)
     orientation: Orientation = Orientation.ROW_RECORDS
     evidence: list[str] = Field(default_factory=list)
     confidence: Confidence = Confidence.INFERRED
@@ -154,9 +162,16 @@ def validate_roles(dump: SheetDump, extraction: SheetTables) -> list[str]:
     outside = sorted(row for row in roles if not dump.first_row <= row <= dump.last_row)
     if outside:
         problems.append(f"row_roles covers rows outside extent {dump.extent}: {spans(outside)[:PREVIEW]}")
-    counted = sum(abs(span.to_row - span.from_row) + 1 for span in extraction.row_roles)
-    if counted > len(roles):
-        problems.append(f"row spans overlap: {counted} rows declared but {len(roles)} distinct")
+    seen: set[int] = set()
+    doubled: set[int] = set()
+    for span in extraction.row_roles:
+        for row in range(min(span.from_row, span.to_row), max(span.from_row, span.to_row) + 1):
+            if row in seen:
+                doubled.add(row)
+            seen.add(row)
+    if doubled:
+        listed = ", ".join(spans(sorted(doubled))[:PREVIEW])
+        problems.append(f"rows {listed} are covered by more than one row_roles span; each row needs exactly one")
     return problems
 
 
@@ -187,6 +202,13 @@ def validate_table(dump: SheetDump, table: TableStructure) -> list[str]:
             problems.append(f"table {table.table_id} {label} outside its own extent {table.extent}: {stray[:PREVIEW]}")
     if not table.body_rows:
         problems.append(f"table {table.table_id} has no body rows")
+    clash = sorted(set(body_row_numbers(table)) & {*table.totals_rows, *table.band_label_rows})
+    if clash:
+        listed = ", ".join(spans(clash)[:PREVIEW])
+        problems.append(
+            f"table {table.table_id} lists rows {listed} as body and also as totals or band labels; "
+            "a row has one role"
+        )
     return problems
 
 
@@ -339,7 +361,17 @@ def prune(node: dict, names: tuple[str, ...]) -> None:
 
 REQUIRED_FIELDS = {
     "SheetTables": ("tables", "blocks", "row_roles"),
-    "TableStructure": ("table_id", "extent", "header_rows", "body_rows", "columns", "orientation", "group_name"),
+    "TableStructure": (
+        "table_id",
+        "extent",
+        "header_rows",
+        "body_rows",
+        "columns",
+        "orientation",
+        "group_name",
+        "band_name",
+        "bands",
+    ),
     "ColumnDef": ("letter", "name", "group", "header_parts"),
 }
 

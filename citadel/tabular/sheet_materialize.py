@@ -48,6 +48,17 @@ def build_grid(index: dict[tuple[int, int], Cell], rows: list[int], first_col: i
     return [[render(index.get((row, col))) for col in range(first_col, last_col + 1)] for row in rows]
 
 
+DEFAULT_BAND_NAME = "section"
+
+
+def band_for_rows(table: TableStructure) -> dict[int, str]:
+    out: dict[int, str] = {}
+    for band in table.bands:
+        for row in range(min(band.from_row, band.to_row), max(band.from_row, band.to_row) + 1):
+            out[row] = band.label
+    return out
+
+
 def grid_structure(table: TableStructure, rows: list[int], width: int) -> GridStructure | None:
     positions = {row: offset for offset, row in enumerate(rows)}
     header = [positions[row] for row in table.header_rows if row in positions]
@@ -88,6 +99,8 @@ def anchors(table: TableStructure, box: tuple[int, int, int, int], tables: Sheet
             "band_label": table.band_label_rows,
         },
         "group_name": table.group_name,
+        "band_name": table.band_name,
+        "bands": [[band.label, band.from_row, band.to_row] for band in table.bands],
         "rounds": tables.rounds,
         "unresolved": tables.unresolved,
         "dump_version": DUMP_VERSION,
@@ -117,7 +130,13 @@ def materialize_sheet(
             logger.warning("skipping %s: no rows inside extent %s", table.table_id, table.extent)
             continue
         grid = build_grid(index, rows, box[1], box[3])
-        structure = grid_structure(table, rows, box[3] - box[1] + 1)
+        bands = band_for_rows(table)
+        if bands:
+            grid = [
+                [*cells, "" if row in table.band_label_rows else bands.get(row, "")]
+                for row, cells in zip(rows, grid, strict=True)
+            ]
+        structure = grid_structure(table, rows, box[3] - box[1] + 1 + (1 if bands else 0))
         if structure is None:
             logger.warning("skipping %s: no body rows inside extent %s", table.table_id, table.extent)
             continue
@@ -138,6 +157,9 @@ def materialize_sheet(
             anchors=anchors(table, box, tables),
         )
         apply_groups(built, table, box)
+        if bands and built.columns:
+            built.columns[-1].header = table.band_name or DEFAULT_BAND_NAME
+            built.columns[-1].group = None
         produced.append((order, built))
     return produced
 

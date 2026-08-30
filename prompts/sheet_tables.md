@@ -21,4 +21,6 @@ Every row in the extent must be covered by exactly one `row_roles` span, and tho
 
 `group_name` names what a table's column groups are instances of, as a column name would read, or is null when its columns are not grouped.
 
+`bands` carries a table's sections: each label with the first and last row it covers. A label may sit on a row of its own or share a row with the header. `band_name` names what those labels are instances of, as a column name would read.
+
 `blocks` carries every region that is not a table, each with its extent and a one-line summary. A sheet with no tables still has blocks.
