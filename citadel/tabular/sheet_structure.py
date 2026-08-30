@@ -42,8 +42,8 @@ class RowRange(BaseModel):
 
 class ColumnDef(BaseModel):
     letter: str
-    index: int
     name: str
+    index: int = 0
     header_parts: list[str] = Field(default_factory=list)
     group: str | None = None
 
@@ -76,8 +76,8 @@ class RowSpan(BaseModel):
 
 
 class SheetExtraction(BaseModel):
-    workbook: str
-    sheet: str
+    workbook: str = ""
+    sheet: str = ""
     tables: list[TableStructure] = Field(default_factory=list)
     blocks: list[NonTableBlock] = Field(default_factory=list)
     row_roles: list[RowSpan] = Field(default_factory=list)
@@ -260,3 +260,57 @@ def score_extraction(dump: SheetDump, extraction: SheetExtraction) -> dict[str, 
         table.support = support
         tally[level.value] = tally.get(level.value, 0) + 1
     return tally
+
+
+COMPUTED_FIELDS = {
+    "SheetExtraction": ("workbook", "sheet"),
+    "TableStructure": ("confidence", "support"),
+    "ColumnDef": ("index",),
+}
+
+
+def prune(node: dict, names: tuple[str, ...]) -> None:
+    for name in names:
+        node.get("properties", {}).pop(name, None)
+        if name in node.get("required", []):
+            node["required"].remove(name)
+
+
+REQUIRED_FIELDS = {
+    "SheetExtraction": ("tables", "blocks", "row_roles"),
+    "TableStructure": ("table_id", "extent", "header_rows", "body_rows", "columns", "orientation"),
+    "ColumnDef": ("letter", "name"),
+}
+
+
+def require(node: dict, names: tuple[str, ...]) -> None:
+    present = node.get("properties", {})
+    required = node.setdefault("required", [])
+    for name in names:
+        if name in present and name not in required:
+            required.append(name)
+
+
+def request_schema() -> dict:
+    schema = SheetExtraction.model_json_schema()
+    prune(schema, COMPUTED_FIELDS["SheetExtraction"])
+    require(schema, REQUIRED_FIELDS["SheetExtraction"])
+    for name, fields in COMPUTED_FIELDS.items():
+        target = schema.get("$defs", {}).get(name)
+        if target is not None:
+            prune(target, fields)
+    for name, fields in REQUIRED_FIELDS.items():
+        target = schema.get("$defs", {}).get(name)
+        if target is not None:
+            require(target, fields)
+    return schema
+
+
+def fill_computed(dump: SheetDump, extraction: SheetExtraction) -> SheetExtraction:
+    extraction.workbook = dump.workbook
+    extraction.sheet = dump.sheet
+    for table in extraction.tables:
+        for column in table.columns:
+            letters = "".join(ch for ch in column.letter.upper() if ch.isalpha())
+            column.index = column_index_from_string(letters) if letters else 0
+    return extraction

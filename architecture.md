@@ -236,9 +236,10 @@ canonical shape: typed columns (each a header and a type), the full rows, a samp
 title/caption/notes, and provenance. The full rows are **stored as relational rows and queried by structured
 query — never embedded.**
 
-The rule that makes it trustworthy: **the model emits structure and descriptions, never data.** It sees only
-an anchoring view of the table — its size and enough of its rows to see the shape — and returns that shape;
-every cell is copied verbatim from the source and column types are inferred from the values. This is the same
+The rule that makes it trustworthy: **the model emits structure and descriptions, never data.** How much it
+sees varies — an anchoring view of a large markup table, a spreadsheet sheet in full — but what it returns
+never does: a shape, in coordinates. Every cell is copied verbatim from the source by the code that reads it,
+and column types are inferred from the values. This is the same
 boundary the query side relies on: the model writes the query, the database computes the values. It exists
 because the failure mode of every "AI reads your spreadsheet" system is the model quietly misreading or
 re-adding a number — so the model is never in a position to touch a value.
@@ -247,8 +248,7 @@ A second rule decides *when* a model is asked at all, and it splits into two dif
 to be conflated: **where do a table's boundaries lie**, and **what is its internal shape**. Boundaries are
 genuinely ambiguous only for a **spreadsheet's raw cell grid** — tables can begin anywhere on a sheet, several
 can share one, and nothing in the file says which cells belong to which table. That is the one place a model
-is shown several candidates at once and asked to decide membership, drop the spurious ones, and merge
-fragments of one table split apart.
+is shown the sheet **whole** and asked to account for every row of it.
 
 Internal shape — which rows are the header, whether the table is transposed, where a section label sits — is
 a narrower question that a *bounded, single* table can also need answered even when its boundaries were never
@@ -300,10 +300,10 @@ reshape.
 
 By source:
 
-- **Spreadsheets** — every cell, merge, table object and frozen pane is captured; contiguous regions are
-  found and each region's structure resolved by the model from an anchoring view. **The one ambiguous source,
-  and the only one that costs a structure call for boundaries as well as shape.** Column names are still
-  derived from the header rows the model points at, never written by it.
+- **Spreadsheets** — every cell, merge, defined name, table object, hidden row and frozen pane is captured
+  into a text dump of the whole sheet, and that dump — not a sample of it — is what the model is shown.
+  **The one ambiguous source, and the only one that costs a structure call for boundaries as well as shape.**
+  Column names are still derived from the header rows the model points at, never written by it.
 - **CSV/TSV** — one schema by construction. The parser handles quoting, embedded newlines and ragged rows,
   skips leading blank lines, and names the columns from the first non-empty row. No model.
 - **JSON** — shredded deterministically into normalized, joinable tables: nested objects flattened by key
@@ -327,24 +327,47 @@ By source:
   of itself as fits a dedicated budget for that call (top rows, bottom rows, and an even spread of the middle
   when it doesn't all fit), never a flat row count.
 
-**The spreadsheet-candidate call is a different, deliberately narrower view, and stays that way.** It is
-shown a small bounded sample and never the whole table — the top few rows, the bottom few, and an even spread
-in between — against every column, because the columns are the schema and a header dropped is a schema lost.
-This payload is a function of a table's width, never of its length: a small sheet and an enormous one cost
-the same call. Sizing *this* view by a token budget was tried and rejected — because several candidates share
-one packed call here, letting any one candidate's view grow with its size let a prompt balloon to fill
-whatever window was available, producing outsized requests just to decide which rows were headers. A single
-bounded table's own structuring call doesn't share that risk (nothing else is packed alongside it, and its
-budget is a fixed ceiling tied to the model's context window, not "whatever fits") — which is why that call
-was moved to a size-aware budget while this one was not.
+**The spreadsheet call is one sheet in, one structure out, and the sheet is shown whole.** Pre-segmenting the
+grid into candidate regions was tried and rejected. Geometry cannot decide a spreadsheet's boundaries: a blank
+row separates two tables on one sheet and is decorative spacing between every data row on another; a lone
+string in column A is a totals row in one place and the next table's caption two rows later, with nothing
+geometric distinguishing them. A connected-component pass over a real corpus split a single table into ten
+fragments and merged two unrelated ones, and the errors ran in both directions at once. The asymmetry settles
+it: a model shown the whole sheet can always split it, but a model shown fragments cannot merge what it was
+never shown together — over-segmentation is unrecoverable, under-segmentation is just a judgment the model
+makes with the evidence in front of it.
 
-Structure detection over-produces — a block of prose gridded into cells, a figure or a caption read as a
-one-row table, a region that is not tabular at all — so membership is not a separate step but part of the
-same spreadsheet-candidate call described above: shown every candidate at once, the model structures each
-real table, drops the spurious ones, and merges the ones that are one table split apart, all in a single pass.
-There is no standalone validation call; a spurious grid is dropped in the same response that structures the
-genuine ones, before it ever reaches the query side. The model decides *membership*, never content — the
-same boundary as structure.
+So the sheet is rendered to text losslessly — every row including blank ones, every populated cell with its
+formula, then a fixed metadata block carrying merges, defined names, number formats, hidden rows and bold
+cells — and the model returns every table in it plus a role for **every row**. Blank rows are printed rather
+than skipped because they are the primary boundary signal; formulas travel inline because an aggregate names
+its own body extent (`=SUM(J12:J15)` says the rows above it are one table's body); defined names travel
+because authors often declared the table already. None of that is explained to the model — the dump carries
+the evidence and reading it is ordinary comprehension.
+
+Completeness is enforced structurally rather than asked for. The returned row roles must cover the sheet's
+extent exactly once with no gaps and no overlaps, every table's rows must fall inside its own declared extent,
+and no two tables may occupy intersecting rectangles — intersecting *rectangles*, not rows, because side-by-side
+tables legitimately share rows in different columns. A failure returns the specific violated rows to the model
+and it revises; the loop is bounded, and a span it genuinely cannot explain is reported as unresolved rather
+than guessed at, so a gap surfaces as a gap.
+
+Confidence is **computed, not reported**. Asked to self-assess, a model will cite a defined name and then
+return an extent that contradicts it, in the same response — it has no point at which it compares its own
+conclusion against the source it just quoted. So the extent is checked in code against the declared structure
+already parsed out of the sheet: a defined name or merge whose rows coincide with the extent, or an aggregate
+range that covers the body within the one row of padding authors habitually leave. Agreement makes it
+corroborated; nothing independent makes it inferred. That is a claim about evidence, not correctness.
+
+Structure detection still over-produces — a block of prose gridded into cells, a caption read as a one-row
+table, a region that is not tabular at all. Membership is not a separate step: the same call reports the
+non-table regions explicitly as blocks, so a title, a note, a legend, a key-value form or a packed text column
+is named as what it is rather than silently dropped or promoted to a table. The model decides *membership*,
+never content — the same boundary as structure.
+
+A sheet too large to show whole is the one case this does not yet cover; windowing it without reintroducing
+the fragmentation problem is open work, and the four sheets that hit it in the working corpus are the test
+for it.
 
 ## Search representation
 

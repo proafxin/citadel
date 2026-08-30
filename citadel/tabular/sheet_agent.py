@@ -7,14 +7,20 @@ from pydantic import ValidationError
 
 from citadel.llm import MODEL_CTX, call_structured, count_tokens
 from citadel.tabular.sheet_dump import SheetDump
-from citadel.tabular.sheet_structure import SheetExtraction, coverage, score_extraction, validate_extraction
+from citadel.tabular.sheet_structure import (
+    SheetExtraction,
+    coverage,
+    fill_computed,
+    request_schema,
+    score_extraction,
+    validate_extraction,
+)
 
 logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "sheet_tables.md"
 MAX_ROUNDS = 4
-BASE_OUTPUT_TOKENS = 4096
-TOKENS_PER_COLUMN = 128
+MIN_OUTPUT_TOKENS = 2048
 MAX_OUTPUT_TOKENS = 16384
 RETRY_HEADROOM = 4096
 
@@ -24,9 +30,13 @@ def system_prompt() -> str:
     return PROMPT_PATH.read_text(encoding="utf-8")
 
 
-def output_budget(dump: SheetDump) -> int:
-    estimate = BASE_OUTPUT_TOKENS + TOKENS_PER_COLUMN * max(len(dump.columns), 1)
-    return min(estimate, MAX_OUTPUT_TOKENS)
+def input_tokens(dump_text: str) -> int:
+    return count_tokens(system_prompt()) + count_tokens(dump_text)
+
+
+def output_budget(dump_text: str) -> int:
+    free = MODEL_CTX - input_tokens(dump_text) - RETRY_HEADROOM
+    return max(MIN_OUTPUT_TOKENS, min(MAX_OUTPUT_TOKENS, free))
 
 
 def build_prompt(dump_text: str, attempt: str | None, problems: list[str]) -> str:
@@ -43,13 +53,9 @@ def build_prompt(dump_text: str, attempt: str | None, problems: list[str]) -> st
     return "\n\n".join(parts)
 
 
-def input_budget(dump: SheetDump) -> int:
-    return MODEL_CTX - output_budget(dump) - RETRY_HEADROOM
-
-
 def fits_context(dump: SheetDump, dump_text: str) -> tuple[bool, int, int]:
-    needed = count_tokens(system_prompt()) + count_tokens(dump_text)
-    allowed = input_budget(dump)
+    needed = input_tokens(dump_text)
+    allowed = MODEL_CTX - MIN_OUTPUT_TOKENS - RETRY_HEADROOM
     return needed <= allowed, needed, allowed
 
 
@@ -58,15 +64,15 @@ async def extract_sheet(dump: SheetDump, dump_text: str, max_rounds: int = MAX_R
     if not fits:
         message = f"{dump.workbook}/{dump.sheet} needs {needed} input tokens, budget is {allowed}"
         raise ValueError(message)
-    schema = SheetExtraction.model_json_schema()
-    budget = output_budget(dump)
+    schema = request_schema()
+    budget = output_budget(dump_text)
     attempt: str | None = None
     problems: list[str] = []
     for round_index in range(max_rounds):
         prompt = build_prompt(dump_text, attempt, problems)
         try:
             raw = await call_structured(prompt, schema, max_tokens=budget)
-            extraction = SheetExtraction.model_validate(raw)
+            extraction = fill_computed(dump, SheetExtraction.model_validate(raw))
         except json.JSONDecodeError:
             attempt = None
             problems = [f"the response was not valid JSON, most likely truncated at {budget} tokens"]
