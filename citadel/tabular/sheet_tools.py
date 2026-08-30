@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from citadel.tabular.sheet_dump import Cell, SheetDump
 
 RANGE = re.compile(r"^\$?([A-Z]{1,3})\$?(\d+)(?::\$?([A-Z]{1,3})\$?(\d+))?$")
+AGGREGATE = re.compile(r"\b(SUM|AVERAGE|AVERAGEA|COUNT|COUNTA|SUBTOTAL|MIN|MAX)\(([^()]*?:[^()]*?)\)")
 MAX_HITS = 200
 MAX_VALUES = 50
 

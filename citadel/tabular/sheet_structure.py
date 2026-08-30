@@ -4,7 +4,7 @@ from openpyxl.utils import column_index_from_string
 from pydantic import BaseModel, Field
 
 from citadel.tabular.sheet_dump import SheetDump
-from citadel.tabular.sheet_tools import RANGE
+from citadel.tabular.sheet_tools import AGGREGATE, RANGE
 
 
 class RowRole(StrEnum):
@@ -35,6 +35,11 @@ class Confidence(StrEnum):
     UNCERTAIN = "uncertain"
 
 
+class RowRange(BaseModel):
+    from_row: int
+    to_row: int
+
+
 class ColumnDef(BaseModel):
     letter: str
     index: int
@@ -48,13 +53,14 @@ class TableStructure(BaseModel):
     extent: str
     caption: str | None = None
     header_rows: list[int] = Field(default_factory=list)
-    body_rows: list[int] = Field(default_factory=list)
+    body_rows: list[RowRange] = Field(default_factory=list)
     totals_rows: list[int] = Field(default_factory=list)
     band_label_rows: list[int] = Field(default_factory=list)
     columns: list[ColumnDef] = Field(default_factory=list)
     orientation: Orientation = Orientation.ROW_RECORDS
     evidence: list[str] = Field(default_factory=list)
     confidence: Confidence = Confidence.INFERRED
+    support: list[str] = Field(default_factory=list)
 
 
 class NonTableBlock(BaseModel):
@@ -119,6 +125,7 @@ def coverage(dump: SheetDump, extraction: SheetExtraction) -> float:
 
 
 PREVIEW = 20
+RANGE_PAD = 1
 
 
 def spans(rows: list[int]) -> list[str]:
@@ -151,6 +158,14 @@ def validate_roles(dump: SheetDump, extraction: SheetExtraction) -> list[str]:
     return problems
 
 
+def body_row_numbers(table: TableStructure) -> list[int]:
+    return [
+        row
+        for span in table.body_rows
+        for row in range(min(span.from_row, span.to_row), max(span.from_row, span.to_row) + 1)
+    ]
+
+
 def validate_table(dump: SheetDump, table: TableStructure) -> list[str]:
     span = extent_rows(table.extent)
     if span is None:
@@ -161,7 +176,7 @@ def validate_table(dump: SheetDump, table: TableStructure) -> list[str]:
         problems.append(f"table {table.table_id} extent {table.extent} falls outside sheet extent {dump.extent}")
     for label, rows in (
         ("header_rows", table.header_rows),
-        ("body_rows", table.body_rows),
+        ("body_rows", body_row_numbers(table)),
         ("totals_rows", table.totals_rows),
         ("band_label_rows", table.band_label_rows),
     ):
@@ -190,3 +205,58 @@ def validate_extraction(dump: SheetDump, extraction: SheetExtraction) -> list[st
         problems.extend(validate_table(dump, table))
     problems.extend(validate_overlaps(extraction))
     return problems
+
+
+def normalise_ref(ref: str) -> str:
+    return ref.replace("$", "").replace("'", "").upper().split("!")[-1].strip()
+
+
+def declared_ranges(dump: SheetDump) -> dict[str, str]:
+    out = {normalise_ref(value): f"defined name {name}" for name, value in dump.meta.defined_names.items()}
+    for merged in dump.meta.merged:
+        out.setdefault(normalise_ref(merged), f"merged range {merged}")
+    return out
+
+
+def aggregate_ranges(dump: SheetDump) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for row in dump.cells.values():
+        for cell in row.values():
+            if cell.formula is None:
+                continue
+            for match in AGGREGATE.finditer(cell.formula):
+                out[normalise_ref(match.group(2))] = f"{match.group(1)} at {cell.ref}"
+    return out
+
+
+def corroboration(dump: SheetDump, table: TableStructure) -> tuple[Confidence, list[str]]:
+    box = extent_box(table.extent)
+    if box is None:
+        return Confidence.UNCERTAIN, []
+    found: list[str] = []
+    for ref, source in declared_ranges(dump).items():
+        other = extent_box(ref)
+        if other is not None and boxes_overlap(box, other) and (other[0], other[2]) == (box[0], box[2]):
+            found.append(f"{source} matches rows {box[0]}-{box[2]}")
+    rows = body_row_numbers(table)
+    if rows:
+        low, high = min(rows), max(rows)
+        for ref, source in aggregate_ranges(dump).items():
+            other = extent_box(ref)
+            if other is None or not box[1] <= other[1] <= box[3]:
+                continue
+            if other[0] <= low <= other[0] + RANGE_PAD and other[2] - RANGE_PAD <= high <= other[2]:
+                found.append(f"{source} covers body rows {low}-{high}")
+    if found:
+        return Confidence.CORROBORATED, found[:4]
+    return Confidence.INFERRED, []
+
+
+def score_extraction(dump: SheetDump, extraction: SheetExtraction) -> dict[str, int]:
+    tally: dict[str, int] = {}
+    for table in extraction.tables:
+        level, support = corroboration(dump, table)
+        table.confidence = level
+        table.support = support
+        tally[level.value] = tally.get(level.value, 0) + 1
+    return tally

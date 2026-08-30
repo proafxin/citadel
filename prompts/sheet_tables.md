@@ -8,14 +8,14 @@ Give every row in the sheet a role, and report the regions that are not tables.
 
 # Output
 
-`row_roles` is a list of spans. Every row in the extent must be covered by exactly one span, and spans must not overlap. Use contiguous spans rather than one per row.
+`body_rows` and `row_roles` are lists of spans, each a first and last row.
+
+Every row in the extent must be covered by exactly one `row_roles` span, and those spans must not overlap. Use contiguous spans rather than one per row.
 
 `orientation` is one of:
 - `row_records` — each body row is one record and the columns are fields.
 - `cross_tab` — the column headers are values of a dimension rather than field names.
 - `repeated_groups` — the same set of columns repeats across the sheet, one repeat per entity.
 - `matrix` — both axes are dimensions and the cells hold a single measure.
-
-`confidence` is `corroborated` when something in the dump independently agrees with the extent, `inferred` when the reading is consistent but nothing independent confirms it, and `uncertain` otherwise.
 
 `blocks` carries every region that is not a table, each with its extent and a one-line summary. A sheet with no tables still has blocks.

@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from citadel.llm import MODEL_CTX, call_structured, count_tokens
 from citadel.tabular.sheet_dump import SheetDump
-from citadel.tabular.sheet_structure import SheetExtraction, coverage, validate_extraction
+from citadel.tabular.sheet_structure import SheetExtraction, coverage, score_extraction, validate_extraction
 
 logger = logging.getLogger(__name__)
 
@@ -79,13 +79,15 @@ async def extract_sheet(dump: SheetDump, dump_text: str, max_rounds: int = MAX_R
             continue
         problems = validate_extraction(dump, extraction)
         if not problems:
+            tally = score_extraction(dump, extraction)
             logger.info(
-                "extracted %d tables from %s/%s coverage=%.3f rounds=%d",
+                "extracted %d tables from %s/%s coverage=%.3f rounds=%d support=%s",
                 len(extraction.tables),
                 dump.workbook,
                 dump.sheet,
                 coverage(dump, extraction),
                 round_index + 1,
+                tally,
             )
             return extraction
         attempt = extraction.model_dump_json()
