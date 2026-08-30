@@ -1,3 +1,4 @@
+import json
 import logging
 from functools import lru_cache
 from pathlib import Path
@@ -12,9 +13,9 @@ logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "sheet_tables.md"
 MAX_ROUNDS = 4
-BASE_OUTPUT_TOKENS = 2048
-TOKENS_PER_COLUMN = 32
-MAX_OUTPUT_TOKENS = 12288
+BASE_OUTPUT_TOKENS = 4096
+TOKENS_PER_COLUMN = 128
+MAX_OUTPUT_TOKENS = 16384
 RETRY_HEADROOM = 4096
 
 
@@ -63,11 +64,16 @@ async def extract_sheet(dump: SheetDump, dump_text: str, max_rounds: int = MAX_R
     problems: list[str] = []
     for round_index in range(max_rounds):
         prompt = build_prompt(dump_text, attempt, problems)
-        raw = await call_structured(prompt, schema, max_tokens=budget)
         try:
+            raw = await call_structured(prompt, schema, max_tokens=budget)
             extraction = SheetExtraction.model_validate(raw)
+        except json.JSONDecodeError:
+            attempt = None
+            problems = [f"the response was not valid JSON, most likely truncated at {budget} tokens"]
+            logger.info("round %d unparseable output for %s", round_index, dump.sheet)
+            continue
         except ValidationError as exc:
-            attempt = str(raw)[:2000]
+            attempt = None
             problems = [f"the response did not match the schema: {exc.error_count()} errors"]
             logger.info("round %d schema mismatch for %s", round_index, dump.sheet)
             continue

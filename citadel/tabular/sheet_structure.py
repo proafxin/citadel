@@ -1,5 +1,6 @@
 from enum import StrEnum
 
+from openpyxl.utils import column_index_from_string
 from pydantic import BaseModel, Field
 
 from citadel.tabular.sheet_dump import SheetDump
@@ -85,11 +86,27 @@ def assigned_rows(extraction: SheetExtraction) -> dict[int, RowRole]:
     return out
 
 
-def extent_rows(extent: str) -> tuple[int, int] | None:
+def extent_box(extent: str) -> tuple[int, int, int, int] | None:
     match = RANGE.match(extent.strip().upper().replace(" ", ""))
     if not match or not match.group(4):
         return None
-    return int(match.group(2)), int(match.group(4))
+    col_a = column_index_from_string(match.group(1))
+    col_b = column_index_from_string(match.group(3))
+    return (
+        min(int(match.group(2)), int(match.group(4))),
+        min(col_a, col_b),
+        max(int(match.group(2)), int(match.group(4))),
+        max(col_a, col_b),
+    )
+
+
+def extent_rows(extent: str) -> tuple[int, int] | None:
+    box = extent_box(extent)
+    return None if box is None else (box[0], box[2])
+
+
+def boxes_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
 
 
 def coverage(dump: SheetDump, extraction: SheetExtraction) -> float:
@@ -134,7 +151,7 @@ def validate_roles(dump: SheetDump, extraction: SheetExtraction) -> list[str]:
     return problems
 
 
-def validate_table(dump: SheetDump, table: TableStructure, claimed: dict[int, str]) -> list[str]:
+def validate_table(dump: SheetDump, table: TableStructure) -> list[str]:
     span = extent_rows(table.extent)
     if span is None:
         return [f"table {table.table_id} has an unparseable extent: {table.extent!r}"]
@@ -153,17 +170,23 @@ def validate_table(dump: SheetDump, table: TableStructure, claimed: dict[int, st
             problems.append(f"table {table.table_id} {label} outside its own extent {table.extent}: {stray[:PREVIEW]}")
     if not table.body_rows:
         problems.append(f"table {table.table_id} has no body rows")
-    for row in table.body_rows:
-        owner = claimed.get(row)
-        if owner is not None and owner != table.table_id:
-            problems.append(f"row {row} is claimed as body by both {owner} and {table.table_id}")
-        claimed[row] = table.table_id
     return problems
+
+
+def validate_overlaps(extraction: SheetExtraction) -> list[str]:
+    boxed = [(table.table_id, extent_box(table.extent)) for table in extraction.tables]
+    known = [(name, box) for name, box in boxed if box is not None]
+    return [
+        f"tables {a} {extraction.tables[i].extent} and {b} {extraction.tables[j].extent} overlap"
+        for i, (a, box_a) in enumerate(known)
+        for j, (b, box_b) in enumerate(known)
+        if i < j and boxes_overlap(box_a, box_b)
+    ]
 
 
 def validate_extraction(dump: SheetDump, extraction: SheetExtraction) -> list[str]:
     problems = validate_roles(dump, extraction)
-    claimed: dict[int, str] = {}
     for table in extraction.tables:
-        problems.extend(validate_table(dump, table, claimed))
+        problems.extend(validate_table(dump, table))
+    problems.extend(validate_overlaps(extraction))
     return problems
