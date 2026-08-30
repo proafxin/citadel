@@ -1,7 +1,7 @@
 import logging
 import time
 
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 
 from citadel.schemas.table import TableStructure as GridStructure
 from citadel.services.excel import (
@@ -49,6 +49,14 @@ def build_grid(index: dict[tuple[int, int], Cell], rows: list[int], first_col: i
 
 
 DEFAULT_BAND_NAME = "section"
+
+
+def band_target(table: TableStructure, box: tuple[int, int, int, int]) -> int | None:
+    letters = (table.band_column or "").strip().upper()
+    if not letters.isalpha():
+        return None
+    offset = column_index_from_string(letters) - box[1]
+    return offset if 0 <= offset <= box[3] - box[1] else None
 
 
 def band_for_rows(table: TableStructure) -> dict[int, str]:
@@ -100,11 +108,20 @@ def anchors(table: TableStructure, box: tuple[int, int, int, int], tables: Sheet
         },
         "group_name": table.group_name,
         "band_name": table.band_name,
+        "band_column": table.band_column,
         "bands": [[band.label, band.from_row, band.to_row] for band in table.bands],
         "rounds": tables.rounds,
         "unresolved": tables.unresolved,
         "dump_version": DUMP_VERSION,
     }
+
+
+def apply_names(built: MaterializedTable, table: TableStructure, box: tuple[int, int, int, int]) -> None:
+    by_letter = {column.letter.strip().upper(): column.name for column in table.columns if column.name}
+    for offset, column in enumerate(built.columns):
+        name = by_letter.get(get_column_letter(box[1] + offset))
+        if name:
+            column.header = name
 
 
 def apply_groups(built: MaterializedTable, table: TableStructure, box: tuple[int, int, int, int]) -> None:
@@ -131,12 +148,17 @@ def materialize_sheet(
             continue
         grid = build_grid(index, rows, box[1], box[3])
         bands = band_for_rows(table)
+        target = band_target(table, box)
         if bands:
-            grid = [
-                [*cells, "" if row in table.band_label_rows else bands.get(row, "")]
-                for row, cells in zip(rows, grid, strict=True)
-            ]
-        structure = grid_structure(table, rows, box[3] - box[1] + 1 + (1 if bands else 0))
+            body = set(body_row_numbers(table))
+            for offset, row in enumerate(rows):
+                value = bands.get(row, "") if row in body else ""
+                if target is None:
+                    grid[offset] = [*grid[offset], value]
+                elif value:
+                    grid[offset][target] = value
+        width = box[3] - box[1] + 1 + (1 if bands and band_target(table, box) is None else 0)
+        structure = grid_structure(table, rows, width)
         if structure is None:
             logger.warning("skipping %s: no body rows inside extent %s", table.table_id, table.extent)
             continue
@@ -156,10 +178,13 @@ def materialize_sheet(
             extra_notes=[block.summary for block in tables.blocks] or None,
             anchors=anchors(table, box, tables),
         )
+        apply_names(built, table, box)
         apply_groups(built, table, box)
         if bands and built.columns:
-            built.columns[-1].header = table.band_name or DEFAULT_BAND_NAME
-            built.columns[-1].group = None
+            position = band_target(table, box)
+            slot = built.columns[position if position is not None else -1]
+            slot.header = table.band_name or DEFAULT_BAND_NAME
+            slot.group = None
         produced.append((order, built))
     return produced
 

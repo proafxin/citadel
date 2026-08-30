@@ -109,8 +109,12 @@ async def extract_sheet(dump: SheetDump, dump_text: str, max_rounds: int = MAX_R
             problems = [f"the response did not match the schema: {exc.error_count()} errors"]
             logger.info("round %d schema mismatch for %s", round_index, dump.sheet)
             continue
-        best = extraction
+        if best is None or extraction.tables or not best.tables:
+            best = extraction
         problems = validate_extraction(dump, extraction)
+        if not problems and not extraction.tables and best.tables:
+            logger.info("keeping earlier answer for %s: revision dropped every table", dump.sheet)
+            return accepted(dump, best, round_index + 1)
         notes = [] if seen_notes else review_extraction(extraction)
         seen_notes = seen_notes or bool(notes)
         if not problems and not notes:

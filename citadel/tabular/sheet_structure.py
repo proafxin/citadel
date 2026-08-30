@@ -65,6 +65,7 @@ class TableStructure(BaseModel):
     columns: list[ColumnDef] = Field(default_factory=list)
     group_name: str | None = None
     band_name: str | None = None
+    band_column: str | None = None
     bands: list[Band] = Field(default_factory=list)
     orientation: Orientation = Orientation.ROW_RECORDS
     evidence: list[str] = Field(default_factory=list)
@@ -257,6 +258,8 @@ def validate_groups(table: TableStructure) -> list[str]:
             )
             return [message]
         return []
+    if table.orientation != Orientation.REPEATED_GROUPS:
+        return []
     sizes: dict[str, int] = {}
     for column in grouped:
         sizes[column.group or ""] = sizes.get(column.group or "", 0) + 1
@@ -267,7 +270,7 @@ def validate_groups(table: TableStructure) -> list[str]:
         problems.append(
             f"table {table.table_id} repeats are uneven ({shape}); every repeat of a group must span the same columns"
         )
-    if repeats == 1 and len(grouped) > 1 and table.orientation == Orientation.REPEATED_GROUPS:
+    if repeats == 1 and len(grouped) > 1:
         problems.append(
             f"table {table.table_id} gives every column the same group {next(iter(sizes))!r}; "
             "a label shared by all repeats cannot identify them, choose the header row whose value differs per repeat"
@@ -370,6 +373,7 @@ REQUIRED_FIELDS = {
         "orientation",
         "group_name",
         "band_name",
+        "band_column",
         "bands",
     ),
     "ColumnDef": ("letter", "name", "group", "header_parts"),
