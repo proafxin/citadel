@@ -381,6 +381,15 @@ def _blank_columns(
     ]
 
 
+def _row_counts(
+    grid: dict[tuple[int, int], Cell], first_row: int, last_row: int, first_col: int, last_col: int
+) -> list[tuple[int, int]]:
+    return [
+        (row, sum(1 for col in range(first_col, last_col + 1) if (row, col) in grid))
+        for row in range(first_row, last_row + 1)
+    ]
+
+
 def _dump_metadata(
     sheet: SheetExtraction,
     grid: dict[tuple[int, int], Cell],
@@ -402,6 +411,8 @@ def _dump_metadata(
     lines.append(f"- FORMATS: {spans or '-'}")
     blanks = _blank_columns(grid, first_row, last_row, first_col, last_col)
     lines.append(f"- BLANK COLS: {', '.join(get_column_letter(col) for col in blanks) or '-'}")
+    counts = _row_counts(grid, first_row, last_row, first_col, last_col)
+    lines.append(f"- ROW CELLS: {'  '.join(f'{row}:{held}' for row, held in counts) or '-'}")
     meta = sheet.metadata
     lines.extend(
         [

@@ -142,32 +142,6 @@ def uncovered_cells(dump: SheetDump, draft: Draft) -> list[str]:
     return missed
 
 
-SPARSE_RATIO = 3
-MIN_BODY_ROWS = 4
-MIN_DENSE_CELLS = 3
-
-
-def row_cells(dump: SheetDump, row: int, first_col: int, last_col: int) -> int:
-    return sum(1 for col in range(first_col, last_col + 1) if dump.cell(row, col) is not None)
-
-
-def sparse_body_rows(dump: SheetDump, region: DraftRegion) -> list[int]:
-    rows = [
-        row
-        for span in region.spans
-        if span.role == RowRole.BODY
-        for row in range(min(span.rows), max(span.rows) + 1)
-    ]
-    if len(rows) < MIN_BODY_ROWS:
-        return []
-    counts = {row: row_cells(dump, row, region.cols[0], region.cols[1]) for row in rows}
-    ordered = sorted(counts.values())
-    median = ordered[len(ordered) // 2]
-    if median < MIN_DENSE_CELLS:
-        return []
-    return sorted(row for row, held in counts.items() if held and held * SPARSE_RATIO <= median)
-
-
 def review_draft(dump: SheetDump, draft: Draft) -> list[str]:
     findings: list[str] = []
     for region in draft.regions:
@@ -186,14 +160,6 @@ def review_draft(dump: SheetDump, draft: Draft) -> list[str]:
         outside = sorted(row for row in seen if not region.rows[0] <= row <= region.rows[1])
         if outside:
             findings.append(f"region {region.id} gives roles to rows outside itself: {spans(outside)[:PREVIEW]}")
-        sparse = sparse_body_rows(dump, region)
-        if sparse:
-            findings.append(
-                f"region {region.id} calls rows {', '.join(spans(sparse)[:PREVIEW])} records, but each holds "
-                "far fewer cells than the records around it; a row carrying only a label is band_label, not "
-                "body. Change those rows to band_label and leave the region as it is; do not split it or add "
-                "another region"
-            )
     boxes = {region.id: (region.rows[0], region.cols[0], region.rows[1], region.cols[1]) for region in draft.regions}
     names = sorted(boxes)
     findings.extend(
