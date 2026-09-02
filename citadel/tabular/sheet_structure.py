@@ -1,6 +1,6 @@
 from enum import StrEnum
 
-from openpyxl.utils import column_index_from_string
+from openpyxl.utils import column_index_from_string, get_column_letter
 from pydantic import BaseModel, Field
 
 from citadel.tabular.sheet_dump import SheetDump
@@ -8,18 +8,21 @@ from citadel.tabular.sheet_tools import AGGREGATE, RANGE
 
 
 class RowRole(StrEnum):
-    PROVENANCE = "provenance"
-    TITLE = "title"
-    CAPTION = "caption"
     HEADER = "header"
     BODY = "body"
-    BAND_LABEL = "band_label"
     TOTALS = "totals"
+    BAND_LABEL = "band_label"
+    BLANK = "blank"
+
+
+class MetadataKind(StrEnum):
+    TITLE = "title"
+    CAPTION = "caption"
+    PROVENANCE = "provenance"
     NOTE = "note"
     KEY_VALUE = "key_value"
     LEGEND = "legend"
-    BLANK = "blank"
-    UNRESOLVED = "unresolved"
+    PROSE = "prose"
 
 
 class Orientation(StrEnum):
@@ -35,9 +38,10 @@ class Confidence(StrEnum):
     UNCERTAIN = "uncertain"
 
 
-class RowRange(BaseModel):
+class RowSpan(BaseModel):
     from_row: int
     to_row: int
+    role: RowRole
 
 
 class Band(BaseModel):
@@ -54,53 +58,339 @@ class ColumnDef(BaseModel):
     group: str | None = None
 
 
-class TableStructure(BaseModel):
-    table_id: str
-    extent: str
-    caption: str | None = None
-    header_rows: list[int] = Field(default_factory=list)
-    body_rows: list[RowRange] = Field(default_factory=list)
-    totals_rows: list[int] = Field(default_factory=list)
-    band_label_rows: list[int] = Field(default_factory=list)
+class Region(BaseModel):
+    region_id: str
+    first_row: int
+    last_row: int
+    first_col: int
+    last_col: int
+    row_spans: list[RowSpan] = Field(default_factory=list)
     columns: list[ColumnDef] = Field(default_factory=list)
+    key_column: str | None = None
+    orientation: Orientation = Orientation.ROW_RECORDS
     group_name: str | None = None
     band_name: str | None = None
     band_column: str | None = None
     bands: list[Band] = Field(default_factory=list)
-    orientation: Orientation = Orientation.ROW_RECORDS
-    evidence: list[str] = Field(default_factory=list)
+    continues_before: bool = False
+    continues_after: bool = False
     confidence: Confidence = Confidence.INFERRED
     support: list[str] = Field(default_factory=list)
 
 
-class NonTableBlock(BaseModel):
-    kind: RowRole
-    extent: str
+class MetadataItem(BaseModel):
+    kind: MetadataKind
+    first_row: int
+    last_row: int
+    first_col: int
+    last_col: int
     summary: str
+    region_ids: list[str] = Field(default_factory=list)
 
 
-class RowSpan(BaseModel):
-    from_row: int
-    to_row: int
-    role: RowRole
-
-
-class SheetTables(BaseModel):
+class SheetStructure(BaseModel):
     workbook: str = ""
     sheet: str = ""
-    tables: list[TableStructure] = Field(default_factory=list)
-    blocks: list[NonTableBlock] = Field(default_factory=list)
-    row_roles: list[RowSpan] = Field(default_factory=list)
+    regions: list[Region] = Field(default_factory=list)
+    metadata: list[MetadataItem] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
     rounds: int = 0
 
 
-def assigned_rows(extraction: SheetTables) -> dict[int, RowRole]:
-    out: dict[int, RowRole] = {}
-    for span in extraction.row_roles:
-        for row in range(min(span.from_row, span.to_row), max(span.from_row, span.to_row) + 1):
-            out[row] = span.role
-    return out
+PREVIEW = 20
+RANGE_PAD = 1
+MIN_TABLE_COLUMNS = 2
+
+
+class DraftSpan(BaseModel):
+    rows: tuple[int, int]
+    role: RowRole
+
+
+class DraftRegion(BaseModel):
+    id: str
+    rows: tuple[int, int]
+    cols: tuple[int, int]
+    spans: list[DraftSpan] = Field(default_factory=list)
+
+
+class DraftBlock(BaseModel):
+    rows: tuple[int, int]
+    cols: tuple[int, int]
+    kind: MetadataKind
+
+
+class Draft(BaseModel):
+    regions: list[DraftRegion] = Field(default_factory=list)
+    blocks: list[DraftBlock] = Field(default_factory=list)
+
+
+def draft_boxes(draft: Draft) -> list[tuple[int, int, int, int]]:
+    regions = [(r.rows[0], r.cols[0], r.rows[1], r.cols[1]) for r in draft.regions]
+    blocks = [(b.rows[0], b.cols[0], b.rows[1], b.cols[1]) for b in draft.blocks]
+    return regions + blocks
+
+
+def uncovered_cells(dump: SheetDump, draft: Draft) -> list[str]:
+    boxes = draft_boxes(draft)
+    missed = [
+        f"{get_column_letter(col)}{row}"
+        for row, columns in dump.cells.items()
+        for col in columns
+        if not any(box[0] <= row <= box[2] and box[1] <= col <= box[3] for box in boxes)
+    ]
+    return missed
+
+
+SPARSE_RATIO = 3
+MIN_BODY_ROWS = 4
+MIN_DENSE_CELLS = 3
+
+
+def row_cells(dump: SheetDump, row: int, first_col: int, last_col: int) -> int:
+    return sum(1 for col in range(first_col, last_col + 1) if dump.cell(row, col) is not None)
+
+
+def sparse_body_rows(dump: SheetDump, region: DraftRegion) -> list[int]:
+    rows = [
+        row
+        for span in region.spans
+        if span.role == RowRole.BODY
+        for row in range(min(span.rows), max(span.rows) + 1)
+    ]
+    if len(rows) < MIN_BODY_ROWS:
+        return []
+    counts = {row: row_cells(dump, row, region.cols[0], region.cols[1]) for row in rows}
+    ordered = sorted(counts.values())
+    median = ordered[len(ordered) // 2]
+    if median < MIN_DENSE_CELLS:
+        return []
+    return sorted(row for row, held in counts.items() if held and held * SPARSE_RATIO <= median)
+
+
+def review_draft(dump: SheetDump, draft: Draft) -> list[str]:
+    findings: list[str] = []
+    for region in draft.regions:
+        seen: set[int] = set()
+        doubled: set[int] = set()
+        for span in region.spans:
+            for row in range(min(span.rows), max(span.rows) + 1):
+                if row in seen:
+                    doubled.add(row)
+                seen.add(row)
+        missing = [row for row in range(region.rows[0], region.rows[1] + 1) if row not in seen]
+        if missing:
+            findings.append(f"region {region.id} leaves rows {', '.join(spans(missing)[:PREVIEW])} without a role")
+        if doubled:
+            findings.append(f"region {region.id} gives rows {', '.join(spans(sorted(doubled))[:PREVIEW])} two roles")
+        outside = sorted(row for row in seen if not region.rows[0] <= row <= region.rows[1])
+        if outside:
+            findings.append(f"region {region.id} gives roles to rows outside itself: {spans(outside)[:PREVIEW]}")
+        sparse = sparse_body_rows(dump, region)
+        if sparse:
+            findings.append(
+                f"region {region.id} calls rows {', '.join(spans(sparse)[:PREVIEW])} records, but each holds "
+                "far fewer cells than the records around it; a row carrying only a label is band_label, not "
+                "body. Change those rows to band_label and leave the region as it is; do not split it or add "
+                "another region"
+            )
+    boxes = {region.id: (region.rows[0], region.cols[0], region.rows[1], region.cols[1]) for region in draft.regions}
+    names = sorted(boxes)
+    findings.extend(
+        f"regions {a} and {b} overlap"
+        for i, a in enumerate(names)
+        for b in names[i + 1 :]
+        if boxes_overlap(boxes[a], boxes[b])
+    )
+    missed = uncovered_cells(dump, draft)
+    if missed:
+        preview = ", ".join(missed[:PREVIEW])
+        findings.append(
+            f"{len(missed)} populated cells belong to no region and no block: {preview}"
+            f"{' …' if len(missed) > PREVIEW else ''}"
+        )
+    return findings
+
+
+def spans(rows: list[int]) -> list[str]:
+    out: list[list[int]] = []
+    for row in sorted(rows):
+        if out and row == out[-1][1] + 1:
+            out[-1][1] = row
+        else:
+            out.append([row, row])
+    return [str(a) if a == b else f"{a}-{b}" for a, b in out]
+
+
+def span_rows(span: RowSpan) -> range:
+    return range(min(span.from_row, span.to_row), max(span.from_row, span.to_row) + 1)
+
+
+def rows_by_role(region: Region, role: RowRole) -> list[int]:
+    return [row for span in region.row_spans if span.role == role for row in span_rows(span)]
+
+
+def body_row_numbers(region: Region) -> list[int]:
+    return rows_by_role(region, RowRole.BODY)
+
+
+def region_box(region: Region) -> tuple[int, int, int, int]:
+    return (region.first_row, region.first_col, region.last_row, region.last_col)
+
+
+def boxes_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+
+
+def letter_index(letter: str | None) -> int:
+    letters = "".join(ch for ch in (letter or "").upper() if ch.isalpha())
+    return column_index_from_string(letters) if letters else 0
+
+
+def coverage(dump: SheetDump, structure: SheetStructure) -> float:
+    total = dump.last_row - dump.first_row + 1
+    if total <= 0:
+        return 1.0
+    covered = {
+        row
+        for region in structure.regions
+        for row in range(region.first_row, region.last_row + 1)
+        if dump.first_row <= row <= dump.last_row
+    }
+    covered |= {
+        row
+        for item in structure.metadata
+        for row in range(item.first_row, item.last_row + 1)
+        if dump.first_row <= row <= dump.last_row
+    }
+    return len(covered) / total
+
+
+def populated_columns(dump: SheetDump, region: Region) -> list[int]:
+    return [
+        col
+        for col in range(region.first_col, region.last_col + 1)
+        if any(dump.cell(row, col) for row in range(region.first_row, region.last_row + 1))
+    ]
+
+
+def blank_columns_inside(dump: SheetDump, region: Region) -> list[int]:
+    populated = populated_columns(dump, region)
+    if len(populated) < MIN_TABLE_COLUMNS:
+        return []
+    runs: list[list[int]] = []
+    for col in range(populated[0] + 1, populated[-1]):
+        if col in populated:
+            continue
+        if runs and runs[-1][-1] == col - 1:
+            runs[-1].append(col)
+        else:
+            runs.append([col])
+    return [col for run in runs for col in run if len(run) == 1]
+
+
+def review_spans(region: Region) -> list[str]:
+    seen: set[int] = set()
+    doubled: set[int] = set()
+    for span in region.row_spans:
+        if span.to_row < span.from_row:
+            return [f"region {region.region_id} has an inverted row span {span.from_row}-{span.to_row}"]
+        for row in span_rows(span):
+            if row in seen:
+                doubled.add(row)
+            seen.add(row)
+    findings: list[str] = []
+    missing = [row for row in range(region.first_row, region.last_row + 1) if row not in seen]
+    if missing:
+        listed = ", ".join(spans(missing)[:PREVIEW])
+        findings.append(f"region {region.region_id} leaves rows {listed} without a role")
+    outside = sorted(row for row in seen if not region.first_row <= row <= region.last_row)
+    if outside:
+        findings.append(f"region {region.region_id} gives roles to rows outside itself: {spans(outside)[:PREVIEW]}")
+    if doubled:
+        listed = ", ".join(spans(sorted(doubled))[:PREVIEW])
+        findings.append(f"region {region.region_id} gives rows {listed} more than one role")
+    if not body_row_numbers(region):
+        findings.append(f"region {region.region_id} has no rows holding records")
+    return findings
+
+
+def review_shape(dump: SheetDump, region: Region) -> list[str]:
+    findings: list[str] = []
+    if region.first_row < dump.first_row or region.last_row > dump.last_row:
+        findings.append(f"region {region.region_id} covers rows outside the worksheet shown")
+    populated = populated_columns(dump, region)
+    if len(populated) < MIN_TABLE_COLUMNS:
+        findings.append(
+            f"region {region.region_id} occupies {len(populated)} populated column(s); "
+            "a table needs at least two, and separators inside a cell's text do not make columns"
+        )
+    return findings
+
+
+def advise_shape(dump: SheetDump, region: Region) -> list[str]:
+    notes: list[str] = []
+    blanks = blank_columns_inside(dump, region)
+    if blanks:
+        listed = ", ".join(get_column_letter(col) for col in blanks)
+        notes.append(
+            f"region {region.region_id} spans blank column(s) {listed}; keep it as one region if a header "
+            "names the columns on both sides, otherwise these are separate regions"
+        )
+    if region.key_column is None:
+        notes.append(f"region {region.region_id} names no key column; say which column identifies its rows")
+    elif not region.first_col <= letter_index(region.key_column) <= region.last_col:
+        notes.append(f"region {region.region_id} has a key column {region.key_column} outside its own columns")
+    if region.band_column and not region.first_col <= letter_index(region.band_column) <= region.last_col:
+        notes.append(f"region {region.region_id} has a band column {region.band_column} outside its own columns")
+    return notes
+
+
+def advise_structure(dump: SheetDump, structure: SheetStructure) -> list[str]:
+    return [note for region in structure.regions for note in advise_shape(dump, region)]
+
+
+def columns_overlap(a: Region, b: Region) -> bool:
+    return a.first_col <= b.last_col and b.first_col <= a.last_col
+
+
+def review_between(structure: SheetStructure) -> list[str]:
+    findings = [
+        f"regions {a.region_id} and {b.region_id} overlap"
+        for i, a in enumerate(structure.regions)
+        for j, b in enumerate(structure.regions)
+        if i < j and boxes_overlap(region_box(a), region_box(b))
+    ]
+    known = {region.region_id for region in structure.regions}
+    for item in structure.metadata:
+        unknown = [name for name in item.region_ids if name not in known]
+        if unknown:
+            findings.append(f"metadata at rows {item.first_row}-{item.last_row} names unknown regions {unknown}")
+    for region in structure.regions:
+        headers = set(rows_by_role(region, RowRole.HEADER))
+        for other in structure.regions:
+            if other.region_id == region.region_id or not columns_overlap(region, other):
+                continue
+            inside = sorted(headers & set(body_row_numbers(other)))
+            if inside:
+                findings.append(
+                    f"region {region.region_id} marks rows {spans(inside)[:PREVIEW]} as headers while "
+                    f"region {other.region_id} treats them as records; stacked tables each keep their own header"
+                )
+    return findings
+
+
+def review_structure(dump: SheetDump, structure: SheetStructure) -> list[str]:
+    findings: list[str] = []
+    for region in structure.regions:
+        findings.extend(review_spans(region))
+        findings.extend(review_shape(dump, region))
+    findings.extend(review_between(structure))
+    return findings
+
+
+def normalise_ref(ref: str) -> str:
+    return ref.replace("$", "").replace("'", "").upper().split("!")[-1].strip()
 
 
 def extent_box(extent: str) -> tuple[int, int, int, int] | None:
@@ -115,186 +405,6 @@ def extent_box(extent: str) -> tuple[int, int, int, int] | None:
         max(int(match.group(2)), int(match.group(4))),
         max(col_a, col_b),
     )
-
-
-def extent_rows(extent: str) -> tuple[int, int] | None:
-    box = extent_box(extent)
-    return None if box is None else (box[0], box[2])
-
-
-def boxes_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
-    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
-
-
-def coverage(dump: SheetDump, extraction: SheetTables) -> float:
-    total = dump.last_row - dump.first_row + 1
-    if total <= 0:
-        return 1.0
-    roles = assigned_rows(extraction)
-    assigned = sum(1 for row in range(dump.first_row, dump.last_row + 1) if row in roles)
-    return assigned / total
-
-
-PREVIEW = 20
-RANGE_PAD = 1
-
-
-def spans(rows: list[int]) -> list[str]:
-    out: list[list[int]] = []
-    for row in sorted(rows):
-        if out and row == out[-1][1] + 1:
-            out[-1][1] = row
-        else:
-            out.append([row, row])
-    return [str(a) if a == b else f"{a}-{b}" for a, b in out]
-
-
-def validate_roles(dump: SheetDump, extraction: SheetTables) -> list[str]:
-    problems: list[str] = [
-        f"row span {span.from_row}-{span.to_row} is inverted"
-        for span in extraction.row_roles
-        if span.to_row < span.from_row
-    ]
-    roles = assigned_rows(extraction)
-    missing = [row for row in range(dump.first_row, dump.last_row + 1) if row not in roles]
-    if missing:
-        preview = ", ".join(spans(missing)[:PREVIEW])
-        problems.append(f"row_roles leaves {len(missing)} rows unassigned in extent {dump.extent}: {preview}")
-    outside = sorted(row for row in roles if not dump.first_row <= row <= dump.last_row)
-    if outside:
-        problems.append(f"row_roles covers rows outside extent {dump.extent}: {spans(outside)[:PREVIEW]}")
-    seen: set[int] = set()
-    doubled: set[int] = set()
-    for span in extraction.row_roles:
-        for row in range(min(span.from_row, span.to_row), max(span.from_row, span.to_row) + 1):
-            if row in seen:
-                doubled.add(row)
-            seen.add(row)
-    if doubled:
-        listed = ", ".join(spans(sorted(doubled))[:PREVIEW])
-        problems.append(f"rows {listed} are covered by more than one row_roles span; each row needs exactly one")
-    return problems
-
-
-def body_row_numbers(table: TableStructure) -> list[int]:
-    return [
-        row
-        for span in table.body_rows
-        for row in range(min(span.from_row, span.to_row), max(span.from_row, span.to_row) + 1)
-    ]
-
-
-def validate_table(dump: SheetDump, table: TableStructure) -> list[str]:
-    span = extent_rows(table.extent)
-    if span is None:
-        return [f"table {table.table_id} has an unparseable extent: {table.extent!r}"]
-    start, end = span
-    problems: list[str] = []
-    if start < dump.first_row or end > dump.last_row:
-        problems.append(f"table {table.table_id} extent {table.extent} falls outside sheet extent {dump.extent}")
-    for label, rows in (
-        ("header_rows", table.header_rows),
-        ("body_rows", body_row_numbers(table)),
-        ("totals_rows", table.totals_rows),
-        ("band_label_rows", table.band_label_rows),
-    ):
-        stray = [row for row in rows if not start <= row <= end]
-        if stray:
-            problems.append(f"table {table.table_id} {label} outside its own extent {table.extent}: {stray[:PREVIEW]}")
-    if not table.body_rows:
-        problems.append(f"table {table.table_id} has no body rows")
-    clash = sorted(set(body_row_numbers(table)) & {*table.totals_rows, *table.band_label_rows})
-    if clash:
-        listed = ", ".join(spans(clash)[:PREVIEW])
-        problems.append(
-            f"table {table.table_id} lists rows {listed} as body and also as totals or band labels; "
-            "a row has one role"
-        )
-    return problems
-
-
-def validate_overlaps(extraction: SheetTables) -> list[str]:
-    boxed = [(table.table_id, extent_box(table.extent)) for table in extraction.tables]
-    known = [(name, box) for name, box in boxed if box is not None]
-    return [
-        f"tables {a} {extraction.tables[i].extent} and {b} {extraction.tables[j].extent} overlap"
-        for i, (a, box_a) in enumerate(known)
-        for j, (b, box_b) in enumerate(known)
-        if i < j and boxes_overlap(box_a, box_b)
-    ]
-
-
-TABLE_ROLES = frozenset({RowRole.BODY})
-
-
-def validate_responsive(extraction: SheetTables) -> list[str]:
-    roles = assigned_rows(extraction)
-    tabular = sorted(row for row, role in roles.items() if role in TABLE_ROLES)
-    if not tabular:
-        return []
-    if not extraction.tables:
-        listed = ", ".join(spans(tabular)[:PREVIEW])
-        return [f"row_roles marks rows {listed} as body rows but no tables were reported"]
-    covered = {
-        row
-        for table in extraction.tables
-        if (box := extent_box(table.extent)) is not None
-        for row in range(box[0], box[2] + 1)
-    }
-    orphans = [row for row in tabular if row not in covered]
-    if orphans:
-        listed = ", ".join(spans(orphans)[:PREVIEW])
-        return [f"rows {listed} are marked as body rows but fall inside no table extent"]
-    return []
-
-
-def validate_groups(table: TableStructure) -> list[str]:
-    grouped = [column for column in table.columns if column.group]
-    if not grouped:
-        if table.orientation == Orientation.REPEATED_GROUPS:
-            message = (
-                f"table {table.table_id} is {Orientation.REPEATED_GROUPS.value} but no column carries a group; "
-                "each repeat needs a group label that identifies it the way a primary key would"
-            )
-            return [message]
-        return []
-    if table.orientation != Orientation.REPEATED_GROUPS:
-        return []
-    sizes: dict[str, int] = {}
-    for column in grouped:
-        sizes[column.group or ""] = sizes.get(column.group or "", 0) + 1
-    problems: list[str] = []
-    repeats = len(sizes)
-    if repeats > 1 and len({*sizes.values()}) > 1:
-        shape = ", ".join(f"{name}={count}" for name, count in sorted(sizes.items()))
-        problems.append(
-            f"table {table.table_id} repeats are uneven ({shape}); every repeat of a group must span the same columns"
-        )
-    if repeats == 1 and len(grouped) > 1:
-        problems.append(
-            f"table {table.table_id} gives every column the same group {next(iter(sizes))!r}; "
-            "a label shared by all repeats cannot identify them, choose the header row whose value differs per repeat"
-        )
-    return problems
-
-
-def validate_extraction(dump: SheetDump, extraction: SheetTables) -> list[str]:
-    problems = validate_roles(dump, extraction)
-    for table in extraction.tables:
-        problems.extend(validate_table(dump, table))
-    problems.extend(validate_overlaps(extraction))
-    return problems
-
-
-def review_extraction(extraction: SheetTables) -> list[str]:
-    notes = validate_responsive(extraction)
-    for table in extraction.tables:
-        notes.extend(validate_groups(table))
-    return notes
-
-
-def normalise_ref(ref: str) -> str:
-    return ref.replace("$", "").replace("'", "").upper().split("!")[-1].strip()
 
 
 def declared_ranges(dump: SheetDump) -> dict[str, str]:
@@ -315,16 +425,14 @@ def aggregate_ranges(dump: SheetDump) -> dict[str, str]:
     return out
 
 
-def corroboration(dump: SheetDump, table: TableStructure) -> tuple[Confidence, list[str]]:
-    box = extent_box(table.extent)
-    if box is None:
-        return Confidence.UNCERTAIN, []
+def corroboration(dump: SheetDump, region: Region) -> tuple[Confidence, list[str]]:
+    box = region_box(region)
     found: list[str] = []
     for ref, source in declared_ranges(dump).items():
         other = extent_box(ref)
         if other is not None and boxes_overlap(box, other) and (other[0], other[2]) == (box[0], box[2]):
             found.append(f"{source} matches rows {box[0]}-{box[2]}")
-    rows = body_row_numbers(table)
+    rows = body_row_numbers(region)
     if rows:
         low, high = min(rows), max(rows)
         for ref, source in aggregate_ranges(dump).items():
@@ -332,27 +440,50 @@ def corroboration(dump: SheetDump, table: TableStructure) -> tuple[Confidence, l
             if other is None or not box[1] <= other[1] <= box[3]:
                 continue
             if other[0] <= low <= other[0] + RANGE_PAD and other[2] - RANGE_PAD <= high <= other[2]:
-                found.append(f"{source} covers body rows {low}-{high}")
+                found.append(f"{source} covers rows {low}-{high}")
     if found:
         return Confidence.CORROBORATED, found[:4]
     return Confidence.INFERRED, []
 
 
-def score_extraction(dump: SheetDump, extraction: SheetTables) -> dict[str, int]:
+def score_structure(dump: SheetDump, structure: SheetStructure) -> dict[str, int]:
     tally: dict[str, int] = {}
-    for table in extraction.tables:
-        level, support = corroboration(dump, table)
-        table.confidence = level
-        table.support = support
+    for region in structure.regions:
+        level, support = corroboration(dump, region)
+        region.confidence = level
+        region.support = support
         tally[level.value] = tally.get(level.value, 0) + 1
     return tally
 
 
 COMPUTED_FIELDS = {
-    "SheetTables": ("workbook", "sheet", "rounds"),
-    "TableStructure": ("confidence", "support"),
+    "SheetStructure": ("workbook", "sheet", "rounds"),
+    "Region": ("confidence", "support", "continues_before", "continues_after"),
     "ColumnDef": ("index",),
 }
+
+REQUIRED_FIELDS = {
+    "SheetStructure": ("regions", "metadata"),
+    "Region": (
+        "region_id",
+        "first_row",
+        "last_row",
+        "first_col",
+        "last_col",
+        "row_spans",
+        "columns",
+        "key_column",
+        "orientation",
+        "group_name",
+        "band_name",
+        "band_column",
+        "bands",
+    ),
+    "MetadataItem": ("kind", "first_row", "last_row", "first_col", "last_col", "summary", "region_ids"),
+    "ColumnDef": ("letter", "name"),
+}
+
+MIN_ITEMS = {"Region": {"row_spans": 1, "columns": 1}}
 
 
 def prune(node: dict, names: tuple[str, ...]) -> None:
@@ -360,38 +491,6 @@ def prune(node: dict, names: tuple[str, ...]) -> None:
         node.get("properties", {}).pop(name, None)
         if name in node.get("required", []):
             node["required"].remove(name)
-
-
-REQUIRED_FIELDS = {
-    "SheetTables": ("tables", "blocks", "row_roles"),
-    "TableStructure": (
-        "table_id",
-        "extent",
-        "header_rows",
-        "body_rows",
-        "columns",
-        "orientation",
-        "group_name",
-        "band_name",
-        "band_column",
-        "bands",
-    ),
-    "ColumnDef": ("letter", "name", "group", "header_parts"),
-}
-
-
-MIN_ITEMS = {
-    "SheetTables": {"row_roles": 1},
-    "TableStructure": {"body_rows": 1, "columns": 1},
-}
-
-
-def set_min_items(node: dict, limits: dict[str, int]) -> None:
-    properties = node.get("properties", {})
-    for name, minimum in limits.items():
-        field = properties.get(name)
-        if isinstance(field, dict) and field.get("type") == "array":
-            field["minItems"] = minimum
 
 
 def require(node: dict, names: tuple[str, ...]) -> None:
@@ -402,31 +501,47 @@ def require(node: dict, names: tuple[str, ...]) -> None:
             required.append(name)
 
 
+def set_min_items(node: dict, limits: dict[str, int]) -> None:
+    properties = node.get("properties", {})
+    for name, minimum in limits.items():
+        field = properties.get(name)
+        if isinstance(field, dict) and field.get("type") == "array":
+            field["minItems"] = minimum
+
+
 def request_schema() -> dict:
-    schema = SheetTables.model_json_schema()
-    prune(schema, COMPUTED_FIELDS["SheetTables"])
-    require(schema, REQUIRED_FIELDS["SheetTables"])
+    schema = SheetStructure.model_json_schema()
+    prune(schema, COMPUTED_FIELDS["SheetStructure"])
+    require(schema, REQUIRED_FIELDS["SheetStructure"])
+    defs = schema.get("$defs", {})
     for name, fields in COMPUTED_FIELDS.items():
-        target = schema.get("$defs", {}).get(name)
-        if target is not None:
+        if (target := defs.get(name)) is not None:
             prune(target, fields)
     for name, fields in REQUIRED_FIELDS.items():
-        target = schema.get("$defs", {}).get(name)
-        if target is not None:
+        if (target := defs.get(name)) is not None:
             require(target, fields)
-    set_min_items(schema, MIN_ITEMS["SheetTables"])
     for name, limits in MIN_ITEMS.items():
-        target = schema.get("$defs", {}).get(name)
-        if target is not None:
+        if (target := defs.get(name)) is not None:
             set_min_items(target, limits)
     return schema
 
 
-def fill_computed(dump: SheetDump, extraction: SheetTables) -> SheetTables:
-    extraction.workbook = dump.workbook
-    extraction.sheet = dump.sheet
-    for table in extraction.tables:
-        for column in table.columns:
-            letters = "".join(ch for ch in column.letter.upper() if ch.isalpha())
-            column.index = column_index_from_string(letters) if letters else 0
-    return extraction
+def fill_edges(dump: SheetDump, region: Region) -> None:
+    if not dump.windowed:
+        region.continues_before = False
+        region.continues_after = False
+        return
+    if region.first_row <= dump.first_row and dump.first_row > dump.sheet_first_row:
+        region.continues_before = True
+    if region.last_row >= dump.last_row and dump.last_row < dump.sheet_last_row:
+        region.continues_after = True
+
+
+def fill_computed(dump: SheetDump, structure: SheetStructure) -> SheetStructure:
+    structure.workbook = dump.workbook
+    structure.sheet = dump.sheet
+    for region in structure.regions:
+        fill_edges(dump, region)
+        for column in region.columns:
+            column.index = letter_index(column.letter)
+    return structure

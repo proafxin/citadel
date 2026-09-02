@@ -18,7 +18,7 @@ from citadel.services.capacity import (
     get_interactive_capacity,
     get_text_large_capacity,
 )
-from config import EMBED_SERVED_NAME, QWEN_CACHE_DIR, QWEN_HF_REPO, QWEN_MODEL, get_settings
+from config import EMBED_SERVED_NAME, LM_CACHE_DIR, LM_HF_REPO, LM_MODEL, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,9 @@ SAMPLING = {
     "repetition_penalty": 1.0,
 }
 STRUCTURED_SAMPLING = {**SAMPLING, "temperature": 0.0}
-MODEL_CTX = 70000
+MEASURE_SAMPLING = {**SAMPLING, "temperature": 0.0, "presence_penalty": 0.0}
+NOPENALTY_SAMPLING = {**SAMPLING, "presence_penalty": 0.0}
+MODEL_CTX = 50000
 OCR_CTX = 16384
 STRUCT_MAX_TOKENS = 4096
 STRUCTURE_MAX_TOKENS = 2048
@@ -47,8 +49,8 @@ RELEVANCE_BUDGET = SLM_MODEL_LEN - STRUCT_MAX_TOKENS - 2048
 
 
 @functools.lru_cache
-def _qwen_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(base_url=get_settings().qwen_base_url, timeout=NO_TIMEOUT)
+def _lm_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(base_url=get_settings().lm_base_url, timeout=NO_TIMEOUT)
 
 
 @functools.lru_cache
@@ -62,7 +64,7 @@ def _local_key(label: str) -> str:
 
 @functools.lru_cache
 def get_tokenizer() -> Tokenizer:
-    path = hf_hub_download(QWEN_HF_REPO, "tokenizer.json", cache_dir=str(QWEN_CACHE_DIR), local_files_only=True)
+    path = hf_hub_download(LM_HF_REPO, "tokenizer.json", cache_dir=str(LM_CACHE_DIR), local_files_only=False)
     return Tokenizer.from_file(path)
 
 
@@ -118,7 +120,7 @@ def _inline_refs(schema: dict) -> dict:
 
 def _struct_payload(prompt: str, schema: dict, max_tokens: int = STRUCT_MAX_TOKENS) -> dict:
     return {
-        "model": QWEN_MODEL,
+        "model": LM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         **STRUCTURED_SAMPLING,
         "max_tokens": max_tokens,
@@ -128,25 +130,25 @@ def _struct_payload(prompt: str, schema: dict, max_tokens: int = STRUCT_MAX_TOKE
     }
 
 
-def _text_payload(prompt: str, max_tokens: int) -> dict:
+def _text_payload(prompt: str, max_tokens: int, sampling: dict | None = None) -> dict:
     return {
-        "model": QWEN_MODEL,
+        "model": LM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        **SAMPLING,
+        **(sampling or SAMPLING),
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
         "reasoning_effort": "none",
     }
 
 
-async def _post_qwen(payload: dict) -> str:
-    response = await _qwen_client().post("/chat/completions", json=payload)
+async def _post_lm(payload: dict) -> str:
+    response = await _lm_client().post("/chat/completions", json=payload)
     response.raise_for_status()
     return response.json()["choices"][0]["message"]["content"]
 
 
-async def _stream_qwen(payload: dict) -> AsyncIterator[str]:
-    async with _qwen_client().stream("POST", "/chat/completions", json=payload) as response:
+async def _stream_lm(payload: dict) -> AsyncIterator[str]:
+    async with _lm_client().stream("POST", "/chat/completions", json=payload) as response:
         response.raise_for_status()
         async for line in response.aiter_lines():
             if not line.startswith("data: "):
@@ -163,17 +165,17 @@ async def call_slm(prompt: str, schema: dict, key: str, max_tokens: int = STRUCT
     cap = get_interactive_capacity()
     await cap.acquire(key)
     try:
-        raw = await _post_qwen(_struct_payload(prompt, _inline_refs(schema), max_tokens))
+        raw = await _post_lm(_struct_payload(prompt, _inline_refs(schema), max_tokens))
     finally:
         await cap.release(key)
     return json.loads(extract_json(raw))
 
 
-async def call_text(prompt: str, max_tokens: int, key: str) -> str:
+async def call_text(prompt: str, max_tokens: int, key: str, sampling: dict | None = None) -> str:
     cap = get_text_large_capacity()
     await cap.acquire(key)
     try:
-        return (await _post_qwen(_text_payload(prompt, max_tokens))).strip()
+        return (await _post_lm(_text_payload(prompt, max_tokens, sampling))).strip()
     finally:
         await cap.release(key)
 
@@ -195,7 +197,7 @@ async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -
         data = data.encode()
     image_url = "data:image/png;base64," + b64encode(data).decode()
     payload = {
-        "model": QWEN_MODEL,
+        "model": LM_MODEL,
         "messages": [
             {
                 "role": "user",
@@ -214,7 +216,7 @@ async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -
     started = time.time()
     first_token: float | None = None
     parts: list[str] = []
-    async for token in _stream_qwen(payload):
+    async for token in _stream_lm(payload):
         if first_token is None:
             first_token = time.time()
         parts.append(token)
@@ -233,7 +235,7 @@ async def call_structured(prompt: str, schema: dict, max_tokens: int = STRUCTURE
     key = _local_key("structured")
     await cap.acquire(key)
     try:
-        raw = await _post_qwen(_struct_payload(prompt, _inline_refs(schema), max_tokens))
+        raw = await _post_lm(_struct_payload(prompt, _inline_refs(schema), max_tokens))
     finally:
         await cap.release(key)
     try:
@@ -356,7 +358,7 @@ async def synthesize(query: str, passages: list[str], results: list[str]) -> Asy
     evidence = "passages:\n" + "\n".join(passages) + "\n\ntable results:\n" + "\n".join(results)
     prompt = f"{load_prompt('synthesize')}\nquestion: {query}\n{evidence}"
     payload = {
-        "model": QWEN_MODEL,
+        "model": LM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         **SAMPLING,
         "max_tokens": SYNTH_MAX_TOKENS,
@@ -368,7 +370,7 @@ async def synthesize(query: str, passages: list[str], results: list[str]) -> Asy
     cap = get_interactive_capacity()
     await cap.acquire(key)
     try:
-        async for token in _stream_qwen(payload):
+        async for token in _stream_lm(payload):
             yield token
     finally:
         await cap.release(key)
@@ -380,7 +382,7 @@ async def write_final_report(query: str, text_report: str, table_report: str) ->
         f"document report:\n{text_report}\n\ntable report:\n{table_report}"
     )
     payload = {
-        "model": QWEN_MODEL,
+        "model": LM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         **SAMPLING,
         "max_tokens": SYNTH_MAX_TOKENS,
@@ -392,7 +394,7 @@ async def write_final_report(query: str, text_report: str, table_report: str) ->
     cap = get_interactive_capacity()
     await cap.acquire(key)
     try:
-        async for token in _stream_qwen(payload):
+        async for token in _stream_lm(payload):
             yield token
     finally:
         await cap.release(key)

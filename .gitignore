@@ -530,5 +530,8 @@ book_task.json
 book_result.json
 bake_mineru/*
 data/*
+!data/model_baselines/
+data/model_baselines/*
+!data/model_baselines/*.md
 benchmarks/out/*
 #!benchmarks/RESULTS.md

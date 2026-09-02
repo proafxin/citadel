@@ -152,7 +152,7 @@ async def store_token_counts(session: AsyncSession, blocks: list[BlockText]) -> 
         return
     await session.execute(
         update(ContentNode),
-        [{"id": block.content_id, "qwen_token_count": block.tokens} for block in blocks],
+        [{"id": block.content_id, "token_count": block.tokens} for block in blocks],
     )
 
 

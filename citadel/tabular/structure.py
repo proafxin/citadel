@@ -317,24 +317,9 @@ async def _structure_excel(
 ) -> list[MaterializedTable]:
     width = max((len(row) for row in grid), default=0)
     collected: list[dict] = []
-    start = 0
-    window = 0
-    while start < len(grid):
-        entries, last = await _window_entries(grid, start, f"{key}:w{window}", bold)
-        window += 1
-        if not entries:
-            break
+    entries, last = await _window_entries(grid, 0, f"{key}:w0", bold)
+    if entries:
         collected.extend(entries)
-        if last >= len(grid) - 1:
-            break
-        tail = max((int(entry.get("data_end") or 0) for entry in entries), default=last)
-        if values is None:
-            start = last + 1
-            continue
-        schema = _schema(values, max(int(entries[-1].get("data_start") or 0), 0), tail)
-        reach = _extend(values, schema, last + 1)
-        entries[-1]["data_end"] = max(tail, reach)
-        start = reach + 1
 
     single = len(collected) == 1
     tables: list[MaterializedTable] = []

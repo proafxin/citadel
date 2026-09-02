@@ -15,7 +15,7 @@ async def run_one(client: httpx.AsyncClient, path: Path, out_dir: Path) -> None:
     data = path.read_bytes()
     image_url = "data:image/png;base64," + b64encode(data).decode()
     payload = {
-        "model": "qwen",
+        "model": "lm",
         "messages": [
             {
                 "role": "user",
@@ -26,7 +26,7 @@ async def run_one(client: httpx.AsyncClient, path: Path, out_dir: Path) -> None:
             }
         ],
         "temperature": 0,
-        "max_tokens": 3584,
+        "max_tokens": 8192,
         "chat_template_kwargs": {"enable_thinking": False},
     }
     resp = await client.post("/chat/completions", json=payload)

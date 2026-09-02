@@ -1,15 +1,15 @@
 
 services:
-  qwen:
+  lm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
-    container_name: qwen
+    container_name: lm
     restart: always
     ipc: host
     command:
       - --model
-      - /models/Qwen3.8-27B-UD-Q3_K_XL.gguf
+      - /models/Qwen3.8-27B-NVFP4-BUDGET.gguf
       - --mmproj
-      - /models/mmproj-BF16.gguf
+      - /models/mmproj-Qwen3.8-27B-BF16.gguf
       - -ngl
       - "999"
       - --host
@@ -17,24 +17,18 @@ services:
       - --port
       - "8100"
       - --ctx-size
-      - "131072"
+      - "200000"
       - --parallel
-      - "2"
+      - "4"
       - --metrics
-      - --image-min-tokens
-      - "1024"
       - --cache-type-k
       - q8_0
       - --cache-type-v
       - q8_0
-      - --spec-type
-      - draft-mtp
-      - --spec-draft-n-max
-      - "4"
       - --flash-attn
       - "on"
       - --alias
-      - qwen
+      - lm
       - --reasoning
       - "off"
     ports:

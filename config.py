@@ -12,9 +12,9 @@ logger = logging.getLogger(__name__)
 CPU_THIRD = max((os.cpu_count() or 3) // 3, 1)
 CPU_EIGHTH = max((os.cpu_count() or 8) // 8, 1)
 
-QWEN_MODEL = "qwen"
-QWEN_HF_REPO = "Qwen/Qwen3.8-27B"
-QWEN_CACHE_DIR = Path.home() / ".cache" / "citadel-tokenizer"
+LM_MODEL = "lm"
+LM_HF_REPO = "Qwen/Qwen3.8-27B"
+LM_CACHE_DIR = Path.home() / ".cache" / "citadel-tokenizer"
 EMBED_MODEL = "microsoft/harrier-oss-v1-0.6b"
 EMBED_SERVED_NAME = "harrier"
 EMBED_MAX_TOKENS = 8192
@@ -29,8 +29,8 @@ def configure_logging() -> None:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CITADEL_", env_file=".env", extra="ignore")
 
-    qwen_host: str = "localhost"
-    qwen_port: int = 8100
+    lm_host: str = "localhost"
+    lm_port: int = 8100
 
     bge_host: str = "localhost"
     bge_port: int = 8101
@@ -46,8 +46,8 @@ class Settings(BaseSettings):
     tree_store_dir: Path = Path("data/trees")
 
     @property
-    def qwen_base_url(self) -> str:
-        return f"http://{self.qwen_host}:{self.qwen_port}/v1"
+    def lm_base_url(self) -> str:
+        return f"http://{self.lm_host}:{self.lm_port}/v1"
 
     @property
     def bge_base_url(self) -> str:

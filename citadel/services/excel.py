@@ -305,7 +305,9 @@ def _kind(cell: Cell) -> str:
     return "text"
 
 
-def render_sheet_dump(sheet: SheetExtraction, workbook: str) -> str:
+def render_sheet_dump(
+    sheet: SheetExtraction, workbook: str, from_row: int | None = None, to_row: int | None = None
+) -> str:
     grid = {(cell.row, cell.col): cell for cell in sheet.cells if _dump_cell(cell)}
     lines = [f"# {workbook} / {sheet.sheet_name}", ""]
     if not grid:
@@ -313,16 +315,27 @@ def render_sheet_dump(sheet: SheetExtraction, workbook: str) -> str:
         return "\n".join(lines)
     rows = [key[0] for key in grid]
     cols = [key[1] for key in grid]
-    first_row, last_row, first_col, last_col = min(rows), max(rows), min(cols), max(cols)
+    sheet_first, sheet_last = min(rows), max(rows)
+    first_row = sheet_first if from_row is None else max(from_row, sheet_first)
+    last_row = sheet_last if to_row is None else min(to_row, sheet_last)
+    if first_row > last_row:
+        return "\n".join([*lines, "Empty window: no populated cells.", ""])
+    first_col, last_col = min(cols), max(cols)
     extent = f"{get_column_letter(first_col)}{first_row}:{get_column_letter(last_col)}{last_row}"
-    formulas = sum(1 for cell in grid.values() if cell.formula is not None)
+    shown = [cell for (row, _), cell in grid.items() if first_row <= row <= last_row]
+    formulas = sum(1 for cell in shown if cell.formula is not None)
     lines += [
         f"- source: `{workbook}` sheet `{sheet.sheet_name}` (state: {sheet.state})",
+        (
+            f"- window: rows {first_row}-{last_row} of the sheet's rows {sheet_first}-{sheet_last}"
+            if (from_row, to_row) != (None, None)
+            else "- window: the whole sheet"
+        ),
         (
             f"- extent: `{extent}`  rows {first_row}-{last_row} ({last_row - first_row + 1})  "
             f"cols {_span_label(first_col, last_col)} ({first_col}-{last_col}, {last_col - first_col + 1})"
         ),
-        f"- populated cells: {len(grid)}  formula cells: {formulas}",
+        f"- populated cells: {len(shown)}  formula cells: {formulas}",
         "",
         "## GRID",
         "",
@@ -358,6 +371,16 @@ def _column_summaries(
     return types, formats
 
 
+def _blank_columns(
+    grid: dict[tuple[int, int], Cell], first_row: int, last_row: int, first_col: int, last_col: int
+) -> list[int]:
+    return [
+        col
+        for col in range(first_col, last_col + 1)
+        if not any((row, col) in grid for row in range(first_row, last_row + 1))
+    ]
+
+
 def _dump_metadata(
     sheet: SheetExtraction,
     grid: dict[tuple[int, int], Cell],
@@ -377,6 +400,8 @@ def _dump_metadata(
     lines.append(f"- TYPES: {spans or '-'}")
     spans = "  ".join(f"{_span_label(a, b)} {k}" for a, b, k in _column_runs(formats))
     lines.append(f"- FORMATS: {spans or '-'}")
+    blanks = _blank_columns(grid, first_row, last_row, first_col, last_col)
+    lines.append(f"- BLANK COLS: {', '.join(get_column_letter(col) for col in blanks) or '-'}")
     meta = sheet.metadata
     lines.extend(
         [

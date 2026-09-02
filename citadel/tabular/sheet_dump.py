@@ -18,6 +18,7 @@ MIN_FENCES = 2
 META_LINE = re.compile(r"^- ([A-Z][A-Z ]*):\s*(.*)$")
 EXTENT = re.compile(r"^- extent: `([A-Z]+)(\d+):([A-Z]+)(\d+)`")
 SOURCE = re.compile(r"^- source: `(.+?)` sheet `(.+?)`")
+WINDOW = re.compile(r"^- window: rows (\d+)-(\d+) of the sheet's rows (\d+)-(\d+)")
 CELL_REF = re.compile(r"^\$?([A-Z]{1,3})\$?(\d+)$")
 NAME_ENTRY = re.compile(r"^(\[[^\]]+\])?([^=]+)=(.*)$")
 
@@ -45,6 +46,7 @@ class SheetMeta(BaseModel):
     comments: dict[str, str] = Field(default_factory=dict)
     hyperlinks: dict[str, str] = Field(default_factory=dict)
     bold: str = ""
+    blank_cols: list[str] = Field(default_factory=list)
 
 
 class SheetDump(BaseModel):
@@ -54,13 +56,21 @@ class SheetDump(BaseModel):
     last_row: int
     first_col: int
     last_col: int
+    sheet_first_row: int = 0
+    sheet_last_row: int = 0
     columns: list[int] = Field(default_factory=list)
     cells: dict[int, dict[int, Cell]] = Field(default_factory=dict)
     lines: dict[int, str] = Field(default_factory=dict)
     meta: SheetMeta = Field(default_factory=SheetMeta)
 
     @property
+    def windowed(self) -> bool:
+        return (self.sheet_first_row, self.sheet_last_row) != (self.first_row, self.last_row)
+
+    @property
     def extent(self) -> str:
+        if not self.first_col or not self.last_col:
+            return f"rows {self.first_row}-{self.last_row}"
         return f"{get_column_letter(self.first_col)}{self.first_row}:{get_column_letter(self.last_col)}{self.last_row}"
 
     def cell(self, row: int, column: int) -> Cell | None:
@@ -139,6 +149,10 @@ def parse_list_objects(payload: str) -> list[str]:
     return re.findall(r"'([^']+)'", payload)
 
 
+def parse_cols(payload: str) -> list[str]:
+    return re.findall(r"[A-Z]+", payload)
+
+
 RAW_FIELDS = {"TYPES": "types", "FORMATS": "formats", "BOLD": "bold"}
 SCALAR_FIELDS = {"FREEZE": "freeze", "AUTOFILTER": "autofilter"}
 PARSED_FIELDS = {
@@ -149,6 +163,7 @@ PARSED_FIELDS = {
     "DEFINED NAMES": ("defined_names", parse_defined_names),
     "COMMENTS": ("comments", parse_pairs),
     "HYPERLINKS": ("hyperlinks", parse_pairs),
+    "BLANK COLS": ("blank_cols", parse_cols),
 }
 
 
@@ -178,11 +193,15 @@ def parse_meta(lines: list[str]) -> SheetMeta:
     return meta
 
 
-def parse_header(lines: list[str]) -> tuple[str, str, tuple[int, int, int, int]]:
+def parse_header(lines: list[str]) -> tuple[str, str, tuple[int, int, int, int], tuple[int, int]]:
     workbook = ""
     sheet = ""
     box = (0, 0, 0, 0)
+    sheet_rows = (0, 0)
     for line in lines:
+        window = WINDOW.match(line)
+        if window:
+            sheet_rows = (int(window.group(3)), int(window.group(4)))
         source = SOURCE.match(line)
         if source:
             workbook, sheet = source.group(1), source.group(2)
@@ -194,12 +213,12 @@ def parse_header(lines: list[str]) -> tuple[str, str, tuple[int, int, int, int]]
                 column_index_from_string(extent.group(1)),
                 column_index_from_string(extent.group(3)),
             )
-    return workbook, sheet, box
+    return workbook, sheet, box, sheet_rows
 
 
 def parse_dump(text: str) -> SheetDump:
     lines = text.splitlines()
-    workbook, sheet, box = parse_header(lines)
+    workbook, sheet, box, sheet_rows = parse_header(lines)
     grid_start = next((i for i, line in enumerate(lines) if line.strip() == GRID_HEADING), -1)
     if not sheet:
         logger.warning("dump has no source header, sheet identity unknown")
@@ -211,6 +230,8 @@ def parse_dump(text: str) -> SheetDump:
         last_row=box[1],
         first_col=box[2],
         last_col=box[3],
+        sheet_first_row=sheet_rows[0] or box[0],
+        sheet_last_row=sheet_rows[1] or box[1],
         meta=parse_meta(lines[meta_start:]),
     )
     if grid_start < 0:
