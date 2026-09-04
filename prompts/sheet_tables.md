@@ -2,7 +2,8 @@
 
 You are shown the contents of one worksheet from an excel workbook: every cell that holds something, with the
 formula behind it where it has one, followed by the worksheet's merged ranges, defined names, number formats,
-hidden rows and bold cells. The opening lines say which of the worksheet's rows are shown.
+hidden rows, bold cells, and how many cells each row holds. The opening lines say which of the worksheet's
+rows are shown.
 
 Report the tables that are really there. For each one give the rows and columns it occupies, the rows that name
 its columns, the rows holding data records, the rows between those that are not data records, its title if it
@@ -43,7 +44,7 @@ You can ask for measurements over any range instead of guessing. To ask, end you
 labelled `tools` holding a JSON list. You will be given the results and can then continue or ask again.
 
 - `row_occupancy` — how many cells each row holds. `from_row`, `to_row`, `first_col`, `last_col`.
-  Use it when you cannot tell a section label from a record: a label row holds one cell, a record holds many.
+  Use it to compare a row against the rows around it.
 - `column_occupancy` — how many cells each column holds, and which are empty. Same arguments.
   Use it to find a blank column separating two groups. A column empty across a table's rows may still hold
   something elsewhere on the worksheet, so ask about the rows you care about.
@@ -69,8 +70,15 @@ When you have no more to ask, end your answer with a fenced JSON block giving ev
 ```
 
 Every row of a region belongs to exactly one span. Every populated cell belongs to a region or a block. Roles
-are `header`, `body`, `totals`, `band_label`, `blank`. Block kinds are `title`, `caption`, `provenance`,
-`note`, `key_value`, `legend`, `prose`.
+are:
+
+- `header` — the cells name the columns.
+- `body` — the row is a record.
+- `totals` — the row aggregates records above it.
+- `band_label` — the row carries a section label rather than a record.
+- `blank` — the row holds nothing.
+
+Block kinds are `title`, `caption`, `provenance`, `note`, `key_value`, `legend`, `prose`.
 
 ## Output
 
