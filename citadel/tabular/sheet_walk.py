@@ -7,17 +7,26 @@ from pydantic import BaseModel, Field
 
 from citadel.llm import call_structured
 from citadel.tabular.sheet_dump import SheetDump
-from citadel.tabular.sheet_structure import MetadataItem, MetadataKind, Region, RowRole, RowSpan, SheetStructure
+from citadel.tabular.sheet_structure import (
+    MetadataItem,
+    MetadataKind,
+    Orientation,
+    Region,
+    RowRole,
+    RowSpan,
+    SheetStructure,
+)
 
 logger = logging.getLogger(__name__)
 
 CONTEXT_BEFORE = 8
 SCAN_ROWS = 25
 CONTEXT_AFTER = 12
-WALK_MAX_TOKENS = 1024
+WALK_MAX_TOKENS = 4096
 MAX_SWEEPS = 4
 SCAN_PROMPT = Path(__file__).resolve().parents[2] / "prompts" / "sheet_scan.md"
 ROW_PROMPT = Path(__file__).resolve().parents[2] / "prompts" / "sheet_row.md"
+REVIEW_PROMPT = Path(__file__).resolve().parents[2] / "prompts" / "sheet_review.md"
 
 
 @lru_cache(maxsize=1)
@@ -28,6 +37,11 @@ def scan_prompt() -> str:
 @lru_cache(maxsize=1)
 def row_prompt() -> str:
     return ROW_PROMPT.read_text(encoding="utf-8")
+
+
+@lru_cache(maxsize=1)
+def review_prompt() -> str:
+    return REVIEW_PROMPT.read_text(encoding="utf-8")
 
 
 class ScanBlock(BaseModel):
@@ -42,6 +56,7 @@ class ScanTable(BaseModel):
     header_rows: list[int] = Field(default_factory=list)
     first_col: int = 0
     last_col: int = 0
+    orientation: Orientation = Orientation.ROW_RECORDS
 
 
 class ScanVerdict(BaseModel):
@@ -60,6 +75,7 @@ class OpenTable(BaseModel):
     last_row: int
     first_col: int
     last_col: int
+    orientation: Orientation = Orientation.ROW_RECORDS
     header_rows: list[int] = Field(default_factory=list)
     shapes: dict[str, RowRole] = Field(default_factory=dict)
     roles: dict[int, RowRole] = Field(default_factory=dict)
@@ -207,9 +223,56 @@ async def ask_row(dump: SheetDump, row: int, table: OpenTable) -> RowVerdict:
     return RowVerdict.model_validate(raw)
 
 
-async def sweep(dump: SheetDump, result: WalkResult, rows: list[int], max_calls: int) -> None:
-    tables: list[OpenTable] = []
-    pending = list(rows)
+class ReviewVerdict(BaseModel):
+    tables: list[ScanTable] = Field(default_factory=list)
+
+
+async def review_blocks(dump: SheetDump, result: WalkResult) -> ReviewVerdict:
+    listing = "\n".join(
+        f"rows {b.first_row}-{b.last_row} {b.kind.value}: {b.summary}"
+        for b in sorted(result.blocks, key=lambda x: x.first_row)
+    )
+    rows = sorted({r for b in result.blocks for r in range(b.first_row, b.last_row + 1) if r in dump.lines})
+    prompt = "\n\n".join(
+        [
+            review_prompt(),
+            f"## Worksheet {dump.workbook} / {dump.sheet}",
+            "## Rows held by no table\n\n" + "\n".join(dump.lines[r] for r in rows),
+            "## How they were described\n\n" + listing,
+            "Give every table among these rows that was described as something else.",
+        ]
+    )
+    raw = await call_structured(prompt, ReviewVerdict.model_json_schema(), max_tokens=WALK_MAX_TOKENS)
+    return ReviewVerdict.model_validate(raw)
+
+
+def open_from(scan: ScanTable, dump: SheetDump, settled: list[OpenTable] | None = None) -> OpenTable:
+    headers = [h for h in scan.header_rows if h >= scan.first_row] or [scan.first_row]
+    table = OpenTable(
+        first_row=scan.first_row,
+        last_row=max(headers),
+        first_col=scan.first_col or dump.first_col,
+        last_col=scan.last_col or dump.last_col,
+        header_rows=headers,
+        orientation=scan.orientation,
+    )
+    for header in headers:
+        table.roles[header] = RowRole.HEADER
+    for known in settled or []:
+        if table.first_col <= known.last_col and known.first_col <= table.last_col:
+            table.shapes.update(known.shapes)
+    return table
+
+
+async def sweep(
+    dump: SheetDump,
+    result: WalkResult,
+    rows: list[int],
+    max_calls: int,
+    seed: list[ScanTable] | None = None,
+) -> None:
+    tables: list[OpenTable] = [open_from(scan, dump, result.tables) for scan in seed or []]
+    pending = [r for r in rows if not tables or r > max(t.last_row for t in tables)]
     while pending and result.calls < max_calls:
         row = pending.pop(0)
         if not tables:
@@ -224,18 +287,7 @@ async def sweep(dump: SheetDump, result: WalkResult, rows: list[int], max_calls:
             if not found:
                 pending = [r for r in pending if r > window[-1]]
                 continue
-            for start in found:
-                headers = [h for h in start.header_rows if h >= start.first_row] or [start.first_row]
-                table = OpenTable(
-                    first_row=start.first_row,
-                    last_row=max(headers),
-                    first_col=start.first_col or dump.first_col,
-                    last_col=start.last_col or dump.last_col,
-                    header_rows=headers,
-                )
-                for header in headers:
-                    table.roles[header] = RowRole.HEADER
-                tables.append(table)
+            tables.extend(open_from(start, dump, result.tables) for start in found)
             top = max(t.last_row for t in tables)
             pending = [r for r in pending if r > top]
             continue
@@ -290,6 +342,23 @@ async def walk_sheet(dump: SheetDump, max_calls: int = 400) -> WalkResult:
         )
         if len(rows) >= before:
             break
+    if result.blocks and result.calls < max_calls:
+        verdict = await review_blocks(dump, result)
+        result.calls += 1
+        promoted = [t for t in verdict.tables if t.first_row in dump.cells]
+        if promoted:
+            claimed = {
+                row
+                for t in promoted
+                for row in range(t.first_row, dump.last_row + 1)
+                if row in dump.cells
+            }
+            result.blocks = [b for b in result.blocks if b.first_row not in claimed]
+            logger.info(
+                "%s/%s review promoted %d block(s) to tables", dump.workbook, dump.sheet, len(promoted)
+            )
+            await sweep(dump, result, sorted(claimed), max_calls, seed=promoted)
+            result.tables = merge_tables(result.tables)
     held = claimed_cells(result, dump)
     result.unclaimed = [
         f"{get_column_letter(col)}{row}"
@@ -330,6 +399,7 @@ def walk_structure(dump: SheetDump, result: WalkResult) -> SheetStructure:
             first_col=table.first_col,
             last_col=table.last_col,
             row_spans=role_spans(table),
+            orientation=table.orientation,
         )
         for index, table in enumerate(sorted(result.tables, key=lambda t: (t.first_row, t.first_col)))
         if table.roles

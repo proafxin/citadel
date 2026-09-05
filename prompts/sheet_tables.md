@@ -35,8 +35,7 @@ rows.
 A blank column inside a table is not a boundary when one header names the columns on both sides of it. A blank
 column is a boundary when each side has its own title or header.
 
-A region occupying a single populated column is not a table. Columns are the worksheet's own columns;
-separators inside a cell's text do not make one.
+Columns are the worksheet's own columns; separators inside a cell's text do not make one.
 
 ## Asking for facts
 
@@ -78,7 +77,7 @@ are:
 - `band_label` — the row carries a section label rather than a record.
 - `blank` — the row holds nothing.
 
-Block kinds are `title`, `caption`, `provenance`, `note`, `key_value`, `legend`, `prose`.
+Block kinds are `title`, `caption`, `provenance`, `note`, `key_value`, `legend` and `prose`.
 
 ## Output
 
@@ -105,5 +104,13 @@ columns, or null when they do not.
 Where a table is cut off by the rows shown, report it as it appears here. Do not say whether it continues
 beyond them — that is known from the rows shown and is not yours to decide.
 
-`blocks` carries every region that is not a table, each with its extent and a one-line summary. Titles,
-provenance, notes, legends and form fields belong here. A worksheet with no tables still has blocks.
+`blocks` carries the rows that belong to no table, each with its extent and a one-line summary. A worksheet
+with no tables still has blocks. A block's kind is one of:
+
+- `title` — names what the worksheet or a part of it is.
+- `caption` — names a table or figure beside it.
+- `provenance` — says where the contents came from, or when.
+- `note` — a remark about the contents.
+- `key_value` — a field and its value, as a form is filled in.
+- `legend` — says what a mark or abbreviation used elsewhere means.
+- `prose` — sentences meant to be read.

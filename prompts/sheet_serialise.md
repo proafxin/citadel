@@ -29,6 +29,14 @@ column the labels sit in when they sit in one of the region's own columns.
 `orientation` is one of `row_records`, `cross_tab`, `repeated_groups` or `matrix`. `group_name` names what a
 region's column groups are instances of, or is null when its columns are not grouped.
 
-`metadata` carries everything that is not a region: titles, captions, provenance, notes, legends, form fields
-and prose. Each entry gives its own rows and columns, a one-line summary, and `region_ids` naming the regions
-it belongs to. Use an empty list when it belongs to none. A worksheet with no regions still has metadata.
+`metadata` carries the rows that belong to no region. Each entry gives its own rows and columns, a one-line
+summary, and `region_ids` naming the regions it belongs to. Use an empty list when it belongs to none. A
+worksheet with no regions still has metadata. Its `kind` is one of:
+
+- `title` — names what the worksheet or a part of it is.
+- `caption` — names a table or figure beside it.
+- `provenance` — says where the contents came from, or when.
+- `note` — a remark about the contents.
+- `key_value` — a field and its value, as a form is filled in.
+- `legend` — says what a mark or abbreviation used elsewhere means.
+- `prose` — sentences meant to be read.
