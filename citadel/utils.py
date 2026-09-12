@@ -27,8 +27,6 @@ DOC_HTML_EXTS = {"docx", "odt"}
 MARKDOWN_EXTS = {"md", "markdown"}
 HTML_EXTS = {"html", "htm", "xhtml"}
 IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"}
-SPREADSHEET_NATIVE_EXTS = {"xlsx", "xlsm"}
-SPREADSHEET_CONVERT_EXTS = {"xls", "xlsb", "ods", "fods"}
 XML_EXTS = {"xml"}
 SVG_EXTS = {"svg"}
 
@@ -40,8 +38,6 @@ _KNOWN_EXTS = (
     | MARKDOWN_EXTS
     | HTML_EXTS
     | IMAGE_EXTS
-    | SPREADSHEET_NATIVE_EXTS
-    | SPREADSHEET_CONVERT_EXTS
     | XML_EXTS
     | SVG_EXTS
     | {"csv", "tsv", "tab", "json", "pdf", "epub"}
@@ -121,14 +117,6 @@ def _pandoc_to_html(data: bytes, src_ext: str) -> tuple[bytes, dict[str, bytes]]
         return html_bytes, media
 
 
-def _spreadsheet_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes, dict[str, bytes]] | None:
-    if ext in SPREADSHEET_NATIVE_EXTS:
-        return "xlsx", data, {}
-    if ext in SPREADSHEET_CONVERT_EXTS:
-        return "xlsx", _soffice_convert(data, ext, "xlsx", profile_dir), {}
-    return None
-
-
 def _xml_kind(data: bytes, ext: str) -> tuple[str, bytes, dict[str, bytes]] | None:
     if ext not in XML_EXTS:
         return None
@@ -164,9 +152,6 @@ def _presentation_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, by
 
 
 def _converted_kind(data: bytes, ext: str, profile_dir: str) -> tuple[str, bytes, dict[str, bytes]] | None:
-    spreadsheet = _spreadsheet_kind(data, ext, profile_dir)
-    if spreadsheet is not None:
-        return spreadsheet
     xml = _xml_kind(data, ext)
     if xml is not None:
         return xml

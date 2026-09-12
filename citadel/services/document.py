@@ -22,7 +22,6 @@ from citadel.models.status import DocumentStatus, LibraryStatus
 from citadel.models.table import Table, TableRow
 from citadel.schemas.content import Block
 from citadel.schemas.tree import ContentBlock
-from citadel.services.excel import SheetItem, SheetText
 from citadel.services.grid import classify_grid
 from citadel.services.tabular import (
     grid_from_html,
@@ -387,27 +386,9 @@ async def save_document_tree(
         await notify_embed(library_id)
 
 
-def _sheet_text_search(library_name: str, filename: str, sheet_name: str, text: str) -> str:
-    return build_table_search_text(library_name, filename, sheet_name, None, None, [], [text])
-
-
-def _add_sheet_text(
-    session: AsyncSession, item: SheetText, doc_id: int, sheet_no: int, ordinal: int, search: str
+async def save_sheet_tables(
+    doc_id: int, sheet_no: int, sheet_name: str, items: list[tuple[int, MaterializedTable]]
 ) -> None:
-    session.add(
-        ContentNode(
-            document_id=doc_id,
-            sheet_no=sheet_no,
-            ordinal=ordinal,
-            type="text",
-            heading=None,
-            raw={"text": item.text},
-            search_text=search,
-        )
-    )
-
-
-async def save_sheet_tables(doc_id: int, sheet_no: int, sheet_name: str, items: list[tuple[int, SheetItem]]) -> None:
     async with get_sessionmaker()() as session, session.begin():
         existing = await session.scalar(
             select(ContentNode.id).where(ContentNode.document_id == doc_id, ContentNode.sheet_no == sheet_no).limit(1)
@@ -417,10 +398,6 @@ async def save_sheet_tables(doc_id: int, sheet_no: int, sheet_name: str, items: 
         document = await session.get_one(Document, doc_id)
         library = await session.get_one(Library, document.library_id)
         for ordinal, item in items:
-            if isinstance(item, SheetText):
-                search = _sheet_text_search(library.name, document.filename, sheet_name, item.text)
-                _add_sheet_text(session, item, doc_id, sheet_no, ordinal, search)
-                continue
             table = item
             node_search = build_table_search_text(
                 library.name,

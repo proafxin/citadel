@@ -8,7 +8,7 @@ TABLE — rows and columns of related data, however it's laid out on the page: e
 FORM — a labeled field and its value, or a small group of them describing one thing (a form, a receipt, a signature block, a set of named values), even when written as plain label-then-value lines rather than a ruled grid.
 EQUATION — a mathematical formula or expression, inline or standalone.
 CODE — source code or an algorithm listing.
-VISUAL — an image, photo, logo, chart, diagram, barcode, QR code, seal, stamp, watermark, signature mark, or any other graphical element, whether or not it carries information.
+VISUAL — an image, photo, logo, chart, diagram, barcode, QR code, seal, stamp, watermark, signature mark, or any other graphical element, whether or not it carries information. Transcribe any text printed within it.
 PARATEXT — a running header, running footer, or page number: content that lives in the page's margins rather than its actual body content.
 EXTRA — anything that does not clearly fit any category above. Use this rather than forcing a poor fit into one of the others; never omit content because it doesn't fit.
 
@@ -20,4 +20,6 @@ For a table or form, write the literal rows and labels in the same shape you see
 
 An equation with a chain of several equals or inequality signs has a fixed, finite number of steps on the page. Copy each step once, in order, exactly as printed, and stop at the last step actually printed. Never repeat a step you already copied.
 
-Do not invent, infer, or omit any value that is not literally visible on the page. Do not add any note of your own about the transcription itself, such as remarking that the page or document has ended, or that content has been fully covered. Only ever write what is printed on the page.
+Do not invent, infer, or omit any value that is not literally visible on the page. Only ever write what is printed on the page, and add no note of your own about the transcription.
+
+The page has a fixed amount of content. Transcribe it once, top to bottom. When you have written the last piece of content on the page, end your response immediately — do not return to the top of the page, and do not repeat anything already written.

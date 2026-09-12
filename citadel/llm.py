@@ -37,7 +37,7 @@ SAMPLING = {
 STRUCTURED_SAMPLING = {**SAMPLING, "temperature": 0.0}
 MEASURE_SAMPLING = {**SAMPLING, "temperature": 0.0, "presence_penalty": 0.0}
 NOPENALTY_SAMPLING = {**SAMPLING, "presence_penalty": 0.0}
-MODEL_CTX = 50000
+MODEL_CTX = 32768
 OCR_CTX = 16384
 STRUCT_MAX_TOKENS = 4096
 STRUCTURE_MAX_TOKENS = 2048
@@ -207,10 +207,9 @@ async def call_page_ocr(image_key: str, max_tokens: int = PAGE_OCR_MAX_TOKENS) -
                 ],
             }
         ],
-        **STRUCTURED_SAMPLING,
+        "temperature": 0,
         "max_tokens": max_tokens,
         "chat_template_kwargs": {"enable_thinking": False},
-        "reasoning_effort": "none",
         "stream": True,
     }
     started = time.time()

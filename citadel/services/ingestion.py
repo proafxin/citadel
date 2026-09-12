@@ -47,13 +47,6 @@ from citadel.services.document import (
     save_sheet_tables,
     table_block_indices,
 )
-from citadel.services.excel import (
-    SheetExtraction,
-    SheetItem,
-    SheetText,
-    load_all_sheets,
-    sheet_names,
-)
 from citadel.services.html import parse_html
 from citadel.services.library import library_exists
 from citadel.services.pdf import MAX_IMAGE_SIDE, count_pdf_pages, downscale, render_pdf_page, to_png_bytes
@@ -65,7 +58,6 @@ from citadel.services.tabular import (
     structure_csv_tables,
 )
 from citadel.tabular.materialize import MaterializedTable, materialize
-from citadel.tabular.sheet_materialize import structure_sheet
 from citadel.tabular.structure import structure_candidate
 from citadel.utils import normalize_file
 from config import CPU_EIGHTH, CPU_THIRD
@@ -374,22 +366,10 @@ async def handle_paginate(fields: dict[str, str]) -> None:
         await redis.set(page_image_key(doc_id, 0), image_bytes, ex=DOC_TTL)
         await redis.xadd(STREAM_PAGES, {"doc_id": doc_id, "page_idx": 0})
         return
-    if kind in {"xlsx", "csv", "tsv", "json"}:
+    if kind in {"csv", "tsv", "json"}:
         await redis.hset(f"doc:{doc_id}", "mode", "tabular")
-        if kind == "xlsx":
-            names = await asyncio.to_thread(sheet_names, await asyncio.to_thread(blob_path(doc_id).read_bytes))
-            if not names:
-                await redis.hset(f"doc:{doc_id}", "page_count", 0)
-                await redis.xadd(STREAM_MERGE, {"doc_id": doc_id})
-                return
-            await redis.hset(f"doc:{doc_id}", "page_count", len(names))
-            for sheet_no in range(1, len(names) + 1):
-                await redis.xadd(
-                    STREAM_TABLE_STRUCTURE, {"doc_id": doc_id, "unit": "sheet", "kind": kind, "sheet_no": sheet_no}
-                )
-        else:
-            await redis.hset(f"doc:{doc_id}", "page_count", 1)
-            await redis.xadd(STREAM_TABLE_STRUCTURE, {"doc_id": doc_id, "unit": "sheet", "kind": kind, "sheet_no": 0})
+        await redis.hset(f"doc:{doc_id}", "page_count", 1)
+        await redis.xadd(STREAM_TABLE_STRUCTURE, {"doc_id": doc_id, "unit": "sheet", "kind": kind, "sheet_no": 0})
         return
     dpi = RENDER_DPI
     count, _, _ = await _run_pdfium(count_pdf_pages, str(blob_path(doc_id)), job_timeout=RENDER_TIMEOUT)
@@ -495,21 +475,6 @@ async def record_sheet(doc_id: str, sheet_no: int) -> None:
     )
 
 
-SHEETS_CACHE_MAX = 4
-_SHEETS_CACHE: LRUCache[str, list[SheetExtraction]] = LRUCache(maxsize=SHEETS_CACHE_MAX)
-_SHEETS_LOCK = asyncio.Lock()
-
-
-async def _get_sheet(doc_id: str, sheet_no: int) -> SheetExtraction:
-    async with _SHEETS_LOCK:
-        sheets = _SHEETS_CACHE.get(doc_id)
-        if sheets is None:
-            data = await asyncio.to_thread(blob_path(doc_id).read_bytes)
-            sheets = await asyncio.to_thread(load_all_sheets, data)
-            _SHEETS_CACHE[doc_id] = sheets
-    return sheets[sheet_no - 1]
-
-
 async def handle_tabular(fields: dict[str, str]) -> None:
     doc_id = fields["doc_id"]
     kind = fields["kind"]
@@ -523,25 +488,14 @@ async def handle_tabular(fields: dict[str, str]) -> None:
             msg = f"source blob missing for in-flight doc {doc_id}"
             raise FileNotFoundError(msg)
         return
-    if kind == "xlsx":
-        sheet = await _get_sheet(doc_id, sheet_no)
-        workbook = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode() or f"doc{doc_id}"
-        items = await structure_sheet(sheet, workbook)
-        logger.info("doc %s sheet %d (%s) produced %d items", doc_id, sheet_no, sheet.sheet_name, len(items))
-        image_items = await resolve_sheet_images(doc_id, f"sheet{sheet_no}", sheet_no, sheet.images)
-        if image_items:
-            start = (items[-1][0] + 1) if items else 1
-            items += list(enumerate(image_items, start=start))
-        sheet_name = sheet.sheet_name
+    data = await asyncio.to_thread(path.read_bytes)
+    filename = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
+    if kind == "json":
+        items = await asyncio.to_thread(extract_json_tables, data, filename.rsplit(".", 1)[0] or "root")
     else:
-        data = await asyncio.to_thread(path.read_bytes)
-        filename = (await redis.hget(f"doc:{doc_id}", "filename") or b"").decode()
-        if kind == "json":
-            items = await asyncio.to_thread(extract_json_tables, data, filename.rsplit(".", 1)[0] or "root")
-        else:
-            separator = "\t" if kind == "tsv" else ","
-            items = list(enumerate(await structure_csv_tables(data, separator), start=1))
-        sheet_name = filename
+        separator = "\t" if kind == "tsv" else ","
+        items = list(enumerate(await structure_csv_tables(data, separator), start=1))
+    sheet_name = filename
     await save_sheet_tables(int(doc_id), sheet_no, sheet_name, items)
     await record_sheet(doc_id, sheet_no)
 
@@ -700,6 +654,7 @@ def _is_blank_image(image_bytes: bytes) -> bool:
 
 
 _WRAP_FENCE = re.compile(r"^```[a-zA-Z]*\s*\n(.*)\n```\s*$", re.DOTALL)
+_THINK_TAG = re.compile(r"</?think>")
 
 _META_LINE_PATTERNS = (
     re.compile(r"^here is the (content|text|transcription)\b", re.IGNORECASE),
@@ -709,6 +664,10 @@ _META_LINE_PATTERNS = (
     re.compile(r"^there is no (visible )?(text|content)\b", re.IGNORECASE),
     re.compile(r"^therefore,.*(cannot|no markdown|no table)\b", re.IGNORECASE),
 )
+
+
+def _strip_think_tags(markdown: str) -> str:
+    return _THINK_TAG.sub("", markdown)
 
 
 def _strip_wrapping_fence(markdown: str) -> str:
@@ -732,6 +691,7 @@ async def _ocr_blocks(image_key: str) -> tuple[list[Block], float, float]:
     if image_bytes is not None and await asyncio.to_thread(_is_blank_image, image_bytes):
         return [], 0.0, 0.0
     markdown, wait_s, gpu_s = await call_page_ocr(image_key)
+    markdown = _strip_think_tags(markdown)
     markdown = _strip_wrapping_fence(markdown)
     markdown = _strip_meta_commentary(markdown)
     return blocks_from_page_markdown(markdown), wait_s, gpu_s
@@ -782,21 +742,6 @@ async def resolve_embedded_images(doc_id: str, unit: str, blocks: list[Block], i
         else:
             out.append(block)
     return out
-
-
-def _sheet_items(sheet_no: int, blocks: list[Block]) -> list[SheetItem]:
-    items: list[SheetItem] = []
-    for block in blocks:
-        if block.type == "table" and block.grid:
-            items.append(materialize(block.grid, single_table_structure(block.grid, header_rows=1)))
-        elif block.text:
-            items.append(SheetText(sheet_no=sheet_no, text=block.text))
-    return items
-
-
-async def resolve_sheet_images(doc_id: str, unit: str, sheet_no: int, images: list[bytes]) -> list[SheetItem]:
-    resolved = await _resolve_unique_images(doc_id, unit, dict(enumerate(images)))
-    return [item for index in range(len(images)) for item in _sheet_items(sheet_no, resolved.get(index, []))]
 
 
 async def handle_ocr(fields: dict[str, str]) -> None:
@@ -915,7 +860,6 @@ async def handle_merge(fields: dict[str, str]) -> None:
 
 async def cleanup(doc_id: str) -> None:
     redis = get_redis()
-    _SHEETS_CACHE.pop(doc_id, None)
     page_count = int(await redis.hget(f"doc:{doc_id}", "page_count") or 0)
     if page_count:
         await redis.delete(*(page_image_key(doc_id, page_idx) for page_idx in range(page_count)))

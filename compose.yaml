@@ -7,9 +7,13 @@ services:
     ipc: host
     command:
       - --model
-      - /models/Qwen3.8-27B-NVFP4-BUDGET.gguf
+      - /models/Qwen3.8-27B-UD-IQ3_XXS.gguf
       - --mmproj
       - /models/mmproj-Qwen3.8-27B-BF16.gguf
+      - --chat-template-file
+      - /models/chat_template.jinja
+      - --image-min-tokens
+      - "1024"
       - -ngl
       - "999"
       - --host
@@ -17,20 +21,22 @@ services:
       - --port
       - "8100"
       - --ctx-size
-      - "200000"
+      - "131072"
       - --parallel
       - "4"
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "2"
       - --metrics
       - --cache-type-k
-      - q8_0
+      - f16
       - --cache-type-v
-      - q8_0
+      - f16
       - --flash-attn
       - "on"
       - --alias
       - lm
-      - --reasoning
-      - "off"
     ports:
       - "8100:8100"
     healthcheck:
@@ -69,7 +75,7 @@ services:
   #     - --pooler-config
   #     - '{"task": "embed", "pooling_type": "LAST"}'
   #     - --gpu-memory-utilization
-  #     - "0.11"
+  #     - "0.24"
   #     - --max-num-seqs
   #     - "256"
   #     - --max-model-len
@@ -134,3 +140,4 @@ services:
 volumes:
   postgres-data:
   embedding-vllm-cache:
+  lm-vllm-cache:
