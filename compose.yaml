@@ -1,13 +1,14 @@
 
 services:
   lm:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    image: inmoloc:cuda
+    pull_policy: never
     container_name: lm
     restart: always
     ipc: host
     command:
       - --model
-      - /models/Qwen3.8-27B-UD-IQ3_XXS.gguf
+      - /models/Qwen3.8-27B-AP-IQ4_XS.gguf
       - --mmproj
       - /models/mmproj-Qwen3.8-27B-BF16.gguf
       - --chat-template-file
@@ -23,16 +24,22 @@ services:
       - --ctx-size
       - "131072"
       - --parallel
-      - "4"
+      - "64"
+      - --vram-budget
+      - 22G
+      - --rs-rollback
+      - replay
+      - --cache-ram
+      - "0"
       - --spec-type
       - draft-mtp
       - --spec-draft-n-max
       - "2"
       - --metrics
       - --cache-type-k
-      - f16
+      - q8_0
       - --cache-type-v
-      - f16
+      - q8_0
       - --flash-attn
       - "on"
       - --alias

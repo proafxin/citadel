@@ -6,7 +6,7 @@ from redis.commands.core import AsyncScript
 
 from citadel.bus import get_redis
 
-LM_PARALLEL = 4
+LM_PARALLEL = 16
 LM_BUFFER = 1
 
 OCR_CONCURRENCY = LM_PARALLEL
